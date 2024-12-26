@@ -4,7 +4,7 @@ use crate::primary::Round;
 use config::Committee;
 use crypto::Hash as _;
 use crypto::{Digest, PublicKey};
-#[cfg(feature = "benchmark")]
+// #[cfg(feature = "benchmark")]
 use log::info;
 use log::{debug, warn};
 use std::cmp::Ordering;
@@ -164,7 +164,7 @@ impl Proposer {
         )
         .await;
 
-        // debug!("Created {:?}", header.id);
+        debug!("Created {:?}", header.id);
 
         #[cfg(feature = "benchmark")]
         {
@@ -230,7 +230,8 @@ impl Proposer {
             // (i) the timer expired (we timed out on the leader or gave up gather votes for the leader),
             // (ii) we have enough digests (minimum header size) and we are on the happy path (we can vote for
             // the leader or the leader has enough votes to enable a commit).
-            let enough_parents = !self.last_parents.is_empty();
+            // let enough_parents = !self.last_parents.is_empty();
+            let enough_parents = self.last_parents.len() as u32 >= self.committee.quorum_threshold();
             let timeout_cert_gathered = self.last_timeout_cert.round == self.round;
             let is_next_leader = self.committee.leader((self.round + 1) as usize) == self.name;
             let no_vote_cert_gathered = self.last_no_vote_cert.round == self.round;
@@ -243,21 +244,21 @@ impl Proposer {
                 self.make_timeout_msg().await;
                 timeout_sent = true;
             }
-
-            if ((timer_expired
-                && timeout_cert_gathered
-                && (!is_next_leader || no_vote_cert_gathered))
-                || (enough_digests && advance))
-                && enough_parents
+            // QY: happy case
+            // if ((timer_expired
+            //     && timeout_cert_gathered
+            //     && (!is_next_leader || no_vote_cert_gathered))
+            //     || (enough_digests && advance))
+            //     && enough_parents
+            if enough_digests && advance && enough_parents
             {
                 if timer_expired && self.last_leader.is_none() && !is_next_leader {
                     self.make_no_vote_msg().await;
                 }
-
+                info!("enough_parents: {:?}", self.last_parents.len());
                 // Advance to the next round.
                 self.round += 1;
                 debug!("Dag moved to round {}", self.round);
-
                 // Make a new header.
                 self.make_header().await;
                 self.payload_size = 0;

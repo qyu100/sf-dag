@@ -89,7 +89,8 @@ pub struct Core {
     header_aggregators: HashMap<Round, Box<HeadersAggregator>>,
     echo_headers: HashMap<(Round, Digest), HashSet<PublicKey>>,
     ready_headers: HashMap<(Round, Digest), HashSet<PublicKey>>,
-    ready_header_sent: HashMap<Digest, bool>,
+    ready_header_sent: HashMap<(Round, Digest), bool>,
+    consensus_header_sent: HashMap<(Round, Digest), bool>,
 }
 
 impl Core {
@@ -151,6 +152,7 @@ impl Core {
                 echo_headers: HashMap::new(),
                 ready_headers: HashMap::new(),
                 ready_header_sent: HashMap::new(),
+                consensus_header_sent: HashMap::new(),
             }
             .run()
             .await;
@@ -233,8 +235,6 @@ impl Core {
 
         if header.round != 1 {
             let parents = self.synchronizer.get_parents(header).await?;
-            info!("parents: {:?}", parents.clone());
-            info!("parents_header: {:?}", header.parents.clone());
             
             if parents.is_empty() {
                 debug!("Processing of {} suspended: missing parent(s)", header.id);
@@ -320,8 +320,8 @@ impl Core {
             .or_insert_with(HashSet::new)
             .insert(self.name.clone());
 
-        info!("self.name: {:?}", self.name);
-        info!("Initialized echo_headers from header: {:?}", self.echo_headers);
+        // info!("self.name: {:?}", self.name);
+        // info!("Initialized echo_headers from header: {:?}", self.echo_headers);
 
         // Log the broadcast for debugging purposes
         debug!("Broadcasted EchoHeader with hash {:?}", header.round);
@@ -342,13 +342,13 @@ impl Core {
             .or_insert_with(HashSet::new)
             .insert(author.clone());
 
-        info!("Initialized echo_headers: {:?}", self.echo_headers);
+        // info!("Initialized echo_headers: {:?}", self.echo_headers);
 
         // Check if we have received 2f+1 EchoHeaders for this round and digest
         if let Some(echo_key) = self.echo_headers.get(&(round, digest.clone())) {
             let weight: Stake = echo_key.iter().map(|author| self.committee.stake(author)).sum();
             if weight >= self.committee.quorum_threshold() {
-                if !self.ready_header_sent.contains_key(&echo_header.id) {
+                if !self.ready_header_sent.contains_key(&(echo_header.round, echo_header.id.clone())) {
                     // Send <Ready, H(m)> to primaries.
                     let addresses = self
                         .committee
@@ -371,10 +371,10 @@ impl Core {
                         .entry((round, echo_header.id.clone()))
                         .or_insert_with(HashSet::new)
                         .insert(self.name); 
-                    self.ready_header_sent.insert(echo_header.id.clone(), true);
+
+                    self.ready_header_sent.insert((echo_header.round.clone(), echo_header.id.clone()), true);
+                    info!("Broadcasted ReadyHeader with hash {:?}", echo_header.round);
                 };
-                // Log the broadcast for debugging purposes
-                debug!("Broadcasted ReadyHeader with hash {:?}", echo_header.round);
             }
         };
 
@@ -403,11 +403,11 @@ impl Core {
         
         if let Some(ready_key) = self.ready_headers.get(&(round, digest.clone())) {
             let weight: Stake = ready_key.iter().map(|author| self.committee.stake(author)).sum();
+            info!("weight: {:?}", weight);
                 // Check if we have received f+1 <Ready, H(m)> for this round and digest, send <Ready, H(m)>
             if weight >= self.committee.validity_threshold() 
                 && weight < self.committee.quorum_threshold() {
-                // info!("validity_weight: {:?}", weight);
-                if !self.ready_header_sent.contains_key(&ready_header.id) {
+                if !self.ready_header_sent.contains_key(&(ready_header.round, ready_header.id.clone())) {
                     // Send <Ready, H(m)> to primaries.
                     let addresses = self
                         .committee
@@ -425,40 +425,46 @@ impl Core {
                         .or_insert_with(Vec::new)
                         .extend(handlers);
 
-                    self.ready_header_sent.insert(ready_header.clone().id.clone(), true);
+                    self.ready_header_sent.insert((ready_header.round.clone(), ready_header.id.clone()), true);
                     info!("sent ready header!");
                 }
             }
 
             // Check if we have received 2f+1 <Ready, H(m)> 
             if weight >= self.committee.quorum_threshold() {   
-                while self.processing_headers.get(&ready_header.clone().id).is_none() {
+                while self.processing_headers.get(&ready_header.id).is_none() {
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
 
-                if let Some(header) = self.processing_headers.get(&ready_header.clone().id) {
+                if let Some(header) = self.processing_headers.get(&ready_header.id) {
                     // Send header to consensus
-                    // info!("quorum_weight: {:?}", weight);
-                    info!("Sending header {:?} to consensus", header.id);
-                    self.tx_consensus_header
-                        .send(header.clone())
-                        .await
-                        .expect("Failed to send header to consensus");
-                    // Check if we have enough headers to enter a new dag round and propose a header.
-                    // Check if we have received leader's Header
-                    if let Some(parents) = self
-                        .header_aggregators
-                        .entry(header.round)
-                        .or_insert_with(|| Box::new(HeadersAggregator::new()))
-                        .append(header.clone(), &self.committee)? {
-                        if self.committee.leader(header.round as usize).eq(&header.author) {
-                            // Send it to the `Proposer`.
-                            self.tx_proposer
-                            .send((parents.clone(), header.round))
+                    if !self.consensus_header_sent.contains_key(&(header.round, header.id.clone())) {
+                        info!("Sending header {:?} to consensus at round {:?}", header.id, header.round);
+                        self.tx_consensus_header
+                            .send(header.clone())
                             .await
-                            .expect("Failed to send header to proposer");
-                        }
-                        info!("parents: {:?} at round {:?}", parents.clone(), header.round);
+                            .expect("Failed to send header to consensus");
+                        self.consensus_header_sent.insert((header.round.clone(), header.id.clone()), true);
+                        // Check if we have enough headers to enter a new dag round and propose a header.
+                        // QY: in the happy case: check if we have received leader's Header
+                        if let Some(parents) = self
+                            .header_aggregators
+                            .entry(header.round)
+                            .or_insert_with(|| Box::new(HeadersAggregator::new()))
+                            .append(header.clone(), &self.committee)? {
+
+                            if let Some(parent) = parents.iter()
+                                .find(|parent| parent.author == self.committee.leader(header.round as usize)) {
+                                // Send it to the `Proposer`.
+                                self.tx_proposer
+                                    .send((parents.clone(), header.round))
+                                    .await
+                                    .expect("Failed to send header to proposer");
+                                // info!("sending parents: {:?} at round {:?}", parents.clone(), header.round);
+                                info!("parents_len: {:?}", parents.len());
+                                info!("sent parents to proposer at round {:?}!", header.round);
+                            }
+                    }
                     }
                 }
             }
@@ -622,9 +628,12 @@ impl Core {
                 let gc_round = round - self.gc_depth;
                 self.last_voted.retain(|k, _| k >= &gc_round);
                 self.processing_headers.retain(|_, h| &h.round >= &gc_round);
-                self.certificates_aggregators.retain(|k, _| k >= &gc_round);
                 self.cancel_handlers.retain(|k, _| k >= &gc_round);
                 self.gc_round = gc_round;
+                self.echo_headers.retain(|(k,_),_| k>= &gc_round);
+                self.ready_headers.retain(|(k,_),_| k>= &gc_round);
+                self.ready_header_sent.retain(|(k,_),_| k>= &gc_round);
+                self.consensus_header_sent.retain(|(k,_),_| k>= &gc_round);
             }
         }
     }

@@ -1,130 +1,212 @@
-[2024-12-25T16:32:50.961Z INFO  config] Header size set to 1 B
-[2024-12-25T16:32:50.961Z INFO  config] Max header delay set to 1000 ms
-[2024-12-25T16:32:50.961Z INFO  config] Garbage collection depth set to 50 rounds
-[2024-12-25T16:32:50.961Z INFO  config] Sync retry delay set to 10000 ms
-[2024-12-25T16:32:50.961Z INFO  config] Sync retry nodes set to 3 nodes
-[2024-12-25T16:32:50.961Z INFO  config] Batch size set to 50000 B
-[2024-12-25T16:32:50.961Z INFO  config] Max batch delay set to 200 ms
-[2024-12-25T16:32:50.961Z INFO  primary::primary] Primary LsJLzYDpN5X+aVKi listening to primary messages on 0.0.0.0:3019
-[2024-12-25T16:32:50.961Z INFO  primary::worker] Worker 0 listening to client transactions on 0.0.0.0:3022
-[2024-12-25T16:32:50.961Z INFO  primary::worker] Worker 0 successfully booted on 127.0.0.1
-[2024-12-25T16:32:50.962Z INFO  primary::primary] Primary LsJLzYDpN5X+aVKi successfully booted on 127.0.0.1
-[2024-12-25T16:32:50.962Z DEBUG network::receiver] Listening on 0.0.0.0:3019
-[2024-12-25T16:32:50.962Z DEBUG network::receiver] Listening on 0.0.0.0:3022
-[2024-12-25T16:32:50.962Z DEBUG primary::proposer] Dag starting at round 0
-[2024-12-25T16:32:50.962Z INFO  network::receiver] Incoming connection established with 127.0.0.1:58098
-[2024-12-25T16:32:50.962Z WARN  network::receiver] Connection closed by peer 127.0.0.1:58098
-[2024-12-25T16:32:50.965Z INFO  network::receiver] Incoming connection established with 127.0.0.1:36970
-[2024-12-25T16:32:50.965Z DEBUG primary::core] Processing xcScX1ULa2vBWDIs: B1(Pl8f4aaj3ap5K6OG)
-[2024-12-25T16:32:50.965Z INFO  primary::core] received header xcScX1ULa2vBWDIsCSV/tMw1TQl5EC7m1VKD9BaM1ls= round 1
-[2024-12-25T16:32:50.965Z INFO  primary::core] self.name: LsJLzYDpN5X+aVKizXy8KWUZUmBvemqkFyy6TIHuyrk=
-[2024-12-25T16:32:50.965Z INFO  primary::core] Initialized echo_headers from header: {(1, xcScX1ULa2vBWDIsCSV/tMw1TQl5EC7m1VKD9BaM1ls=): {LsJLzYDpN5X+aVKizXy8KWUZUmBvemqkFyy6TIHuyrk=}}
-[2024-12-25T16:32:50.965Z DEBUG primary::core] Broadcasted EchoHeader with hash 1
-[2024-12-25T16:32:50.965Z INFO  network::reliable_sender] Outgoing connection established with 127.0.0.1:3007
-[2024-12-25T16:32:50.965Z DEBUG primary::core] Processing EchoHeader { id: xcScX1ULa2vBWDIsCSV/tMw1TQl5EC7m1VKD9BaM1ls=, round: 1, author: Pl8f4aaj3ap5K6OGOIkVaSa3avWYpMZgloi2wdCWDVc=, origin: Pl8f4aaj3ap5K6OGOIkVaSa3avWYpMZgloi2wdCWDVc= }
-[2024-12-25T16:32:50.965Z INFO  primary::core] Initialized echo_headers: {(1, xcScX1ULa2vBWDIsCSV/tMw1TQl5EC7m1VKD9BaM1ls=): {Pl8f4aaj3ap5K6OGOIkVaSa3avWYpMZgloi2wdCWDVc=, LsJLzYDpN5X+aVKizXy8KWUZUmBvemqkFyy6TIHuyrk=}}
-[2024-12-25T16:32:50.965Z INFO  network::receiver] Incoming connection established with 127.0.0.1:58108
-[2024-12-25T16:32:50.965Z INFO  network::reliable_sender] Outgoing connection established with 127.0.0.1:3001
-[2024-12-25T16:32:50.966Z WARN  network::receiver] Connection closed by peer 127.0.0.1:58108
-[2024-12-25T16:32:50.966Z INFO  network::reliable_sender] Outgoing connection established with 127.0.0.1:3013
-[2024-12-25T16:32:50.966Z INFO  network::receiver] Incoming connection established with 127.0.0.1:36998
-[2024-12-25T16:32:50.966Z INFO  network::receiver] Incoming connection established with 127.0.0.1:36982
-[2024-12-25T16:32:50.966Z DEBUG primary::core] Processing EchoHeader { id: xcScX1ULa2vBWDIsCSV/tMw1TQl5EC7m1VKD9BaM1ls=, round: 1, author: 6E8e7pFuMdQ1HUpLJImGt9yWOBUXRXPVNzyIZ28pJGE=, origin: Pl8f4aaj3ap5K6OGOIkVaSa3avWYpMZgloi2wdCWDVc= }
-[2024-12-25T16:32:50.966Z INFO  primary::core] Initialized echo_headers: {(1, xcScX1ULa2vBWDIsCSV/tMw1TQl5EC7m1VKD9BaM1ls=): {Pl8f4aaj3ap5K6OGOIkVaSa3avWYpMZgloi2wdCWDVc=, 6E8e7pFuMdQ1HUpLJImGt9yWOBUXRXPVNzyIZ28pJGE=, LsJLzYDpN5X+aVKizXy8KWUZUmBvemqkFyy6TIHuyrk=}}
-[2024-12-25T16:32:50.966Z DEBUG primary::core] Broadcasted ReadyHeader with hash 1
-[2024-12-25T16:32:50.966Z DEBUG primary::core] Processing ReadyHeader { id: xcScX1ULa2vBWDIsCSV/tMw1TQl5EC7m1VKD9BaM1ls=, round: 1, author: Pl8f4aaj3ap5K6OGOIkVaSa3avWYpMZgloi2wdCWDVc=, origin: Pl8f4aaj3ap5K6OGOIkVaSa3avWYpMZgloi2wdCWDVc= }
-[2024-12-25T16:32:50.966Z DEBUG primary::core] Processing EchoHeader { id: xcScX1ULa2vBWDIsCSV/tMw1TQl5EC7m1VKD9BaM1ls=, round: 1, author: khhNI19MmuR+gfoHRJSPIoLRyi2CgriJsdvPaVc2CMo=, origin: Pl8f4aaj3ap5K6OGOIkVaSa3avWYpMZgloi2wdCWDVc= }
-[2024-12-25T16:32:50.966Z INFO  primary::core] Initialized echo_headers: {(1, xcScX1ULa2vBWDIsCSV/tMw1TQl5EC7m1VKD9BaM1ls=): {Pl8f4aaj3ap5K6OGOIkVaSa3avWYpMZgloi2wdCWDVc=, LsJLzYDpN5X+aVKizXy8KWUZUmBvemqkFyy6TIHuyrk=, 6E8e7pFuMdQ1HUpLJImGt9yWOBUXRXPVNzyIZ28pJGE=, khhNI19MmuR+gfoHRJSPIoLRyi2CgriJsdvPaVc2CMo=}}
-[2024-12-25T16:32:50.966Z DEBUG primary::core] Broadcasted ReadyHeader with hash 1
-[2024-12-25T16:32:50.966Z DEBUG primary::core] Processing ReadyHeader { id: xcScX1ULa2vBWDIsCSV/tMw1TQl5EC7m1VKD9BaM1ls=, round: 1, author: 6E8e7pFuMdQ1HUpLJImGt9yWOBUXRXPVNzyIZ28pJGE=, origin: Pl8f4aaj3ap5K6OGOIkVaSa3avWYpMZgloi2wdCWDVc= }
-[2024-12-25T16:32:50.966Z INFO  primary::core] Sending header xcScX1ULa2vBWDIsCSV/tMw1TQl5EC7m1VKD9BaM1ls= to consensus
-[2024-12-25T16:32:50.966Z DEBUG primary::core] Processing ReadyHeader { id: xcScX1ULa2vBWDIsCSV/tMw1TQl5EC7m1VKD9BaM1ls=, round: 1, author: khhNI19MmuR+gfoHRJSPIoLRyi2CgriJsdvPaVc2CMo=, origin: Pl8f4aaj3ap5K6OGOIkVaSa3avWYpMZgloi2wdCWDVc= }
-[2024-12-25T16:32:50.966Z INFO  primary::core] Sending header xcScX1ULa2vBWDIsCSV/tMw1TQl5EC7m1VKD9BaM1ls= to consensus
-[2024-12-25T16:32:50.966Z DEBUG consensus] Processing xcScX1ULa2vBWDIs: B1(Pl8f4aaj3ap5K6OG)
-[2024-12-25T16:32:50.966Z DEBUG consensus] Processing xcScX1ULa2vBWDIs: B1(Pl8f4aaj3ap5K6OG)
-[2024-12-25T16:32:50.968Z INFO  network::receiver] Incoming connection established with 127.0.0.1:58120
-[2024-12-25T16:32:50.968Z WARN  network::receiver] Connection closed by peer 127.0.0.1:58120
-[2024-12-25T16:32:50.968Z INFO  network::receiver] Incoming connection established with 127.0.0.1:58122
-[2024-12-25T16:32:50.968Z DEBUG primary::core] Processing +pxHRM78bR0yYbNd: B1(6E8e7pFuMdQ1HUpL)
-[2024-12-25T16:32:50.968Z INFO  primary::core] received header +pxHRM78bR0yYbNducZLKj24kZ/M1I1u10oiU7OWTRQ= round 1
-[2024-12-25T16:32:50.968Z INFO  primary::core] self.name: LsJLzYDpN5X+aVKizXy8KWUZUmBvemqkFyy6TIHuyrk=
-[2024-12-25T16:32:50.968Z INFO  primary::core] Initialized echo_headers from header: {(1, +pxHRM78bR0yYbNducZLKj24kZ/M1I1u10oiU7OWTRQ=): {LsJLzYDpN5X+aVKizXy8KWUZUmBvemqkFyy6TIHuyrk=}, (1, xcScX1ULa2vBWDIsCSV/tMw1TQl5EC7m1VKD9BaM1ls=): {Pl8f4aaj3ap5K6OGOIkVaSa3avWYpMZgloi2wdCWDVc=, LsJLzYDpN5X+aVKizXy8KWUZUmBvemqkFyy6TIHuyrk=, 6E8e7pFuMdQ1HUpLJImGt9yWOBUXRXPVNzyIZ28pJGE=, khhNI19MmuR+gfoHRJSPIoLRyi2CgriJsdvPaVc2CMo=}}
-[2024-12-25T16:32:50.968Z DEBUG primary::core] Broadcasted EchoHeader with hash 1
-[2024-12-25T16:32:50.969Z DEBUG primary::core] Processing EchoHeader { id: +pxHRM78bR0yYbNducZLKj24kZ/M1I1u10oiU7OWTRQ=, round: 1, author: 6E8e7pFuMdQ1HUpLJImGt9yWOBUXRXPVNzyIZ28pJGE=, origin: 6E8e7pFuMdQ1HUpLJImGt9yWOBUXRXPVNzyIZ28pJGE= }
-[2024-12-25T16:32:50.969Z INFO  primary::core] Initialized echo_headers: {(1, +pxHRM78bR0yYbNducZLKj24kZ/M1I1u10oiU7OWTRQ=): {LsJLzYDpN5X+aVKizXy8KWUZUmBvemqkFyy6TIHuyrk=, 6E8e7pFuMdQ1HUpLJImGt9yWOBUXRXPVNzyIZ28pJGE=}, (1, xcScX1ULa2vBWDIsCSV/tMw1TQl5EC7m1VKD9BaM1ls=): {Pl8f4aaj3ap5K6OGOIkVaSa3avWYpMZgloi2wdCWDVc=, LsJLzYDpN5X+aVKizXy8KWUZUmBvemqkFyy6TIHuyrk=, 6E8e7pFuMdQ1HUpLJImGt9yWOBUXRXPVNzyIZ28pJGE=, khhNI19MmuR+gfoHRJSPIoLRyi2CgriJsdvPaVc2CMo=}}
-[2024-12-25T16:32:50.969Z DEBUG primary::core] Processing EchoHeader { id: +pxHRM78bR0yYbNducZLKj24kZ/M1I1u10oiU7OWTRQ=, round: 1, author: Pl8f4aaj3ap5K6OGOIkVaSa3avWYpMZgloi2wdCWDVc=, origin: 6E8e7pFuMdQ1HUpLJImGt9yWOBUXRXPVNzyIZ28pJGE= }
-[2024-12-25T16:32:50.969Z INFO  primary::core] Initialized echo_headers: {(1, +pxHRM78bR0yYbNducZLKj24kZ/M1I1u10oiU7OWTRQ=): {Pl8f4aaj3ap5K6OGOIkVaSa3avWYpMZgloi2wdCWDVc=, LsJLzYDpN5X+aVKizXy8KWUZUmBvemqkFyy6TIHuyrk=, 6E8e7pFuMdQ1HUpLJImGt9yWOBUXRXPVNzyIZ28pJGE=}, (1, xcScX1ULa2vBWDIsCSV/tMw1TQl5EC7m1VKD9BaM1ls=): {Pl8f4aaj3ap5K6OGOIkVaSa3avWYpMZgloi2wdCWDVc=, LsJLzYDpN5X+aVKizXy8KWUZUmBvemqkFyy6TIHuyrk=, 6E8e7pFuMdQ1HUpLJImGt9yWOBUXRXPVNzyIZ28pJGE=, khhNI19MmuR+gfoHRJSPIoLRyi2CgriJsdvPaVc2CMo=}}
-[2024-12-25T16:32:50.969Z DEBUG primary::core] Broadcasted ReadyHeader with hash 1
-[2024-12-25T16:32:50.969Z DEBUG primary::core] Processing ReadyHeader { id: +pxHRM78bR0yYbNducZLKj24kZ/M1I1u10oiU7OWTRQ=, round: 1, author: Pl8f4aaj3ap5K6OGOIkVaSa3avWYpMZgloi2wdCWDVc=, origin: 6E8e7pFuMdQ1HUpLJImGt9yWOBUXRXPVNzyIZ28pJGE= }
-[2024-12-25T16:32:50.969Z DEBUG primary::core] Processing EchoHeader { id: +pxHRM78bR0yYbNducZLKj24kZ/M1I1u10oiU7OWTRQ=, round: 1, author: khhNI19MmuR+gfoHRJSPIoLRyi2CgriJsdvPaVc2CMo=, origin: 6E8e7pFuMdQ1HUpLJImGt9yWOBUXRXPVNzyIZ28pJGE= }
-[2024-12-25T16:32:50.969Z INFO  primary::core] Initialized echo_headers: {(1, +pxHRM78bR0yYbNducZLKj24kZ/M1I1u10oiU7OWTRQ=): {Pl8f4aaj3ap5K6OGOIkVaSa3avWYpMZgloi2wdCWDVc=, LsJLzYDpN5X+aVKizXy8KWUZUmBvemqkFyy6TIHuyrk=, 6E8e7pFuMdQ1HUpLJImGt9yWOBUXRXPVNzyIZ28pJGE=, khhNI19MmuR+gfoHRJSPIoLRyi2CgriJsdvPaVc2CMo=}, (1, xcScX1ULa2vBWDIsCSV/tMw1TQl5EC7m1VKD9BaM1ls=): {Pl8f4aaj3ap5K6OGOIkVaSa3avWYpMZgloi2wdCWDVc=, LsJLzYDpN5X+aVKizXy8KWUZUmBvemqkFyy6TIHuyrk=, 6E8e7pFuMdQ1HUpLJImGt9yWOBUXRXPVNzyIZ28pJGE=, khhNI19MmuR+gfoHRJSPIoLRyi2CgriJsdvPaVc2CMo=}}
-[2024-12-25T16:32:50.969Z DEBUG primary::core] Broadcasted ReadyHeader with hash 1
-[2024-12-25T16:32:50.969Z DEBUG primary::core] Processing ReadyHeader { id: +pxHRM78bR0yYbNducZLKj24kZ/M1I1u10oiU7OWTRQ=, round: 1, author: 6E8e7pFuMdQ1HUpLJImGt9yWOBUXRXPVNzyIZ28pJGE=, origin: 6E8e7pFuMdQ1HUpLJImGt9yWOBUXRXPVNzyIZ28pJGE= }
-[2024-12-25T16:32:50.969Z INFO  primary::core] Sending header +pxHRM78bR0yYbNducZLKj24kZ/M1I1u10oiU7OWTRQ= to consensus
-[2024-12-25T16:32:50.969Z DEBUG consensus] Processing +pxHRM78bR0yYbNd: B1(6E8e7pFuMdQ1HUpL)
-[2024-12-25T16:32:50.969Z DEBUG primary::core] Processing ReadyHeader { id: +pxHRM78bR0yYbNducZLKj24kZ/M1I1u10oiU7OWTRQ=, round: 1, author: khhNI19MmuR+gfoHRJSPIoLRyi2CgriJsdvPaVc2CMo=, origin: 6E8e7pFuMdQ1HUpLJImGt9yWOBUXRXPVNzyIZ28pJGE= }
-[2024-12-25T16:32:50.969Z INFO  primary::core] Sending header +pxHRM78bR0yYbNducZLKj24kZ/M1I1u10oiU7OWTRQ= to consensus
-[2024-12-25T16:32:50.969Z DEBUG consensus] Processing +pxHRM78bR0yYbNd: B1(6E8e7pFuMdQ1HUpL)
-[2024-12-25T16:32:50.971Z DEBUG primary::proposer] Dag moved to round 1
-[2024-12-25T16:32:50.971Z INFO  primary::proposer] Created 3Cc5C1j/WUZ8juYIQTlKsa/pnesbUf6w8x7Cra5x3c0=
-[2024-12-25T16:32:50.971Z INFO  primary::proposer] Header 3Cc5C1j/WUZ8juYIQTlKsa/pnesbUf6w8x7Cra5x3c0= contains 0 B
-[2024-12-25T16:32:50.971Z DEBUG primary::core] Processing own 3Cc5C1j/WUZ8juYI: B1(LsJLzYDpN5X+aVKi)
-[2024-12-25T16:32:50.971Z DEBUG primary::core] Processing 3Cc5C1j/WUZ8juYI: B1(LsJLzYDpN5X+aVKi)
-[2024-12-25T16:32:50.971Z INFO  primary::core] received header 3Cc5C1j/WUZ8juYIQTlKsa/pnesbUf6w8x7Cra5x3c0= round 1
-[2024-12-25T16:32:50.971Z INFO  primary::core] self.name: LsJLzYDpN5X+aVKizXy8KWUZUmBvemqkFyy6TIHuyrk=
-[2024-12-25T16:32:50.971Z INFO  primary::core] Initialized echo_headers from header: {(1, +pxHRM78bR0yYbNducZLKj24kZ/M1I1u10oiU7OWTRQ=): {Pl8f4aaj3ap5K6OGOIkVaSa3avWYpMZgloi2wdCWDVc=, LsJLzYDpN5X+aVKizXy8KWUZUmBvemqkFyy6TIHuyrk=, 6E8e7pFuMdQ1HUpLJImGt9yWOBUXRXPVNzyIZ28pJGE=, khhNI19MmuR+gfoHRJSPIoLRyi2CgriJsdvPaVc2CMo=}, (1, 3Cc5C1j/WUZ8juYIQTlKsa/pnesbUf6w8x7Cra5x3c0=): {LsJLzYDpN5X+aVKizXy8KWUZUmBvemqkFyy6TIHuyrk=}, (1, xcScX1ULa2vBWDIsCSV/tMw1TQl5EC7m1VKD9BaM1ls=): {Pl8f4aaj3ap5K6OGOIkVaSa3avWYpMZgloi2wdCWDVc=, LsJLzYDpN5X+aVKizXy8KWUZUmBvemqkFyy6TIHuyrk=, 6E8e7pFuMdQ1HUpLJImGt9yWOBUXRXPVNzyIZ28pJGE=, khhNI19MmuR+gfoHRJSPIoLRyi2CgriJsdvPaVc2CMo=}}
-[2024-12-25T16:32:50.971Z DEBUG primary::core] Broadcasted EchoHeader with hash 1
-[2024-12-25T16:32:50.971Z DEBUG primary::core] Processing EchoHeader { id: 3Cc5C1j/WUZ8juYIQTlKsa/pnesbUf6w8x7Cra5x3c0=, round: 1, author: Pl8f4aaj3ap5K6OGOIkVaSa3avWYpMZgloi2wdCWDVc=, origin: LsJLzYDpN5X+aVKizXy8KWUZUmBvemqkFyy6TIHuyrk= }
-[2024-12-25T16:32:50.971Z INFO  primary::core] Initialized echo_headers: {(1, +pxHRM78bR0yYbNducZLKj24kZ/M1I1u10oiU7OWTRQ=): {Pl8f4aaj3ap5K6OGOIkVaSa3avWYpMZgloi2wdCWDVc=, LsJLzYDpN5X+aVKizXy8KWUZUmBvemqkFyy6TIHuyrk=, 6E8e7pFuMdQ1HUpLJImGt9yWOBUXRXPVNzyIZ28pJGE=, khhNI19MmuR+gfoHRJSPIoLRyi2CgriJsdvPaVc2CMo=}, (1, 3Cc5C1j/WUZ8juYIQTlKsa/pnesbUf6w8x7Cra5x3c0=): {LsJLzYDpN5X+aVKizXy8KWUZUmBvemqkFyy6TIHuyrk=, Pl8f4aaj3ap5K6OGOIkVaSa3avWYpMZgloi2wdCWDVc=}, (1, xcScX1ULa2vBWDIsCSV/tMw1TQl5EC7m1VKD9BaM1ls=): {Pl8f4aaj3ap5K6OGOIkVaSa3avWYpMZgloi2wdCWDVc=, LsJLzYDpN5X+aVKizXy8KWUZUmBvemqkFyy6TIHuyrk=, 6E8e7pFuMdQ1HUpLJImGt9yWOBUXRXPVNzyIZ28pJGE=, khhNI19MmuR+gfoHRJSPIoLRyi2CgriJsdvPaVc2CMo=}}
-[2024-12-25T16:32:50.971Z DEBUG primary::core] Processing EchoHeader { id: 3Cc5C1j/WUZ8juYIQTlKsa/pnesbUf6w8x7Cra5x3c0=, round: 1, author: 6E8e7pFuMdQ1HUpLJImGt9yWOBUXRXPVNzyIZ28pJGE=, origin: LsJLzYDpN5X+aVKizXy8KWUZUmBvemqkFyy6TIHuyrk= }
-[2024-12-25T16:32:50.971Z INFO  primary::core] Initialized echo_headers: {(1, +pxHRM78bR0yYbNducZLKj24kZ/M1I1u10oiU7OWTRQ=): {Pl8f4aaj3ap5K6OGOIkVaSa3avWYpMZgloi2wdCWDVc=, LsJLzYDpN5X+aVKizXy8KWUZUmBvemqkFyy6TIHuyrk=, 6E8e7pFuMdQ1HUpLJImGt9yWOBUXRXPVNzyIZ28pJGE=, khhNI19MmuR+gfoHRJSPIoLRyi2CgriJsdvPaVc2CMo=}, (1, 3Cc5C1j/WUZ8juYIQTlKsa/pnesbUf6w8x7Cra5x3c0=): {LsJLzYDpN5X+aVKizXy8KWUZUmBvemqkFyy6TIHuyrk=, 6E8e7pFuMdQ1HUpLJImGt9yWOBUXRXPVNzyIZ28pJGE=, Pl8f4aaj3ap5K6OGOIkVaSa3avWYpMZgloi2wdCWDVc=}, (1, xcScX1ULa2vBWDIsCSV/tMw1TQl5EC7m1VKD9BaM1ls=): {Pl8f4aaj3ap5K6OGOIkVaSa3avWYpMZgloi2wdCWDVc=, LsJLzYDpN5X+aVKizXy8KWUZUmBvemqkFyy6TIHuyrk=, 6E8e7pFuMdQ1HUpLJImGt9yWOBUXRXPVNzyIZ28pJGE=, khhNI19MmuR+gfoHRJSPIoLRyi2CgriJsdvPaVc2CMo=}}
-[2024-12-25T16:32:50.971Z DEBUG primary::core] Broadcasted ReadyHeader with hash 1
-[2024-12-25T16:32:50.971Z DEBUG primary::core] Processing ReadyHeader { id: 3Cc5C1j/WUZ8juYIQTlKsa/pnesbUf6w8x7Cra5x3c0=, round: 1, author: Pl8f4aaj3ap5K6OGOIkVaSa3avWYpMZgloi2wdCWDVc=, origin: LsJLzYDpN5X+aVKizXy8KWUZUmBvemqkFyy6TIHuyrk= }
-[2024-12-25T16:32:50.971Z DEBUG primary::core] Processing ReadyHeader { id: 3Cc5C1j/WUZ8juYIQTlKsa/pnesbUf6w8x7Cra5x3c0=, round: 1, author: 6E8e7pFuMdQ1HUpLJImGt9yWOBUXRXPVNzyIZ28pJGE=, origin: LsJLzYDpN5X+aVKizXy8KWUZUmBvemqkFyy6TIHuyrk= }
-[2024-12-25T16:32:50.971Z INFO  primary::core] Sending header 3Cc5C1j/WUZ8juYIQTlKsa/pnesbUf6w8x7Cra5x3c0= to consensus
-[2024-12-25T16:32:50.971Z INFO  primary::core] parents: [xcScX1ULa2vBWDIs: B1(Pl8f4aaj3ap5K6OG), +pxHRM78bR0yYbNd: B1(6E8e7pFuMdQ1HUpL), 3Cc5C1j/WUZ8juYI: B1(LsJLzYDpN5X+aVKi)] at round 1
-[2024-12-25T16:32:50.971Z DEBUG primary::core] Processing EchoHeader { id: 3Cc5C1j/WUZ8juYIQTlKsa/pnesbUf6w8x7Cra5x3c0=, round: 1, author: khhNI19MmuR+gfoHRJSPIoLRyi2CgriJsdvPaVc2CMo=, origin: LsJLzYDpN5X+aVKizXy8KWUZUmBvemqkFyy6TIHuyrk= }
-[2024-12-25T16:32:50.971Z INFO  primary::core] Initialized echo_headers: {(1, +pxHRM78bR0yYbNducZLKj24kZ/M1I1u10oiU7OWTRQ=): {Pl8f4aaj3ap5K6OGOIkVaSa3avWYpMZgloi2wdCWDVc=, LsJLzYDpN5X+aVKizXy8KWUZUmBvemqkFyy6TIHuyrk=, 6E8e7pFuMdQ1HUpLJImGt9yWOBUXRXPVNzyIZ28pJGE=, khhNI19MmuR+gfoHRJSPIoLRyi2CgriJsdvPaVc2CMo=}, (1, 3Cc5C1j/WUZ8juYIQTlKsa/pnesbUf6w8x7Cra5x3c0=): {LsJLzYDpN5X+aVKizXy8KWUZUmBvemqkFyy6TIHuyrk=, khhNI19MmuR+gfoHRJSPIoLRyi2CgriJsdvPaVc2CMo=, Pl8f4aaj3ap5K6OGOIkVaSa3avWYpMZgloi2wdCWDVc=, 6E8e7pFuMdQ1HUpLJImGt9yWOBUXRXPVNzyIZ28pJGE=}, (1, xcScX1ULa2vBWDIsCSV/tMw1TQl5EC7m1VKD9BaM1ls=): {Pl8f4aaj3ap5K6OGOIkVaSa3avWYpMZgloi2wdCWDVc=, LsJLzYDpN5X+aVKizXy8KWUZUmBvemqkFyy6TIHuyrk=, 6E8e7pFuMdQ1HUpLJImGt9yWOBUXRXPVNzyIZ28pJGE=, khhNI19MmuR+gfoHRJSPIoLRyi2CgriJsdvPaVc2CMo=}}
-[2024-12-25T16:32:50.971Z DEBUG primary::core] Broadcasted ReadyHeader with hash 1
-[2024-12-25T16:32:50.971Z DEBUG consensus] Processing 3Cc5C1j/WUZ8juYI: B1(LsJLzYDpN5X+aVKi)
-[2024-12-25T16:32:50.972Z DEBUG primary::core] Processing ReadyHeader { id: 3Cc5C1j/WUZ8juYIQTlKsa/pnesbUf6w8x7Cra5x3c0=, round: 1, author: khhNI19MmuR+gfoHRJSPIoLRyi2CgriJsdvPaVc2CMo=, origin: LsJLzYDpN5X+aVKizXy8KWUZUmBvemqkFyy6TIHuyrk= }
-[2024-12-25T16:32:50.972Z INFO  primary::core] Sending header 3Cc5C1j/WUZ8juYIQTlKsa/pnesbUf6w8x7Cra5x3c0= to consensus
-[2024-12-25T16:32:50.972Z DEBUG consensus] Processing 3Cc5C1j/WUZ8juYI: B1(LsJLzYDpN5X+aVKi)
-[2024-12-25T16:32:50.973Z INFO  network::receiver] Incoming connection established with 127.0.0.1:58126
-[2024-12-25T16:32:50.973Z WARN  network::receiver] Connection closed by peer 127.0.0.1:58126
-[2024-12-25T16:32:50.976Z DEBUG primary::core] Processing qkP/EoDUGdV29DL7: B1(khhNI19MmuR+gfoH)
-[2024-12-25T16:32:50.976Z INFO  primary::core] received header qkP/EoDUGdV29DL7HMRwurYfToTybfYZktjsztyUwOU= round 1
-[2024-12-25T16:32:50.976Z INFO  primary::core] self.name: LsJLzYDpN5X+aVKizXy8KWUZUmBvemqkFyy6TIHuyrk=
-[2024-12-25T16:32:50.976Z INFO  primary::core] Initialized echo_headers from header: {(1, xcScX1ULa2vBWDIsCSV/tMw1TQl5EC7m1VKD9BaM1ls=): {Pl8f4aaj3ap5K6OGOIkVaSa3avWYpMZgloi2wdCWDVc=, LsJLzYDpN5X+aVKizXy8KWUZUmBvemqkFyy6TIHuyrk=, 6E8e7pFuMdQ1HUpLJImGt9yWOBUXRXPVNzyIZ28pJGE=, khhNI19MmuR+gfoHRJSPIoLRyi2CgriJsdvPaVc2CMo=}, (1, qkP/EoDUGdV29DL7HMRwurYfToTybfYZktjsztyUwOU=): {LsJLzYDpN5X+aVKizXy8KWUZUmBvemqkFyy6TIHuyrk=}, (1, 3Cc5C1j/WUZ8juYIQTlKsa/pnesbUf6w8x7Cra5x3c0=): {LsJLzYDpN5X+aVKizXy8KWUZUmBvemqkFyy6TIHuyrk=, khhNI19MmuR+gfoHRJSPIoLRyi2CgriJsdvPaVc2CMo=, Pl8f4aaj3ap5K6OGOIkVaSa3avWYpMZgloi2wdCWDVc=, 6E8e7pFuMdQ1HUpLJImGt9yWOBUXRXPVNzyIZ28pJGE=}, (1, +pxHRM78bR0yYbNducZLKj24kZ/M1I1u10oiU7OWTRQ=): {Pl8f4aaj3ap5K6OGOIkVaSa3avWYpMZgloi2wdCWDVc=, LsJLzYDpN5X+aVKizXy8KWUZUmBvemqkFyy6TIHuyrk=, 6E8e7pFuMdQ1HUpLJImGt9yWOBUXRXPVNzyIZ28pJGE=, khhNI19MmuR+gfoHRJSPIoLRyi2CgriJsdvPaVc2CMo=}}
-[2024-12-25T16:32:50.976Z DEBUG primary::core] Broadcasted EchoHeader with hash 1
-[2024-12-25T16:32:50.976Z DEBUG primary::core] Processing EchoHeader { id: qkP/EoDUGdV29DL7HMRwurYfToTybfYZktjsztyUwOU=, round: 1, author: khhNI19MmuR+gfoHRJSPIoLRyi2CgriJsdvPaVc2CMo=, origin: khhNI19MmuR+gfoHRJSPIoLRyi2CgriJsdvPaVc2CMo= }
-[2024-12-25T16:32:50.976Z INFO  primary::core] Initialized echo_headers: {(1, xcScX1ULa2vBWDIsCSV/tMw1TQl5EC7m1VKD9BaM1ls=): {Pl8f4aaj3ap5K6OGOIkVaSa3avWYpMZgloi2wdCWDVc=, LsJLzYDpN5X+aVKizXy8KWUZUmBvemqkFyy6TIHuyrk=, 6E8e7pFuMdQ1HUpLJImGt9yWOBUXRXPVNzyIZ28pJGE=, khhNI19MmuR+gfoHRJSPIoLRyi2CgriJsdvPaVc2CMo=}, (1, qkP/EoDUGdV29DL7HMRwurYfToTybfYZktjsztyUwOU=): {khhNI19MmuR+gfoHRJSPIoLRyi2CgriJsdvPaVc2CMo=, LsJLzYDpN5X+aVKizXy8KWUZUmBvemqkFyy6TIHuyrk=}, (1, 3Cc5C1j/WUZ8juYIQTlKsa/pnesbUf6w8x7Cra5x3c0=): {LsJLzYDpN5X+aVKizXy8KWUZUmBvemqkFyy6TIHuyrk=, khhNI19MmuR+gfoHRJSPIoLRyi2CgriJsdvPaVc2CMo=, Pl8f4aaj3ap5K6OGOIkVaSa3avWYpMZgloi2wdCWDVc=, 6E8e7pFuMdQ1HUpLJImGt9yWOBUXRXPVNzyIZ28pJGE=}, (1, +pxHRM78bR0yYbNducZLKj24kZ/M1I1u10oiU7OWTRQ=): {Pl8f4aaj3ap5K6OGOIkVaSa3avWYpMZgloi2wdCWDVc=, LsJLzYDpN5X+aVKizXy8KWUZUmBvemqkFyy6TIHuyrk=, 6E8e7pFuMdQ1HUpLJImGt9yWOBUXRXPVNzyIZ28pJGE=, khhNI19MmuR+gfoHRJSPIoLRyi2CgriJsdvPaVc2CMo=}}
-[2024-12-25T16:32:50.976Z DEBUG primary::core] Processing EchoHeader { id: qkP/EoDUGdV29DL7HMRwurYfToTybfYZktjsztyUwOU=, round: 1, author: Pl8f4aaj3ap5K6OGOIkVaSa3avWYpMZgloi2wdCWDVc=, origin: khhNI19MmuR+gfoHRJSPIoLRyi2CgriJsdvPaVc2CMo= }
-[2024-12-25T16:32:50.976Z INFO  primary::core] Initialized echo_headers: {(1, xcScX1ULa2vBWDIsCSV/tMw1TQl5EC7m1VKD9BaM1ls=): {Pl8f4aaj3ap5K6OGOIkVaSa3avWYpMZgloi2wdCWDVc=, LsJLzYDpN5X+aVKizXy8KWUZUmBvemqkFyy6TIHuyrk=, 6E8e7pFuMdQ1HUpLJImGt9yWOBUXRXPVNzyIZ28pJGE=, khhNI19MmuR+gfoHRJSPIoLRyi2CgriJsdvPaVc2CMo=}, (1, qkP/EoDUGdV29DL7HMRwurYfToTybfYZktjsztyUwOU=): {Pl8f4aaj3ap5K6OGOIkVaSa3avWYpMZgloi2wdCWDVc=, khhNI19MmuR+gfoHRJSPIoLRyi2CgriJsdvPaVc2CMo=, LsJLzYDpN5X+aVKizXy8KWUZUmBvemqkFyy6TIHuyrk=}, (1, 3Cc5C1j/WUZ8juYIQTlKsa/pnesbUf6w8x7Cra5x3c0=): {LsJLzYDpN5X+aVKizXy8KWUZUmBvemqkFyy6TIHuyrk=, khhNI19MmuR+gfoHRJSPIoLRyi2CgriJsdvPaVc2CMo=, Pl8f4aaj3ap5K6OGOIkVaSa3avWYpMZgloi2wdCWDVc=, 6E8e7pFuMdQ1HUpLJImGt9yWOBUXRXPVNzyIZ28pJGE=}, (1, +pxHRM78bR0yYbNducZLKj24kZ/M1I1u10oiU7OWTRQ=): {Pl8f4aaj3ap5K6OGOIkVaSa3avWYpMZgloi2wdCWDVc=, LsJLzYDpN5X+aVKizXy8KWUZUmBvemqkFyy6TIHuyrk=, 6E8e7pFuMdQ1HUpLJImGt9yWOBUXRXPVNzyIZ28pJGE=, khhNI19MmuR+gfoHRJSPIoLRyi2CgriJsdvPaVc2CMo=}}
-[2024-12-25T16:32:50.977Z DEBUG primary::core] Broadcasted ReadyHeader with hash 1
-[2024-12-25T16:32:50.977Z DEBUG primary::core] Processing EchoHeader { id: qkP/EoDUGdV29DL7HMRwurYfToTybfYZktjsztyUwOU=, round: 1, author: 6E8e7pFuMdQ1HUpLJImGt9yWOBUXRXPVNzyIZ28pJGE=, origin: khhNI19MmuR+gfoHRJSPIoLRyi2CgriJsdvPaVc2CMo= }
-[2024-12-25T16:32:50.977Z INFO  primary::core] Initialized echo_headers: {(1, xcScX1ULa2vBWDIsCSV/tMw1TQl5EC7m1VKD9BaM1ls=): {Pl8f4aaj3ap5K6OGOIkVaSa3avWYpMZgloi2wdCWDVc=, LsJLzYDpN5X+aVKizXy8KWUZUmBvemqkFyy6TIHuyrk=, 6E8e7pFuMdQ1HUpLJImGt9yWOBUXRXPVNzyIZ28pJGE=, khhNI19MmuR+gfoHRJSPIoLRyi2CgriJsdvPaVc2CMo=}, (1, qkP/EoDUGdV29DL7HMRwurYfToTybfYZktjsztyUwOU=): {Pl8f4aaj3ap5K6OGOIkVaSa3avWYpMZgloi2wdCWDVc=, LsJLzYDpN5X+aVKizXy8KWUZUmBvemqkFyy6TIHuyrk=, 6E8e7pFuMdQ1HUpLJImGt9yWOBUXRXPVNzyIZ28pJGE=, khhNI19MmuR+gfoHRJSPIoLRyi2CgriJsdvPaVc2CMo=}, (1, 3Cc5C1j/WUZ8juYIQTlKsa/pnesbUf6w8x7Cra5x3c0=): {LsJLzYDpN5X+aVKizXy8KWUZUmBvemqkFyy6TIHuyrk=, khhNI19MmuR+gfoHRJSPIoLRyi2CgriJsdvPaVc2CMo=, Pl8f4aaj3ap5K6OGOIkVaSa3avWYpMZgloi2wdCWDVc=, 6E8e7pFuMdQ1HUpLJImGt9yWOBUXRXPVNzyIZ28pJGE=}, (1, +pxHRM78bR0yYbNducZLKj24kZ/M1I1u10oiU7OWTRQ=): {Pl8f4aaj3ap5K6OGOIkVaSa3avWYpMZgloi2wdCWDVc=, LsJLzYDpN5X+aVKizXy8KWUZUmBvemqkFyy6TIHuyrk=, 6E8e7pFuMdQ1HUpLJImGt9yWOBUXRXPVNzyIZ28pJGE=, khhNI19MmuR+gfoHRJSPIoLRyi2CgriJsdvPaVc2CMo=}}
-[2024-12-25T16:32:50.977Z DEBUG primary::core] Broadcasted ReadyHeader with hash 1
-[2024-12-25T16:32:50.977Z DEBUG primary::core] Processing ReadyHeader { id: qkP/EoDUGdV29DL7HMRwurYfToTybfYZktjsztyUwOU=, round: 1, author: 6E8e7pFuMdQ1HUpLJImGt9yWOBUXRXPVNzyIZ28pJGE=, origin: khhNI19MmuR+gfoHRJSPIoLRyi2CgriJsdvPaVc2CMo= }
-[2024-12-25T16:32:50.977Z DEBUG primary::core] Processing ReadyHeader { id: qkP/EoDUGdV29DL7HMRwurYfToTybfYZktjsztyUwOU=, round: 1, author: Pl8f4aaj3ap5K6OGOIkVaSa3avWYpMZgloi2wdCWDVc=, origin: khhNI19MmuR+gfoHRJSPIoLRyi2CgriJsdvPaVc2CMo= }
-[2024-12-25T16:32:50.977Z INFO  primary::core] Sending header qkP/EoDUGdV29DL7HMRwurYfToTybfYZktjsztyUwOU= to consensus
-[2024-12-25T16:32:50.977Z INFO  primary::core] parents: [qkP/EoDUGdV29DL7: B1(khhNI19MmuR+gfoH)] at round 1
-[2024-12-25T16:32:50.977Z DEBUG consensus] Processing qkP/EoDUGdV29DL7: B1(khhNI19MmuR+gfoH)
-[2024-12-25T16:32:50.977Z DEBUG primary::core] Processing ReadyHeader { id: qkP/EoDUGdV29DL7HMRwurYfToTybfYZktjsztyUwOU=, round: 1, author: khhNI19MmuR+gfoHRJSPIoLRyi2CgriJsdvPaVc2CMo=, origin: khhNI19MmuR+gfoHRJSPIoLRyi2CgriJsdvPaVc2CMo= }
-[2024-12-25T16:32:50.977Z INFO  primary::core] Sending header qkP/EoDUGdV29DL7HMRwurYfToTybfYZktjsztyUwOU= to consensus
-[2024-12-25T16:32:50.977Z DEBUG consensus] Processing qkP/EoDUGdV29DL7: B1(khhNI19MmuR+gfoH)
-[2024-12-25T16:32:51.946Z INFO  network::receiver] Incoming connection established with 127.0.0.1:37008
-[2024-12-25T16:32:51.962Z INFO  network::receiver] Incoming connection established with 127.0.0.1:37018
-[2024-12-25T16:32:51.963Z INFO  network::simple_sender] Outgoing connection established with 127.0.0.1:3013
-[2024-12-25T16:32:51.963Z INFO  network::receiver] Incoming connection established with 127.0.0.1:37020
-[2024-12-25T16:32:51.963Z INFO  network::simple_sender] Outgoing connection established with 127.0.0.1:3001
-[2024-12-25T16:32:51.963Z INFO  network::simple_sender] Outgoing connection established with 127.0.0.1:3007
-[2024-12-25T16:32:51.966Z DEBUG primary::core] Processing Timeout: R1(Pl8f4aaj3ap5K6OG)
-[2024-12-25T16:32:51.969Z DEBUG primary::core] Processing Timeout: R1(6E8e7pFuMdQ1HUpL)
-[2024-12-25T16:32:51.972Z WARN  primary::proposer] Timer expired for round 1
-[2024-12-25T16:32:51.972Z DEBUG primary::proposer] Created Timeout: R1(LsJLzYDpN5X+aVKi)
-[2024-12-25T16:32:51.972Z DEBUG primary::core] Broadcasted own timeout for round 1
-[2024-12-25T16:32:51.972Z DEBUG primary::core] Processing Timeout: R1(LsJLzYDpN5X+aVKi)
-[2024-12-25T16:32:51.972Z DEBUG primary::core] Aggregated timeout cert Timeout: R1(LsJLzYDpN5X+aVKi)
-[2024-12-25T16:32:51.977Z DEBUG primary::core] Processing Timeout: R1(khhNI19MmuR+gfoH)
-[2024-12-25T16:32:51.977Z DEBUG primary::core] Aggregated timeout cert Timeout: R1(khhNI19MmuR+gfoH)
+[2024-12-26T14:02:08.283Z INFO  config] Header size set to 1 B
+[2024-12-26T14:02:08.283Z INFO  config] Max header delay set to 10000 ms
+[2024-12-26T14:02:08.284Z INFO  config] Garbage collection depth set to 50 rounds
+[2024-12-26T14:02:08.284Z INFO  config] Sync retry delay set to 10000 ms
+[2024-12-26T14:02:08.284Z INFO  config] Sync retry nodes set to 3 nodes
+[2024-12-26T14:02:08.284Z INFO  config] Batch size set to 50000 B
+[2024-12-26T14:02:08.284Z INFO  config] Max batch delay set to 200 ms
+[2024-12-26T14:02:08.284Z INFO  primary::primary] Primary gbM8gO0rQn+LbRlc listening to primary messages on 0.0.0.0:3019
+[2024-12-26T14:02:08.284Z INFO  primary::worker] Worker 0 listening to client transactions on 0.0.0.0:3022
+[2024-12-26T14:02:08.284Z INFO  primary::worker] Worker 0 successfully booted on 127.0.0.1
+[2024-12-26T14:02:08.284Z INFO  primary::primary] Primary gbM8gO0rQn+LbRlc successfully booted on 127.0.0.1
+[2024-12-26T14:02:08.284Z DEBUG network::receiver] Listening on 0.0.0.0:3022
+[2024-12-26T14:02:08.284Z DEBUG network::receiver] Listening on 0.0.0.0:3019
+[2024-12-26T14:02:08.284Z DEBUG primary::proposer] Dag starting at round 0
+[2024-12-26T14:02:08.287Z INFO  network::receiver] Incoming connection established with 127.0.0.1:51636
+[2024-12-26T14:02:08.287Z INFO  network::receiver] Incoming connection established with 127.0.0.1:51642
+[2024-12-26T14:02:08.288Z WARN  network::receiver] Client closed connection without sending data. Peer: 127.0.0.1:51636, Duration: 40.422µs
+[2024-12-26T14:02:08.288Z INFO  network::receiver] Incoming connection established with 127.0.0.1:51648
+[2024-12-26T14:02:08.288Z WARN  network::receiver] Client closed connection without sending data. Peer: 127.0.0.1:51648, Duration: 123.152µs
+[2024-12-26T14:02:08.289Z INFO  network::receiver] Incoming connection established with 127.0.0.1:51656
+[2024-12-26T14:02:08.289Z WARN  network::receiver] Client closed connection without sending data. Peer: 127.0.0.1:51656, Duration: 19.1µs
+[2024-12-26T14:02:08.290Z INFO  primary::proposer] enough_parents: 4
+[2024-12-26T14:02:08.290Z DEBUG primary::proposer] Dag moved to round 1
+[2024-12-26T14:02:08.290Z DEBUG primary::proposer] Created 7G/wS/JUdoWsGVzOXU2I3ZD45snBvw1NSzT8Ku0YbSI=
+[2024-12-26T14:02:08.290Z INFO  primary::proposer] Created 7G/wS/JUdoWsGVzOXU2I3ZD45snBvw1NSzT8Ku0YbSI=
+[2024-12-26T14:02:08.290Z INFO  primary::proposer] Header 7G/wS/JUdoWsGVzOXU2I3ZD45snBvw1NSzT8Ku0YbSI= contains 0 B
+[2024-12-26T14:02:08.290Z DEBUG primary::core] Processing own 7G/wS/JUdoWsGVzO: B1(gbM8gO0rQn+LbRlc)
+[2024-12-26T14:02:08.290Z DEBUG primary::core] Processing 7G/wS/JUdoWsGVzO: B1(gbM8gO0rQn+LbRlc)
+[2024-12-26T14:02:08.290Z INFO  primary::core] received header 7G/wS/JUdoWsGVzOXU2I3ZD45snBvw1NSzT8Ku0YbSI= round 1
+[2024-12-26T14:02:08.290Z DEBUG primary::core] Broadcasted EchoHeader with hash 1
+[2024-12-26T14:02:08.290Z INFO  network::reliable_sender] Outgoing connection established with 127.0.0.1:3007
+[2024-12-26T14:02:08.290Z INFO  network::reliable_sender] Outgoing connection established with 127.0.0.1:3013
+[2024-12-26T14:02:08.290Z INFO  network::reliable_sender] Outgoing connection established with 127.0.0.1:3001
+[2024-12-26T14:02:08.291Z INFO  network::receiver] Incoming connection established with 127.0.0.1:59714
+[2024-12-26T14:02:08.291Z INFO  network::receiver] Incoming connection established with 127.0.0.1:59706
+[2024-12-26T14:02:08.291Z DEBUG primary::core] Processing EchoHeader { id: 7G/wS/JUdoWsGVzOXU2I3ZD45snBvw1NSzT8Ku0YbSI=, round: 1, author: 6KfGxk4NkYaq45DFtZc3P5eYEh6a+pLjPv+midrwq80=, origin: gbM8gO0rQn+LbRlcoq6jbBgcrpG4VAPT2luwkP3+pIs= }
+[2024-12-26T14:02:08.291Z INFO  network::receiver] Incoming connection established with 127.0.0.1:59730
+[2024-12-26T14:02:08.291Z DEBUG primary::core] Processing EchoHeader { id: 7G/wS/JUdoWsGVzOXU2I3ZD45snBvw1NSzT8Ku0YbSI=, round: 1, author: pNGD0HIdmKKp9d7N7kReMoE9mA8awBfSJEB/zAaVJdE=, origin: gbM8gO0rQn+LbRlcoq6jbBgcrpG4VAPT2luwkP3+pIs= }
+[2024-12-26T14:02:08.291Z INFO  primary::core] Broadcasted ReadyHeader with hash 1
+[2024-12-26T14:02:08.291Z DEBUG primary::core] Processing ReadyHeader { id: 7G/wS/JUdoWsGVzOXU2I3ZD45snBvw1NSzT8Ku0YbSI=, round: 1, author: pNGD0HIdmKKp9d7N7kReMoE9mA8awBfSJEB/zAaVJdE=, origin: gbM8gO0rQn+LbRlcoq6jbBgcrpG4VAPT2luwkP3+pIs= }
+[2024-12-26T14:02:08.291Z INFO  primary::core] weight: 2
+[2024-12-26T14:02:08.291Z DEBUG primary::core] Processing ReadyHeader { id: 7G/wS/JUdoWsGVzOXU2I3ZD45snBvw1NSzT8Ku0YbSI=, round: 1, author: 6KfGxk4NkYaq45DFtZc3P5eYEh6a+pLjPv+midrwq80=, origin: gbM8gO0rQn+LbRlcoq6jbBgcrpG4VAPT2luwkP3+pIs= }
+[2024-12-26T14:02:08.291Z INFO  primary::core] weight: 3
+[2024-12-26T14:02:08.291Z INFO  primary::core] Sending header 7G/wS/JUdoWsGVzOXU2I3ZD45snBvw1NSzT8Ku0YbSI= to consensus at round 1
+[2024-12-26T14:02:08.291Z INFO  primary::aggregators] headersaggregator weight: 1 at round 1
+[2024-12-26T14:02:08.291Z DEBUG primary::core] Processing EchoHeader { id: 7G/wS/JUdoWsGVzOXU2I3ZD45snBvw1NSzT8Ku0YbSI=, round: 1, author: vsuH5+uaoPpfo4VRIo0Ul1uVBTAvAth63DGitWMhAWQ=, origin: gbM8gO0rQn+LbRlcoq6jbBgcrpG4VAPT2luwkP3+pIs= }
+[2024-12-26T14:02:08.291Z DEBUG primary::core] Processing ReadyHeader { id: 7G/wS/JUdoWsGVzOXU2I3ZD45snBvw1NSzT8Ku0YbSI=, round: 1, author: vsuH5+uaoPpfo4VRIo0Ul1uVBTAvAth63DGitWMhAWQ=, origin: gbM8gO0rQn+LbRlcoq6jbBgcrpG4VAPT2luwkP3+pIs= }
+[2024-12-26T14:02:08.291Z INFO  primary::core] weight: 4
+[2024-12-26T14:02:08.291Z DEBUG consensus] Processing 7G/wS/JUdoWsGVzO: B1(gbM8gO0rQn+LbRlc)
+[2024-12-26T14:02:08.291Z INFO  consensus] Leader round: 0
+[2024-12-26T14:02:08.291Z INFO  consensus] Last committed round: 0
+[2024-12-26T14:02:08.292Z INFO  network::receiver] Incoming connection established with 127.0.0.1:51660
+[2024-12-26T14:02:08.292Z WARN  network::receiver] Client closed connection without sending data. Peer: 127.0.0.1:51660, Duration: 14.295µs
+[2024-12-26T14:02:08.292Z DEBUG primary::core] Processing egNjfM8L4jzRcldg: B1(pNGD0HIdmKKp9d7N)
+[2024-12-26T14:02:08.292Z INFO  primary::core] received header egNjfM8L4jzRcldgiNwM8ajIwXv3KSQCw6zb01Mz1AI= round 1
+[2024-12-26T14:02:08.292Z DEBUG primary::core] Broadcasted EchoHeader with hash 1
+[2024-12-26T14:02:08.292Z DEBUG primary::core] Processing VNllrUS1rTt2Ucpo: B1(6KfGxk4NkYaq45DF)
+[2024-12-26T14:02:08.292Z INFO  primary::core] received header VNllrUS1rTt2UcpoW2AlnBMyrmgarFq9gqloVP6hkJo= round 1
+[2024-12-26T14:02:08.292Z DEBUG primary::core] Broadcasted EchoHeader with hash 1
+[2024-12-26T14:02:08.292Z DEBUG primary::core] Processing EchoHeader { id: VNllrUS1rTt2UcpoW2AlnBMyrmgarFq9gqloVP6hkJo=, round: 1, author: 6KfGxk4NkYaq45DFtZc3P5eYEh6a+pLjPv+midrwq80=, origin: 6KfGxk4NkYaq45DFtZc3P5eYEh6a+pLjPv+midrwq80= }
+[2024-12-26T14:02:08.292Z DEBUG primary::core] Processing EchoHeader { id: egNjfM8L4jzRcldgiNwM8ajIwXv3KSQCw6zb01Mz1AI=, round: 1, author: pNGD0HIdmKKp9d7N7kReMoE9mA8awBfSJEB/zAaVJdE=, origin: pNGD0HIdmKKp9d7N7kReMoE9mA8awBfSJEB/zAaVJdE= }
+[2024-12-26T14:02:08.292Z DEBUG primary::core] Processing EchoHeader { id: egNjfM8L4jzRcldgiNwM8ajIwXv3KSQCw6zb01Mz1AI=, round: 1, author: vsuH5+uaoPpfo4VRIo0Ul1uVBTAvAth63DGitWMhAWQ=, origin: pNGD0HIdmKKp9d7N7kReMoE9mA8awBfSJEB/zAaVJdE= }
+[2024-12-26T14:02:08.292Z INFO  primary::core] Broadcasted ReadyHeader with hash 1
+[2024-12-26T14:02:08.292Z DEBUG primary::core] Processing EchoHeader { id: egNjfM8L4jzRcldgiNwM8ajIwXv3KSQCw6zb01Mz1AI=, round: 1, author: 6KfGxk4NkYaq45DFtZc3P5eYEh6a+pLjPv+midrwq80=, origin: pNGD0HIdmKKp9d7N7kReMoE9mA8awBfSJEB/zAaVJdE= }
+[2024-12-26T14:02:08.293Z DEBUG primary::core] Processing EchoHeader { id: VNllrUS1rTt2UcpoW2AlnBMyrmgarFq9gqloVP6hkJo=, round: 1, author: pNGD0HIdmKKp9d7N7kReMoE9mA8awBfSJEB/zAaVJdE=, origin: 6KfGxk4NkYaq45DFtZc3P5eYEh6a+pLjPv+midrwq80= }
+[2024-12-26T14:02:08.293Z INFO  primary::core] Broadcasted ReadyHeader with hash 1
+[2024-12-26T14:02:08.293Z DEBUG primary::core] Processing ReadyHeader { id: egNjfM8L4jzRcldgiNwM8ajIwXv3KSQCw6zb01Mz1AI=, round: 1, author: 6KfGxk4NkYaq45DFtZc3P5eYEh6a+pLjPv+midrwq80=, origin: pNGD0HIdmKKp9d7N7kReMoE9mA8awBfSJEB/zAaVJdE= }
+[2024-12-26T14:02:08.293Z INFO  primary::core] weight: 2
+[2024-12-26T14:02:08.293Z DEBUG primary::core] Processing ReadyHeader { id: egNjfM8L4jzRcldgiNwM8ajIwXv3KSQCw6zb01Mz1AI=, round: 1, author: pNGD0HIdmKKp9d7N7kReMoE9mA8awBfSJEB/zAaVJdE=, origin: pNGD0HIdmKKp9d7N7kReMoE9mA8awBfSJEB/zAaVJdE= }
+[2024-12-26T14:02:08.293Z INFO  primary::core] weight: 3
+[2024-12-26T14:02:08.293Z INFO  primary::core] Sending header egNjfM8L4jzRcldgiNwM8ajIwXv3KSQCw6zb01Mz1AI= to consensus at round 1
+[2024-12-26T14:02:08.293Z INFO  primary::aggregators] headersaggregator weight: 2 at round 1
+[2024-12-26T14:02:08.293Z DEBUG primary::core] Processing ReadyHeader { id: VNllrUS1rTt2UcpoW2AlnBMyrmgarFq9gqloVP6hkJo=, round: 1, author: pNGD0HIdmKKp9d7N7kReMoE9mA8awBfSJEB/zAaVJdE=, origin: 6KfGxk4NkYaq45DFtZc3P5eYEh6a+pLjPv+midrwq80= }
+[2024-12-26T14:02:08.293Z INFO  primary::core] weight: 2
+[2024-12-26T14:02:08.293Z DEBUG consensus] Processing egNjfM8L4jzRcldg: B1(pNGD0HIdmKKp9d7N)
+[2024-12-26T14:02:08.293Z INFO  consensus] Leader round: 0
+[2024-12-26T14:02:08.293Z INFO  consensus] Last committed round: 0
+[2024-12-26T14:02:08.293Z DEBUG primary::core] Processing ReadyHeader { id: egNjfM8L4jzRcldgiNwM8ajIwXv3KSQCw6zb01Mz1AI=, round: 1, author: vsuH5+uaoPpfo4VRIo0Ul1uVBTAvAth63DGitWMhAWQ=, origin: pNGD0HIdmKKp9d7N7kReMoE9mA8awBfSJEB/zAaVJdE= }
+[2024-12-26T14:02:08.293Z INFO  primary::core] weight: 4
+[2024-12-26T14:02:08.293Z DEBUG primary::core] Processing ReadyHeader { id: VNllrUS1rTt2UcpoW2AlnBMyrmgarFq9gqloVP6hkJo=, round: 1, author: 6KfGxk4NkYaq45DFtZc3P5eYEh6a+pLjPv+midrwq80=, origin: 6KfGxk4NkYaq45DFtZc3P5eYEh6a+pLjPv+midrwq80= }
+[2024-12-26T14:02:08.293Z INFO  primary::core] weight: 3
+[2024-12-26T14:02:08.293Z INFO  primary::core] Sending header VNllrUS1rTt2UcpoW2AlnBMyrmgarFq9gqloVP6hkJo= to consensus at round 1
+[2024-12-26T14:02:08.293Z INFO  primary::aggregators] headersaggregator weight: 3 at round 1
+[2024-12-26T14:02:08.293Z INFO  primary::core] parents_len: 3
+[2024-12-26T14:02:08.293Z INFO  primary::core] sent parents to proposer at round 1!
+[2024-12-26T14:02:08.293Z DEBUG primary::proposer] Got leader pNGD0HIdmKKp9d7N for round 1
+[2024-12-26T14:02:08.293Z DEBUG primary::core] Processing EchoHeader { id: VNllrUS1rTt2UcpoW2AlnBMyrmgarFq9gqloVP6hkJo=, round: 1, author: vsuH5+uaoPpfo4VRIo0Ul1uVBTAvAth63DGitWMhAWQ=, origin: 6KfGxk4NkYaq45DFtZc3P5eYEh6a+pLjPv+midrwq80= }
+[2024-12-26T14:02:08.293Z INFO  primary::proposer] enough_parents: 3
+[2024-12-26T14:02:08.293Z DEBUG consensus] Processing VNllrUS1rTt2Ucpo: B1(6KfGxk4NkYaq45DF)
+[2024-12-26T14:02:08.293Z DEBUG primary::proposer] Dag moved to round 2
+[2024-12-26T14:02:08.293Z INFO  consensus] Leader round: 0
+[2024-12-26T14:02:08.293Z INFO  consensus] Last committed round: 0
+[2024-12-26T14:02:08.293Z DEBUG primary::core] Processing ReadyHeader { id: VNllrUS1rTt2UcpoW2AlnBMyrmgarFq9gqloVP6hkJo=, round: 1, author: vsuH5+uaoPpfo4VRIo0Ul1uVBTAvAth63DGitWMhAWQ=, origin: 6KfGxk4NkYaq45DFtZc3P5eYEh6a+pLjPv+midrwq80= }
+[2024-12-26T14:02:08.293Z INFO  primary::core] weight: 4
+[2024-12-26T14:02:08.293Z DEBUG primary::proposer] Created GLldmazSo0zo/F9sYhLiPjkYqS+1UfSMH9bQwjvM4FA=
+[2024-12-26T14:02:08.293Z INFO  primary::proposer] Created GLldmazSo0zo/F9sYhLiPjkYqS+1UfSMH9bQwjvM4FA=
+[2024-12-26T14:02:08.293Z INFO  primary::proposer] Header GLldmazSo0zo/F9sYhLiPjkYqS+1UfSMH9bQwjvM4FA= contains 0 B
+[2024-12-26T14:02:08.293Z DEBUG primary::core] Processing own GLldmazSo0zo/F9s: B2(gbM8gO0rQn+LbRlc)
+[2024-12-26T14:02:08.293Z DEBUG primary::core] Processing GLldmazSo0zo/F9s: B2(gbM8gO0rQn+LbRlc)
+[2024-12-26T14:02:08.293Z INFO  primary::core] received header GLldmazSo0zo/F9sYhLiPjkYqS+1UfSMH9bQwjvM4FA= round 2
+[2024-12-26T14:02:08.293Z INFO  primary::core] stake: 3
+[2024-12-26T14:02:08.293Z DEBUG primary::core] Broadcasted EchoHeader with hash 2
+[2024-12-26T14:02:08.293Z DEBUG primary::core] Processing EchoHeader { id: GLldmazSo0zo/F9sYhLiPjkYqS+1UfSMH9bQwjvM4FA=, round: 2, author: pNGD0HIdmKKp9d7N7kReMoE9mA8awBfSJEB/zAaVJdE=, origin: gbM8gO0rQn+LbRlcoq6jbBgcrpG4VAPT2luwkP3+pIs= }
+[2024-12-26T14:02:08.293Z DEBUG primary::core] Processing O4pxV7AJ5mDHEwsC: B2(pNGD0HIdmKKp9d7N)
+[2024-12-26T14:02:08.293Z INFO  primary::core] received header O4pxV7AJ5mDHEwsCMgOJFzRCxUU/OXwKNaM+KbGtjyg= round 2
+[2024-12-26T14:02:08.293Z INFO  primary::core] stake: 3
+[2024-12-26T14:02:08.293Z DEBUG primary::core] Broadcasted EchoHeader with hash 2
+[2024-12-26T14:02:08.293Z DEBUG primary::core] Processing EchoHeader { id: O4pxV7AJ5mDHEwsCMgOJFzRCxUU/OXwKNaM+KbGtjyg=, round: 2, author: pNGD0HIdmKKp9d7N7kReMoE9mA8awBfSJEB/zAaVJdE=, origin: pNGD0HIdmKKp9d7N7kReMoE9mA8awBfSJEB/zAaVJdE= }
+[2024-12-26T14:02:08.293Z DEBUG primary::core] Processing EchoHeader { id: GLldmazSo0zo/F9sYhLiPjkYqS+1UfSMH9bQwjvM4FA=, round: 2, author: vsuH5+uaoPpfo4VRIo0Ul1uVBTAvAth63DGitWMhAWQ=, origin: gbM8gO0rQn+LbRlcoq6jbBgcrpG4VAPT2luwkP3+pIs= }
+[2024-12-26T14:02:08.293Z INFO  primary::core] Broadcasted ReadyHeader with hash 2
+[2024-12-26T14:02:08.293Z DEBUG primary::core] Processing EchoHeader { id: GLldmazSo0zo/F9sYhLiPjkYqS+1UfSMH9bQwjvM4FA=, round: 2, author: 6KfGxk4NkYaq45DFtZc3P5eYEh6a+pLjPv+midrwq80=, origin: gbM8gO0rQn+LbRlcoq6jbBgcrpG4VAPT2luwkP3+pIs= }
+[2024-12-26T14:02:08.293Z DEBUG primary::core] Processing quVR0CH7flOax9Z9: B2(6KfGxk4NkYaq45DF)
+[2024-12-26T14:02:08.293Z INFO  primary::core] received header quVR0CH7flOax9Z9O+yZ/+9uPbbw8cfpiASIkuFKioc= round 2
+[2024-12-26T14:02:08.293Z INFO  primary::core] stake: 3
+[2024-12-26T14:02:08.293Z DEBUG primary::core] Broadcasted EchoHeader with hash 2
+[2024-12-26T14:02:08.293Z DEBUG primary::core] Processing ReadyHeader { id: GLldmazSo0zo/F9sYhLiPjkYqS+1UfSMH9bQwjvM4FA=, round: 2, author: pNGD0HIdmKKp9d7N7kReMoE9mA8awBfSJEB/zAaVJdE=, origin: gbM8gO0rQn+LbRlcoq6jbBgcrpG4VAPT2luwkP3+pIs= }
+[2024-12-26T14:02:08.293Z INFO  primary::core] weight: 2
+[2024-12-26T14:02:08.293Z DEBUG primary::core] Processing ReadyHeader { id: GLldmazSo0zo/F9sYhLiPjkYqS+1UfSMH9bQwjvM4FA=, round: 2, author: vsuH5+uaoPpfo4VRIo0Ul1uVBTAvAth63DGitWMhAWQ=, origin: gbM8gO0rQn+LbRlcoq6jbBgcrpG4VAPT2luwkP3+pIs= }
+[2024-12-26T14:02:08.293Z INFO  primary::core] weight: 3
+[2024-12-26T14:02:08.293Z INFO  primary::core] Sending header GLldmazSo0zo/F9sYhLiPjkYqS+1UfSMH9bQwjvM4FA= to consensus at round 2
+[2024-12-26T14:02:08.293Z INFO  primary::aggregators] headersaggregator weight: 1 at round 2
+[2024-12-26T14:02:08.293Z DEBUG primary::core] Processing EchoHeader { id: quVR0CH7flOax9Z9O+yZ/+9uPbbw8cfpiASIkuFKioc=, round: 2, author: 6KfGxk4NkYaq45DFtZc3P5eYEh6a+pLjPv+midrwq80=, origin: 6KfGxk4NkYaq45DFtZc3P5eYEh6a+pLjPv+midrwq80= }
+[2024-12-26T14:02:08.293Z DEBUG primary::core] Processing EchoHeader { id: quVR0CH7flOax9Z9O+yZ/+9uPbbw8cfpiASIkuFKioc=, round: 2, author: pNGD0HIdmKKp9d7N7kReMoE9mA8awBfSJEB/zAaVJdE=, origin: 6KfGxk4NkYaq45DFtZc3P5eYEh6a+pLjPv+midrwq80= }
+[2024-12-26T14:02:08.293Z INFO  primary::core] Broadcasted ReadyHeader with hash 2
+[2024-12-26T14:02:08.293Z DEBUG consensus] Processing GLldmazSo0zo/F9s: B2(gbM8gO0rQn+LbRlc)
+[2024-12-26T14:02:08.293Z DEBUG primary::core] Processing EchoHeader { id: O4pxV7AJ5mDHEwsCMgOJFzRCxUU/OXwKNaM+KbGtjyg=, round: 2, author: vsuH5+uaoPpfo4VRIo0Ul1uVBTAvAth63DGitWMhAWQ=, origin: pNGD0HIdmKKp9d7N7kReMoE9mA8awBfSJEB/zAaVJdE= }
+[2024-12-26T14:02:08.293Z INFO  consensus] Leader round: 1
+[2024-12-26T14:02:08.293Z INFO  primary::core] Broadcasted ReadyHeader with hash 2
+[2024-12-26T14:02:08.293Z INFO  consensus] Last committed round: 0
+[2024-12-26T14:02:08.293Z DEBUG primary::core] Processing ReadyHeader { id: GLldmazSo0zo/F9sYhLiPjkYqS+1UfSMH9bQwjvM4FA=, round: 2, author: 6KfGxk4NkYaq45DFtZc3P5eYEh6a+pLjPv+midrwq80=, origin: gbM8gO0rQn+LbRlcoq6jbBgcrpG4VAPT2luwkP3+pIs= }
+[2024-12-26T14:02:08.294Z INFO  primary::core] weight: 4
+[2024-12-26T14:02:08.294Z DEBUG primary::core] Processing EchoHeader { id: O4pxV7AJ5mDHEwsCMgOJFzRCxUU/OXwKNaM+KbGtjyg=, round: 2, author: 6KfGxk4NkYaq45DFtZc3P5eYEh6a+pLjPv+midrwq80=, origin: pNGD0HIdmKKp9d7N7kReMoE9mA8awBfSJEB/zAaVJdE= }
+[2024-12-26T14:02:08.294Z INFO  consensus] dag {1: {gbM8gO0rQn+LbRlcoq6jbBgcrpG4VAPT2luwkP3+pIs=: (7G/wS/JUdoWsGVzOXU2I3ZD45snBvw1NSzT8Ku0YbSI=, 7G/wS/JUdoWsGVzO: B1(gbM8gO0rQn+LbRlc)), 6KfGxk4NkYaq45DFtZc3P5eYEh6a+pLjPv+midrwq80=: (VNllrUS1rTt2UcpoW2AlnBMyrmgarFq9gqloVP6hkJo=, VNllrUS1rTt2Ucpo: B1(6KfGxk4NkYaq45DF)), pNGD0HIdmKKp9d7N7kReMoE9mA8awBfSJEB/zAaVJdE=: (egNjfM8L4jzRcldgiNwM8ajIwXv3KSQCw6zb01Mz1AI=, egNjfM8L4jzRcldg: B1(pNGD0HIdmKKp9d7N))}, 0: {AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=: (AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=, AAAAAAAAAAAAAAAA: B0(AAAAAAAAAAAAAAAA))}, 2: {gbM8gO0rQn+LbRlcoq6jbBgcrpG4VAPT2luwkP3+pIs=: (GLldmazSo0zo/F9sYhLiPjkYqS+1UfSMH9bQwjvM4FA=, GLldmazSo0zo/F9s: B2(gbM8gO0rQn+LbRlc))}}
+[2024-12-26T14:02:08.294Z DEBUG primary::core] Processing ReadyHeader { id: O4pxV7AJ5mDHEwsCMgOJFzRCxUU/OXwKNaM+KbGtjyg=, round: 2, author: pNGD0HIdmKKp9d7N7kReMoE9mA8awBfSJEB/zAaVJdE=, origin: pNGD0HIdmKKp9d7N7kReMoE9mA8awBfSJEB/zAaVJdE= }
+[2024-12-26T14:02:08.294Z INFO  primary::core] weight: 2
+[2024-12-26T14:02:08.294Z DEBUG primary::core] Processing ReadyHeader { id: quVR0CH7flOax9Z9O+yZ/+9uPbbw8cfpiASIkuFKioc=, round: 2, author: pNGD0HIdmKKp9d7N7kReMoE9mA8awBfSJEB/zAaVJdE=, origin: 6KfGxk4NkYaq45DFtZc3P5eYEh6a+pLjPv+midrwq80= }
+[2024-12-26T14:02:08.294Z INFO  consensus] parents: {VNllrUS1rTt2UcpoW2AlnBMyrmgarFq9gqloVP6hkJo=, egNjfM8L4jzRcldgiNwM8ajIwXv3KSQCw6zb01Mz1AI=, 7G/wS/JUdoWsGVzOXU2I3ZD45snBvw1NSzT8Ku0YbSI=} at round 2
+[2024-12-26T14:02:08.294Z INFO  consensus] leader_digest: egNjfM8L4jzRcldgiNwM8ajIwXv3KSQCw6zb01Mz1AI=
+[2024-12-26T14:02:08.294Z INFO  primary::core] weight: 2
+[2024-12-26T14:02:08.294Z INFO  consensus] stake_vote: {2: 1}
+[2024-12-26T14:02:08.294Z INFO  consensus] Current stake value: 1
+[2024-12-26T14:02:08.294Z DEBUG primary::core] Processing ReadyHeader { id: O4pxV7AJ5mDHEwsCMgOJFzRCxUU/OXwKNaM+KbGtjyg=, round: 2, author: 6KfGxk4NkYaq45DFtZc3P5eYEh6a+pLjPv+midrwq80=, origin: pNGD0HIdmKKp9d7N7kReMoE9mA8awBfSJEB/zAaVJdE= }
+[2024-12-26T14:02:08.294Z INFO  primary::core] weight: 3
+[2024-12-26T14:02:08.294Z INFO  primary::core] Sending header O4pxV7AJ5mDHEwsCMgOJFzRCxUU/OXwKNaM+KbGtjyg= to consensus at round 2
+[2024-12-26T14:02:08.294Z INFO  primary::aggregators] headersaggregator weight: 2 at round 2
+[2024-12-26T14:02:08.294Z DEBUG primary::core] Processing EchoHeader { id: quVR0CH7flOax9Z9O+yZ/+9uPbbw8cfpiASIkuFKioc=, round: 2, author: vsuH5+uaoPpfo4VRIo0Ul1uVBTAvAth63DGitWMhAWQ=, origin: 6KfGxk4NkYaq45DFtZc3P5eYEh6a+pLjPv+midrwq80= }
+[2024-12-26T14:02:08.294Z DEBUG consensus] Processing O4pxV7AJ5mDHEwsC: B2(pNGD0HIdmKKp9d7N)
+[2024-12-26T14:02:08.294Z INFO  consensus] Leader round: 1
+[2024-12-26T14:02:08.294Z INFO  consensus] Last committed round: 0
+[2024-12-26T14:02:08.294Z INFO  consensus] dag {1: {gbM8gO0rQn+LbRlcoq6jbBgcrpG4VAPT2luwkP3+pIs=: (7G/wS/JUdoWsGVzOXU2I3ZD45snBvw1NSzT8Ku0YbSI=, 7G/wS/JUdoWsGVzO: B1(gbM8gO0rQn+LbRlc)), 6KfGxk4NkYaq45DFtZc3P5eYEh6a+pLjPv+midrwq80=: (VNllrUS1rTt2UcpoW2AlnBMyrmgarFq9gqloVP6hkJo=, VNllrUS1rTt2Ucpo: B1(6KfGxk4NkYaq45DF)), pNGD0HIdmKKp9d7N7kReMoE9mA8awBfSJEB/zAaVJdE=: (egNjfM8L4jzRcldgiNwM8ajIwXv3KSQCw6zb01Mz1AI=, egNjfM8L4jzRcldg: B1(pNGD0HIdmKKp9d7N))}, 0: {AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=: (AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=, AAAAAAAAAAAAAAAA: B0(AAAAAAAAAAAAAAAA))}, 2: {pNGD0HIdmKKp9d7N7kReMoE9mA8awBfSJEB/zAaVJdE=: (O4pxV7AJ5mDHEwsCMgOJFzRCxUU/OXwKNaM+KbGtjyg=, O4pxV7AJ5mDHEwsC: B2(pNGD0HIdmKKp9d7N)), gbM8gO0rQn+LbRlcoq6jbBgcrpG4VAPT2luwkP3+pIs=: (GLldmazSo0zo/F9sYhLiPjkYqS+1UfSMH9bQwjvM4FA=, GLldmazSo0zo/F9s: B2(gbM8gO0rQn+LbRlc))}}
+[2024-12-26T14:02:08.294Z INFO  consensus] parents: {VNllrUS1rTt2UcpoW2AlnBMyrmgarFq9gqloVP6hkJo=, egNjfM8L4jzRcldgiNwM8ajIwXv3KSQCw6zb01Mz1AI=, 7G/wS/JUdoWsGVzOXU2I3ZD45snBvw1NSzT8Ku0YbSI=} at round 2
+[2024-12-26T14:02:08.294Z INFO  consensus] leader_digest: egNjfM8L4jzRcldgiNwM8ajIwXv3KSQCw6zb01Mz1AI=
+[2024-12-26T14:02:08.294Z DEBUG primary::core] Processing ReadyHeader { id: O4pxV7AJ5mDHEwsCMgOJFzRCxUU/OXwKNaM+KbGtjyg=, round: 2, author: vsuH5+uaoPpfo4VRIo0Ul1uVBTAvAth63DGitWMhAWQ=, origin: pNGD0HIdmKKp9d7N7kReMoE9mA8awBfSJEB/zAaVJdE= }
+[2024-12-26T14:02:08.294Z INFO  primary::core] weight: 4
+[2024-12-26T14:02:08.294Z INFO  consensus] stake_vote: {2: 2}
+[2024-12-26T14:02:08.294Z INFO  consensus] Current stake value: 2
+[2024-12-26T14:02:08.294Z DEBUG primary::core] Processing ReadyHeader { id: quVR0CH7flOax9Z9O+yZ/+9uPbbw8cfpiASIkuFKioc=, round: 2, author: 6KfGxk4NkYaq45DFtZc3P5eYEh6a+pLjPv+midrwq80=, origin: 6KfGxk4NkYaq45DFtZc3P5eYEh6a+pLjPv+midrwq80= }
+[2024-12-26T14:02:08.294Z INFO  primary::core] weight: 3
+[2024-12-26T14:02:08.294Z INFO  primary::core] Sending header quVR0CH7flOax9Z9O+yZ/+9uPbbw8cfpiASIkuFKioc= to consensus at round 2
+[2024-12-26T14:02:08.294Z INFO  primary::aggregators] headersaggregator weight: 3 at round 2
+[2024-12-26T14:02:08.294Z DEBUG primary::core] Processing ReadyHeader { id: quVR0CH7flOax9Z9O+yZ/+9uPbbw8cfpiASIkuFKioc=, round: 2, author: vsuH5+uaoPpfo4VRIo0Ul1uVBTAvAth63DGitWMhAWQ=, origin: 6KfGxk4NkYaq45DFtZc3P5eYEh6a+pLjPv+midrwq80= }
+[2024-12-26T14:02:08.294Z INFO  primary::core] weight: 4
+[2024-12-26T14:02:08.294Z DEBUG consensus] Processing quVR0CH7flOax9Z9: B2(6KfGxk4NkYaq45DF)
+[2024-12-26T14:02:08.294Z INFO  consensus] Leader round: 1
+[2024-12-26T14:02:08.294Z INFO  consensus] Last committed round: 0
+[2024-12-26T14:02:08.294Z INFO  consensus] dag {1: {gbM8gO0rQn+LbRlcoq6jbBgcrpG4VAPT2luwkP3+pIs=: (7G/wS/JUdoWsGVzOXU2I3ZD45snBvw1NSzT8Ku0YbSI=, 7G/wS/JUdoWsGVzO: B1(gbM8gO0rQn+LbRlc)), 6KfGxk4NkYaq45DFtZc3P5eYEh6a+pLjPv+midrwq80=: (VNllrUS1rTt2UcpoW2AlnBMyrmgarFq9gqloVP6hkJo=, VNllrUS1rTt2Ucpo: B1(6KfGxk4NkYaq45DF)), pNGD0HIdmKKp9d7N7kReMoE9mA8awBfSJEB/zAaVJdE=: (egNjfM8L4jzRcldgiNwM8ajIwXv3KSQCw6zb01Mz1AI=, egNjfM8L4jzRcldg: B1(pNGD0HIdmKKp9d7N))}, 0: {AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=: (AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=, AAAAAAAAAAAAAAAA: B0(AAAAAAAAAAAAAAAA))}, 2: {pNGD0HIdmKKp9d7N7kReMoE9mA8awBfSJEB/zAaVJdE=: (O4pxV7AJ5mDHEwsCMgOJFzRCxUU/OXwKNaM+KbGtjyg=, O4pxV7AJ5mDHEwsC: B2(pNGD0HIdmKKp9d7N)), 6KfGxk4NkYaq45DFtZc3P5eYEh6a+pLjPv+midrwq80=: (quVR0CH7flOax9Z9O+yZ/+9uPbbw8cfpiASIkuFKioc=, quVR0CH7flOax9Z9: B2(6KfGxk4NkYaq45DF)), gbM8gO0rQn+LbRlcoq6jbBgcrpG4VAPT2luwkP3+pIs=: (GLldmazSo0zo/F9sYhLiPjkYqS+1UfSMH9bQwjvM4FA=, GLldmazSo0zo/F9s: B2(gbM8gO0rQn+LbRlc))}}
+[2024-12-26T14:02:08.294Z INFO  consensus] parents: {VNllrUS1rTt2UcpoW2AlnBMyrmgarFq9gqloVP6hkJo=, egNjfM8L4jzRcldgiNwM8ajIwXv3KSQCw6zb01Mz1AI=, 7G/wS/JUdoWsGVzOXU2I3ZD45snBvw1NSzT8Ku0YbSI=} at round 2
+[2024-12-26T14:02:08.294Z INFO  consensus] leader_digest: egNjfM8L4jzRcldgiNwM8ajIwXv3KSQCw6zb01Mz1AI=
+[2024-12-26T14:02:08.294Z INFO  consensus] stake_vote: {2: 3}
+[2024-12-26T14:02:08.294Z INFO  consensus] Current stake value: 3
+[2024-12-26T14:02:08.294Z DEBUG consensus] Leader egNjfM8L4jzRcldg: B1(pNGD0HIdmKKp9d7N) has enough support with header
+[2024-12-26T14:02:08.294Z DEBUG consensus] Processing sub-dag of egNjfM8L4jzRcldg: B1(pNGD0HIdmKKp9d7N)
+[2024-12-26T14:02:08.294Z DEBUG consensus] Sequencing egNjfM8L4jzRcldg: B1(pNGD0HIdmKKp9d7N)
+[2024-12-26T14:02:08.294Z INFO  consensus] sequence: [egNjfM8L4jzRcldg: B1(pNGD0HIdmKKp9d7N)]
+[2024-12-26T14:02:08.294Z INFO  consensus] Committed egNjfM8L4jzRcldgiNwM8ajIwXv3KSQCw6zb01Mz1AI= Leader
+[2024-12-26T14:02:08.295Z DEBUG primary::core] Processing bmvoaAPSb3JBpQep: B2(vsuH5+uaoPpfo4VR)
+[2024-12-26T14:02:08.296Z INFO  primary::core] received header bmvoaAPSb3JBpQepEJtGSG28qH5+US/WyiyBLy738vY= round 2
+[2024-12-26T14:02:08.296Z INFO  primary::core] stake: 3
+[2024-12-26T14:02:08.296Z DEBUG primary::core] Broadcasted EchoHeader with hash 2
+[2024-12-26T14:02:08.296Z DEBUG primary::core] Processing EchoHeader { id: bmvoaAPSb3JBpQepEJtGSG28qH5+US/WyiyBLy738vY=, round: 2, author: vsuH5+uaoPpfo4VRIo0Ul1uVBTAvAth63DGitWMhAWQ=, origin: vsuH5+uaoPpfo4VRIo0Ul1uVBTAvAth63DGitWMhAWQ= }
+[2024-12-26T14:02:08.296Z DEBUG primary::core] Processing EchoHeader { id: bmvoaAPSb3JBpQepEJtGSG28qH5+US/WyiyBLy738vY=, round: 2, author: pNGD0HIdmKKp9d7N7kReMoE9mA8awBfSJEB/zAaVJdE=, origin: vsuH5+uaoPpfo4VRIo0Ul1uVBTAvAth63DGitWMhAWQ= }
+[2024-12-26T14:02:08.296Z INFO  primary::core] Broadcasted ReadyHeader with hash 2
+[2024-12-26T14:02:08.296Z DEBUG primary::core] Processing EchoHeader { id: bmvoaAPSb3JBpQepEJtGSG28qH5+US/WyiyBLy738vY=, round: 2, author: 6KfGxk4NkYaq45DFtZc3P5eYEh6a+pLjPv+midrwq80=, origin: vsuH5+uaoPpfo4VRIo0Ul1uVBTAvAth63DGitWMhAWQ= }
+[2024-12-26T14:02:08.296Z DEBUG primary::core] Processing ReadyHeader { id: bmvoaAPSb3JBpQepEJtGSG28qH5+US/WyiyBLy738vY=, round: 2, author: 6KfGxk4NkYaq45DFtZc3P5eYEh6a+pLjPv+midrwq80=, origin: vsuH5+uaoPpfo4VRIo0Ul1uVBTAvAth63DGitWMhAWQ= }
+[2024-12-26T14:02:08.296Z INFO  primary::core] weight: 2
+[2024-12-26T14:02:08.296Z DEBUG primary::core] Processing ReadyHeader { id: bmvoaAPSb3JBpQepEJtGSG28qH5+US/WyiyBLy738vY=, round: 2, author: pNGD0HIdmKKp9d7N7kReMoE9mA8awBfSJEB/zAaVJdE=, origin: vsuH5+uaoPpfo4VRIo0Ul1uVBTAvAth63DGitWMhAWQ= }
+[2024-12-26T14:02:08.296Z INFO  primary::core] weight: 3
+[2024-12-26T14:02:08.296Z INFO  primary::core] Sending header bmvoaAPSb3JBpQepEJtGSG28qH5+US/WyiyBLy738vY= to consensus at round 2
+[2024-12-26T14:02:08.296Z INFO  primary::aggregators] headersaggregator weight: 4 at round 2
+[2024-12-26T14:02:08.296Z INFO  primary::core] parents_len: 1
+[2024-12-26T14:02:08.296Z DEBUG consensus] Processing bmvoaAPSb3JBpQep: B2(vsuH5+uaoPpfo4VR)
+[2024-12-26T14:02:08.296Z INFO  primary::core] sent parents to proposer at round 2!
+[2024-12-26T14:02:08.296Z INFO  consensus] Leader round: 1
+[2024-12-26T14:02:08.296Z INFO  consensus] Last committed round: 1
+[2024-12-26T14:02:08.296Z DEBUG primary::core] Processing ReadyHeader { id: bmvoaAPSb3JBpQepEJtGSG28qH5+US/WyiyBLy738vY=, round: 2, author: vsuH5+uaoPpfo4VRIo0Ul1uVBTAvAth63DGitWMhAWQ=, origin: vsuH5+uaoPpfo4VRIo0Ul1uVBTAvAth63DGitWMhAWQ= }
+[2024-12-26T14:02:08.296Z INFO  primary::core] weight: 4
+[2024-12-26T14:02:08.296Z DEBUG primary::proposer] Got leader vsuH5+uaoPpfo4VR for round 2
+[2024-12-26T14:02:09.260Z INFO  network::receiver] Incoming connection established with 127.0.0.1:59732
+[2024-12-26T14:02:09.285Z INFO  network::receiver] Incoming connection established with 127.0.0.1:59744
+[2024-12-26T14:02:09.285Z INFO  network::simple_sender] Outgoing connection established with 127.0.0.1:3007
+[2024-12-26T14:02:09.285Z INFO  network::receiver] Incoming connection established with 127.0.0.1:59760
+[2024-12-26T14:02:09.285Z INFO  network::simple_sender] Outgoing connection established with 127.0.0.1:3013
+[2024-12-26T14:02:09.285Z INFO  network::simple_sender] Outgoing connection established with 127.0.0.1:3001
+[2024-12-26T14:02:18.293Z WARN  primary::proposer] Timer expired for round 2
+[2024-12-26T14:02:18.293Z DEBUG primary::proposer] Created Timeout: R2(gbM8gO0rQn+LbRlc)
+[2024-12-26T14:02:18.294Z DEBUG primary::core] Broadcasted own timeout for round 2
+[2024-12-26T14:02:18.294Z DEBUG primary::core] Processing Timeout: R2(gbM8gO0rQn+LbRlc)
+[2024-12-26T14:02:18.294Z DEBUG primary::core] Processing Timeout: R2(pNGD0HIdmKKp9d7N)
+[2024-12-26T14:02:18.294Z DEBUG primary::core] Processing Timeout: R2(6KfGxk4NkYaq45DF)
+[2024-12-26T14:02:18.294Z DEBUG primary::core] Aggregated timeout cert Timeout: R2(6KfGxk4NkYaq45DF)
+[2024-12-26T14:02:18.297Z DEBUG primary::core] Processing Timeout: R2(vsuH5+uaoPpfo4VR)
+[2024-12-26T14:02:18.297Z DEBUG primary::core] Aggregated timeout cert Timeout: R2(vsuH5+uaoPpfo4VR)
