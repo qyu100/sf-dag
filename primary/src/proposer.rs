@@ -255,7 +255,7 @@ impl Proposer {
                 if timer_expired && self.last_leader.is_none() && !is_next_leader {
                     self.make_no_vote_msg().await;
                 }
-                info!("enough_parents: {:?}", self.last_parents.len());
+                // info!("enough_parents: {:?}", self.last_parents.len());
                 // Advance to the next round.
                 self.round += 1;
                 debug!("Dag moved to round {}", self.round);

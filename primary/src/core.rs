@@ -215,7 +215,7 @@ impl Core {
         header: &Header,
     ) -> DagResult<()> {
         debug!("Processing {:?}", header);
-        info!("received header {:?} round {:?}", header.id, header.round);
+        // info!("received header {:?} round {:?}", header.id, header.round);
 
         // // Send header to consensus
         // self.tx_consensus_header
@@ -257,7 +257,7 @@ impl Core {
                         .leader((header.round - 1) as usize)
                         .eq(&x.author);
             }
-            info!("stake: {:?}", stake);
+            // info!("stake: {:?}", stake);
             ensure!(
                 stake >= self.committee.quorum_threshold(),
                 DagError::HeaderRequiresQuorum(header.id.clone())
@@ -331,7 +331,7 @@ impl Core {
 
     #[async_recursion]
     async fn process_echo_header(&mut self, echo_header: EchoHeader) -> DagResult<()> {
-        debug!("Processing {:?}", echo_header);
+        // debug!("Processing {:?}", echo_header);
 
         let round = echo_header.round;
         let digest = echo_header.id.clone();
@@ -373,7 +373,7 @@ impl Core {
                         .insert(self.name); 
 
                     self.ready_header_sent.insert((echo_header.round.clone(), echo_header.id.clone()), true);
-                    info!("Broadcasted ReadyHeader with hash {:?}", echo_header.round);
+                    // info!("Broadcasted ReadyHeader with hash {:?}", echo_header.round);
                 };
             }
         };
@@ -383,7 +383,7 @@ impl Core {
 
     #[async_recursion]
     async fn process_ready_header(&mut self, ready_header: ReadyHeader) -> DagResult<()> {
-        debug!("Processing {:?}", ready_header);
+        // debug!("Processing {:?}", ready_header);
 
         let round = ready_header.round;
         let digest = ready_header.id.clone();
@@ -403,7 +403,7 @@ impl Core {
         
         if let Some(ready_key) = self.ready_headers.get(&(round, digest.clone())) {
             let weight: Stake = ready_key.iter().map(|author| self.committee.stake(author)).sum();
-            info!("weight: {:?}", weight);
+            // info!("weight: {:?}", weight);
                 // Check if we have received f+1 <Ready, H(m)> for this round and digest, send <Ready, H(m)>
             if weight >= self.committee.validity_threshold() 
                 && weight < self.committee.quorum_threshold() {
@@ -439,7 +439,7 @@ impl Core {
                 if let Some(header) = self.processing_headers.get(&ready_header.id) {
                     // Send header to consensus
                     if !self.consensus_header_sent.contains_key(&(header.round, header.id.clone())) {
-                        info!("Sending header {:?} to consensus at round {:?}", header.id, header.round);
+                        // info!("Sending header {:?} to consensus at round {:?}", header.id, header.round);
                         self.tx_consensus_header
                             .send(header.clone())
                             .await
@@ -461,10 +461,10 @@ impl Core {
                                     .await
                                     .expect("Failed to send header to proposer");
                                 // info!("sending parents: {:?} at round {:?}", parents.clone(), header.round);
-                                info!("parents_len: {:?}", parents.len());
-                                info!("sent parents to proposer at round {:?}!", header.round);
+                                // info!("parents_len: {:?}", parents.len());
+                                // info!("sent parents to proposer at round {:?}!", header.round);
                             }
-                    }
+                        }
                     }
                 }
             }

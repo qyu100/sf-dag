@@ -128,9 +128,6 @@ impl Consensus {
                         .insert(header.author, (header.id.clone(), header.clone()));
 
                     let leader_round = r;
-
-                    info!("Leader round: {}", leader_round);
-                    info!("Last committed round: {}", state.last_committed_round);
                     if leader_round <= state.last_committed_round {
                         continue;
                     }
@@ -139,15 +136,11 @@ impl Consensus {
                         Some(x) => x,
                         None => continue,
                     };
-                    info!("parents: {:?} at round {:?}", header.parents, header.round);
-                    info!("leader_digest: {:?}", leader_digest);
                     if header.parents.contains(leader_digest) {
                         *self.stake_vote.entry(header.round.clone()).or_insert(0) += self.committee.stake(&header.author);
                     }
-                    info!("stake_vote: {:?}", self.stake_vote);
                     let current_stake = self.stake_vote.get(&header.round);
                     let current_stake_value = *current_stake.unwrap_or(&0);
-                    info!("Current stake value: {}", current_stake_value);
                     // Commit if we have QT
                     if current_stake_value >= self.committee.quorum_threshold() {
                         // Get an ordered list of past leaders that are linked to the current leader.
@@ -161,7 +154,6 @@ impl Consensus {
 
                                 // Add the certificate to the sequence.
                                 sequence.push(x);
-                                info!("sequence: {:?}", sequence);
                             }
                         }
 
@@ -206,7 +198,6 @@ impl Consensus {
 
         // Elect the leader.
         let leader = self.committee.leader(seed as usize);
-        info!("dag {:?}", dag);
         // Return its certificate and the certificate's digest.
         dag.get(&round).map(|x| x.get(&leader)).flatten()
     }
