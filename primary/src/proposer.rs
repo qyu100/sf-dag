@@ -174,7 +174,9 @@ impl Proposer {
                 header.id,
                 header.payload.len() * self.tx_size
             );
-
+            // info!("self.txns.len(): {:?}", self.txns.len());
+            // info!("self.header_size: {:?}", self.header_size);
+            // info!("payload_len: {:?}", header.payload.len());
             let tx_ids: Vec<_> = header
                 .payload
                 .clone()
