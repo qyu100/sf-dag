@@ -6,7 +6,7 @@ use config::Import as _;
 use config::{Committee, KeyPair, Parameters, WorkerId};
 use consensus::Consensus;
 use env_logger::Env;
-use primary::{Certificate, Primary};
+use primary::{Certificate, Primary, Header};
 use store::Store;
 use tokio::sync::mpsc::{channel, Receiver};
 use worker::Worker;
@@ -88,7 +88,7 @@ async fn run(matches: &ArgMatches<'_>) -> Result<()> {
     // Make the data store.
     let store = Store::new(store_path).context("Failed to create a store")?;
 
-    // Channels the sequence of certificates.
+    // Channels the sequence of headers.
     let (tx_output, rx_output) = channel(CHANNEL_CAPACITY);
 
     // Check whether to run a primary, a worker, or an entire authority.
@@ -97,6 +97,7 @@ async fn run(matches: &ArgMatches<'_>) -> Result<()> {
         ("primary", _) => {
             let (tx_new_certificates, rx_new_certificates) = channel(CHANNEL_CAPACITY);
             let (tx_feedback, rx_feedback) = channel(CHANNEL_CAPACITY);
+            let (tx_consensus_header, rx_consensus_header) = channel(CHANNEL_CAPACITY);
             Primary::spawn(
                 keypair,
                 committee.clone(),
@@ -104,11 +105,13 @@ async fn run(matches: &ArgMatches<'_>) -> Result<()> {
                 store,
                 /* tx_consensus */ tx_new_certificates,
                 /* rx_consensus */ rx_feedback,
+                tx_consensus_header,
             );
             Consensus::spawn(
                 committee,
                 parameters.gc_depth,
                 /* rx_primary */ rx_new_certificates,
+                rx_consensus_header,
                 /* tx_primary */ tx_feedback,
                 tx_output,
             );
@@ -134,7 +137,7 @@ async fn run(matches: &ArgMatches<'_>) -> Result<()> {
 }
 
 /// Receives an ordered list of certificates and apply any application-specific logic.
-async fn analyze(mut rx_output: Receiver<Certificate>) {
+async fn analyze(mut rx_output: Receiver<Header>) {
     while let Some(_certificate) = rx_output.recv().await {
         // NOTE: Here goes the application logic.
     }

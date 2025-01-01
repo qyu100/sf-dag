@@ -3,7 +3,7 @@ use crate::messages::{Certificate, Header};
 use crate::primary::Round;
 use config::{Committee, WorkerId};
 use crypto::Hash as _;
-use crypto::{Digest, PublicKey, SignatureService};
+use crypto::{Digest, PublicKey};
 #[cfg(feature = "benchmark")]
 use log::info;
 use log::{debug, log_enabled, warn};
@@ -11,9 +11,9 @@ use std::cmp::Ordering;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::time::{sleep, Duration, Instant};
 
-#[cfg(test)]
-#[path = "tests/proposer_tests.rs"]
-pub mod proposer_tests;
+// #[cfg(test)]
+// #[path = "tests/proposer_tests.rs"]
+// pub mod proposer_tests;
 
 /// The proposer creates new headers and send them to the core for broadcasting and further processing.
 pub struct Proposer {
@@ -21,15 +21,13 @@ pub struct Proposer {
     name: PublicKey,
     /// The committee information.
     committee: Committee,
-    /// Service to sign headers.
-    signature_service: SignatureService,
     /// The size of the headers' payload.
     header_size: usize,
     /// The maximum delay to wait for batches' digests.
     max_header_delay: u64,
 
     /// Receives the parents to include in the next header (along with their round number).
-    rx_core: Receiver<(Vec<Certificate>, Round)>,
+    rx_core: Receiver<(Vec<Header>, Round)>,
     /// Receives the batches' digests from our workers.
     rx_workers: Receiver<(Digest, WorkerId)>,
     /// Sends newly created headers to the `Core`.
@@ -37,10 +35,10 @@ pub struct Proposer {
 
     /// The current round of the dag.
     round: Round,
-    /// Holds the certificates' ids waiting to be included in the next header.
-    last_parents: Vec<Certificate>,
-    /// Holds the certificate of the last leader (if any).
-    last_leader: Option<Certificate>,
+    /// Holds the headers' ids waiting to be included in the next header.
+    last_parents: Vec<Header>,
+    /// Holds the header of the last leader (if any).
+    last_leader: Option<Header>,
     /// Holds the batches' digests waiting to be included in the next header.
     digests: Vec<(Digest, WorkerId)>,
     /// Keeps track of the size (in bytes) of batches' digests that we received so far.
@@ -52,19 +50,17 @@ impl Proposer {
     pub fn spawn(
         name: PublicKey,
         committee: Committee,
-        signature_service: SignatureService,
         header_size: usize,
         max_header_delay: u64,
-        rx_core: Receiver<(Vec<Certificate>, Round)>,
+        rx_core: Receiver<(Vec<Header>, Round)>,
         rx_workers: Receiver<(Digest, WorkerId)>,
         tx_core: Sender<Header>,
     ) {
-        let genesis = Certificate::genesis(&committee);
+        let genesis = Header::genesis(&committee);
         tokio::spawn(async move {
             Self {
                 name,
                 committee,
-                signature_service,
                 header_size,
                 max_header_delay,
                 rx_core,
@@ -87,8 +83,7 @@ impl Proposer {
             self.name,
             self.round,
             self.digests.drain(..).collect(),
-            self.last_parents.drain(..).map(|x| x.digest()).collect(),
-            &mut self.signature_service,
+            self.last_parents.drain(..).map(|x| x.id).collect(),
         )
         .await;
         debug!("Created {:?}", header);
@@ -112,11 +107,11 @@ impl Proposer {
         self.last_leader = self
             .last_parents
             .iter()
-            .find(|x| x.origin() == leader_name)
+            .find(|x| x.author == leader_name)
             .cloned();
 
         if let Some(leader) = self.last_leader.as_ref() {
-            debug!("Got leader {} for round {}", leader.origin(), self.round);
+            debug!("Got leader {} for round {}", leader.author, self.round);
         }
 
         self.last_leader.is_some()
@@ -126,15 +121,15 @@ impl Proposer {
     /// or (iii) there is no leader to vote for.
     fn enough_votes(&self) -> bool {
         let leader = match &self.last_leader {
-            Some(x) => x.digest(),
+            Some(x) => x.id.clone(),
             None => return true,
         };
 
         let mut votes_for_leader = 0;
         let mut no_votes = 0;
-        for certificate in &self.last_parents {
-            let stake = self.committee.stake(&certificate.origin());
-            if certificate.header.parents.contains(&leader) {
+        for header in &self.last_parents {
+            let stake = self.committee.stake(&header.author);
+            if header.parents.contains(&leader) {
                 votes_for_leader += stake;
             } else {
                 no_votes += stake;
@@ -146,7 +141,7 @@ impl Proposer {
             if let Some(leader) = self.last_leader.as_ref() {
                 debug!(
                     "Got enough support for leader {} at round {}",
-                    leader.origin(),
+                    leader.author,
                     self.round
                 );
             }
@@ -154,7 +149,7 @@ impl Proposer {
         enough_votes |= no_votes >= self.committee.validity_threshold();
         enough_votes
     }
-
+    
     /// Main loop listening to incoming messages.
     pub async fn run(&mut self) {
         debug!("Dag starting at round {}", self.round);

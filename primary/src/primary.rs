@@ -1,11 +1,11 @@
 // Copyright(C) Facebook, Inc. and its affiliates.
-use crate::certificate_waiter::CertificateWaiter;
+// use crate::certificate_waiter::CertificateWaiter;
 use crate::core::Core;
 use crate::error::DagError;
 use crate::garbage_collector::GarbageCollector;
 use crate::header_waiter::HeaderWaiter;
 use crate::helper::Helper;
-use crate::messages::{Certificate, Header, Vote};
+use crate::messages::{Certificate, Header, Vote, EchoHeader, ReadyHeader};
 use crate::payload_receiver::PayloadReceiver;
 use crate::proposer::Proposer;
 use crate::synchronizer::Synchronizer;
@@ -26,7 +26,7 @@ use tokio::sync::mpsc::{channel, Receiver, Sender};
 /// The default channel capacity for each channel of the primary.
 pub const CHANNEL_CAPACITY: usize = 1_000;
 
-/// The round number.
+// The round number.
 pub type Round = u64;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -35,6 +35,8 @@ pub enum PrimaryMessage {
     Vote(Vote),
     Certificate(Certificate),
     CertificatesRequest(Vec<Digest>, /* requestor */ PublicKey),
+    Echo(EchoHeader),
+    Ready(ReadyHeader),
 }
 
 /// The messages sent by the primary to its workers.
@@ -64,7 +66,8 @@ impl Primary {
         parameters: Parameters,
         store: Store,
         tx_consensus: Sender<Certificate>,
-        rx_consensus: Receiver<Certificate>,
+        rx_consensus: Receiver<Header>,
+        tx_consensus_header: Sender<Header>,
     ) {
         let (tx_others_digests, rx_others_digests) = channel(CHANNEL_CAPACITY);
         let (tx_our_digests, rx_our_digests) = channel(CHANNEL_CAPACITY);
@@ -135,16 +138,12 @@ impl Primary {
             /* tx_certificate_waiter */ tx_sync_certificates,
         );
 
-        // The `SignatureService` is used to require signatures on specific digests.
-        let signature_service = SignatureService::new(secret);
-
         // The `Core` receives and handles headers, votes, and certificates from the other primaries.
         Core::spawn(
             name,
             committee.clone(),
             store.clone(),
             synchronizer,
-            signature_service.clone(),
             consensus_round.clone(),
             parameters.gc_depth,
             /* rx_primaries */ rx_primary_messages,
@@ -152,7 +151,8 @@ impl Primary {
             /* rx_certificate_waiter */ rx_certificates_loopback,
             /* rx_proposer */ rx_headers,
             tx_consensus,
-            /* tx_proposer */ tx_parents,
+            /* tx_proposer */ tx_parents,    
+            tx_consensus_header, 
         );
 
         // Keeps track of the latest consensus round and allows other tasks to clean up their their internal state
@@ -176,20 +176,19 @@ impl Primary {
             /* tx_core */ tx_headers_loopback,
         );
 
-        // The `CertificateWaiter` waits to receive all the ancestors of a certificate before looping it back to the
-        // `Core` for further processing.
-        CertificateWaiter::spawn(
-            store.clone(),
-            /* rx_synchronizer */ rx_sync_certificates,
-            /* tx_core */ tx_certificates_loopback,
-        );
+        // // The `CertificateWaiter` waits to receive all the ancestors of a certificate before looping it back to the
+        // // `Core` for further processing.
+        // CertificateWaiter::spawn(
+        //     store.clone(),
+        //     /* rx_synchronizer */ rx_sync_certificates,
+        //     /* tx_core */ tx_certificates_loopback,
+        // );
 
         // When the `Core` collects enough parent certificates, the `Proposer` generates a new header with new batch
         // digests from our workers and it back to the `Core`.
         Proposer::spawn(
             name,
             committee.clone(),
-            signature_service,
             parameters.header_size,
             parameters.max_header_delay,
             /* rx_core */ rx_parents,

@@ -8,13 +8,13 @@ use network::SimpleSender;
 use store::Store;
 use tokio::sync::mpsc::Receiver;
 
-/// A task dedicated to help other authorities by replying to their certificates requests.
+/// A task dedicated to help other authorities by replying to their headers requests.
 pub struct Helper {
     /// The committee information.
     committee: Committee,
     /// The persistent storage.
     store: Store,
-    /// Input channel to receive certificates requests.
+    /// Input channel to receive headers requests.
     rx_primaries: Receiver<(Vec<Digest>, PublicKey)>,
     /// A network sender to reply to the sync requests.
     network: SimpleSender,
@@ -46,7 +46,7 @@ impl Helper {
             let address = match self.committee.primary(&origin) {
                 Ok(x) => x.primary_to_primary,
                 Err(e) => {
-                    warn!("Unexpected certificate request: {}", e);
+                    warn!("Unexpected header request: {}", e);
                     continue;
                 }
             };
@@ -56,10 +56,10 @@ impl Helper {
                 match self.store.read(digest.to_vec()).await {
                     Ok(Some(data)) => {
                         // TODO: Remove this deserialization-serialization in the critical path.
-                        let certificate = bincode::deserialize(&data)
-                            .expect("Failed to deserialize our own certificate");
-                        let bytes = bincode::serialize(&PrimaryMessage::Certificate(certificate))
-                            .expect("Failed to serialize our own certificate");
+                        let header = bincode::deserialize(&data)
+                            .expect("Failed to deserialize our own header");
+                        let bytes = bincode::serialize(&PrimaryMessage::Header(header))
+                            .expect("Failed to serialize our own header");
                         self.network.send(address, Bytes::from(bytes)).await;
                     }
                     Ok(None) => (),

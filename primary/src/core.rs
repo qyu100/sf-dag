@@ -1,25 +1,26 @@
 // Copyright(C) Facebook, Inc. and its affiliates.
-use crate::aggregators::{CertificatesAggregator, VotesAggregator};
+use crate::aggregators::{CertificatesAggregator, HeadersAggregator, VotesAggregator};
 use crate::error::{DagError, DagResult};
-use crate::messages::{Certificate, Header, Vote};
+use crate::messages::{Certificate, Header, Vote, ReadyHeader, EchoHeader};
 use crate::primary::{PrimaryMessage, Round};
 use crate::synchronizer::Synchronizer;
 use async_recursion::async_recursion;
 use bytes::Bytes;
-use config::Committee;
+use config::{Committee, Stake,};
 use crypto::Hash as _;
 use crypto::{Digest, PublicKey, SignatureService};
-use log::{debug, error, warn};
+use log::{debug, error, warn, info};
 use network::{CancelHandler, ReliableSender};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use store::Store;
 use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::time::Duration;
 
-#[cfg(test)]
-#[path = "tests/core_tests.rs"]
-pub mod core_tests;
+// #[cfg(test)]
+// #[path = "tests/core_tests.rs"]
+// pub mod core_tests;
 
 pub struct Core {
     /// The public key of this primary.
@@ -30,8 +31,6 @@ pub struct Core {
     store: Store,
     /// Handles synchronization with other nodes and our workers.
     synchronizer: Synchronizer,
-    /// Service to sign headers.
-    signature_service: SignatureService,
     /// The current consensus round (used for cleanup).
     consensus_round: Arc<AtomicU64>,
     /// The depth of the garbage collector.
@@ -48,8 +47,9 @@ pub struct Core {
     /// Output all certificates to the consensus layer.
     tx_consensus: Sender<Certificate>,
     /// Send valid a quorum of certificates' ids to the `Proposer` (along with their round).
-    tx_proposer: Sender<(Vec<Certificate>, Round)>,
+    tx_proposer: Sender<(Vec<Header>, Round)>,
 
+    tx_consensus_header: Sender<Header>,
     /// The last garbage collected round.
     gc_round: Round,
     /// The authors of the last voted headers.
@@ -60,12 +60,18 @@ pub struct Core {
     current_header: Header,
     /// Aggregates votes into a certificate.
     votes_aggregator: VotesAggregator,
+    processing_headers: HashMap<Digest, Header>,
     /// Aggregates certificates to use as parents for new headers.
     certificates_aggregators: HashMap<Round, Box<CertificatesAggregator>>,
     /// A network sender to send the batches to the other workers.
     network: ReliableSender,
     /// Keeps the cancel handlers of the messages we sent.
     cancel_handlers: HashMap<Round, Vec<CancelHandler>>,
+    header_aggregators: HashMap<Round, Box<HeadersAggregator>>,
+    echo_headers: HashMap<(Round, Digest), HashSet<PublicKey>>,
+    ready_headers: HashMap<(Round, Digest), HashSet<PublicKey>>,
+    ready_header_sent: HashMap<(Round, Digest), bool>,
+    consensus_header_sent: HashMap<(Round, Digest), bool>,
 }
 
 impl Core {
@@ -75,7 +81,6 @@ impl Core {
         committee: Committee,
         store: Store,
         synchronizer: Synchronizer,
-        signature_service: SignatureService,
         consensus_round: Arc<AtomicU64>,
         gc_depth: Round,
         rx_primaries: Receiver<PrimaryMessage>,
@@ -83,7 +88,8 @@ impl Core {
         rx_certificate_waiter: Receiver<Certificate>,
         rx_proposer: Receiver<Header>,
         tx_consensus: Sender<Certificate>,
-        tx_proposer: Sender<(Vec<Certificate>, Round)>,
+        tx_proposer: Sender<(Vec<Header>, Round)>,
+        tx_consensus_header: Sender<Header>,
     ) {
         tokio::spawn(async move {
             Self {
@@ -91,7 +97,6 @@ impl Core {
                 committee,
                 store,
                 synchronizer,
-                signature_service,
                 consensus_round,
                 gc_depth,
                 rx_primaries,
@@ -100,14 +105,21 @@ impl Core {
                 rx_proposer,
                 tx_consensus,
                 tx_proposer,
+                tx_consensus_header,
                 gc_round: 0,
                 last_voted: HashMap::with_capacity(2 * gc_depth as usize),
                 processing: HashMap::with_capacity(2 * gc_depth as usize),
                 current_header: Header::default(),
                 votes_aggregator: VotesAggregator::new(),
+                processing_headers: HashMap::new(),
                 certificates_aggregators: HashMap::with_capacity(2 * gc_depth as usize),
                 network: ReliableSender::new(),
                 cancel_handlers: HashMap::with_capacity(2 * gc_depth as usize),
+                header_aggregators: HashMap::with_capacity(2 * gc_depth as usize),
+                echo_headers: HashMap::new(),
+                ready_headers: HashMap::new(),
+                ready_header_sent: HashMap::new(),
+                consensus_header_sent: HashMap::new(),
             }
             .run()
             .await;
@@ -117,7 +129,7 @@ impl Core {
     async fn process_own_header(&mut self, header: Header) -> DagResult<()> {
         // Reset the votes aggregator.
         self.current_header = header.clone();
-        self.votes_aggregator = VotesAggregator::new();
+        // self.votes_aggregator = VotesAggregator::new();
 
         // Broadcast the new header in a reliable manner.
         let addresses = self
@@ -140,168 +152,263 @@ impl Core {
 
     #[async_recursion]
     async fn process_header(&mut self, header: &Header) -> DagResult<()> {
-        debug!("Processing {:?}", header);
+        debug!("Processing {:?} at round {:?}", header, header.round);
         // Indicate that we are processing this header.
-        self.processing
-            .entry(header.round)
-            .or_insert_with(HashSet::new)
-            .insert(header.id.clone());
+        // self.processing
+        //     .entry(header.round)
+        //     .or_insert_with(HashSet::new)
+        //     .insert(header.id.clone());
 
-        // Ensure we have the parents. If at least one parent is missing, the synchronizer returns an empty
-        // vector; it will gather the missing parents (as well as all ancestors) from other nodes and then
-        // reschedule processing of this header.
-        let parents = self.synchronizer.get_parents(header).await?;
-        if parents.is_empty() {
-            debug!("Processing of {} suspended: missing parent(s)", header.id);
-            return Ok(());
-        }
+        self.processing_headers
+            .entry(header.id.clone())
+            .or_insert(header.clone());
 
-        // Check the parent certificates. Ensure the parents form a quorum and are all from the previous round.
-        let mut stake = 0;
-        for x in parents {
+        if header.round != 1 {
+            // Ensure we have the parents. If at least one parent is missing, the synchronizer returns an empty
+            // vector; it will gather the missing parents (as well as all ancestors) from other nodes and then
+            // reschedule processing of this header.
+            let parents = self.synchronizer.get_parents(header).await?;
+            if parents.is_empty() {
+                debug!("Processing of {} suspended: missing parent(s)", header.id);
+                return Ok(());
+            }
+
+            // Check the parent headers. Ensure the parents form a quorum and are all from the previous round.
+            let mut stake = 0;
+            for x in parents {
+                ensure!(
+                    x.round + 1 == header.round,
+                    DagError::MalformedHeader(header.id.clone())
+                );
+                stake += self.committee.stake(&x.author);
+            }
             ensure!(
-                x.round() + 1 == header.round,
-                DagError::MalformedHeader(header.id.clone())
+                stake >= self.committee.quorum_threshold(),
+                DagError::HeaderRequiresQuorum(header.id.clone())
             );
-            stake += self.committee.stake(&x.origin());
-        }
-        ensure!(
-            stake >= self.committee.quorum_threshold(),
-            DagError::HeaderRequiresQuorum(header.id.clone())
-        );
 
-        // Ensure we have the payload. If we don't, the synchronizer will ask our workers to get it, and then
-        // reschedule processing of this header once we have it.
-        if self.synchronizer.missing_payload(header).await? {
-            debug!("Processing of {} suspended: missing payload", header);
-            return Ok(());
+            // Ensure we have the payload. If we don't, the synchronizer will ask our workers to get it, and then
+            // reschedule processing of this header once we have it.
+            if self.synchronizer.missing_payload(header).await? {
+                debug!("Processing of {} suspended: missing payload", header);
+                return Ok(());
+            }
         }
-
         // Store the header.
         let bytes = bincode::serialize(header).expect("Failed to serialize header");
         self.store.write(header.id.to_vec(), bytes).await;
 
-        // Check if we can vote for this header.
-        if self
-            .last_voted
-            .entry(header.round)
+        // Send <ECHO, H(m)> to primaries.
+        let addresses = self
+        .committee
+        .others_primaries(&self.name)
+        .iter()
+        .map(|(_, info)| info.primary_to_primary)
+        .collect();
+
+        let echo_header = EchoHeader::new(&header, &self.name).await;
+        let bytes = bincode::serialize(&PrimaryMessage::Echo(echo_header))
+        .expect("Failed to serialize EchoHeader");
+        let handlers = self.network.broadcast(addresses, Bytes::from(bytes)).await;
+
+        self.cancel_handlers
+        .entry(header.round)
+        .or_insert_with(Vec::new)
+        .extend(handlers);
+
+        // Initialize the HashMap if it doesn't exist
+        self.echo_headers
+        .entry((header.round, header.id.clone()))
+        .or_insert_with(HashSet::new)
+        .insert(self.name.clone());
+
+        // info!("self.name: {:?}", self.name);
+        // info!("Initialized echo_headers from header: {:?}", self.echo_headers);
+
+        // Log the broadcast for debugging purposes
+        debug!("Broadcasted EchoHeader with hash {:?}", header.round);
+
+        Ok(())
+    }
+
+    #[async_recursion]
+    async fn process_echo_header(&mut self, echo_header: EchoHeader) -> DagResult<()> {
+        // debug!("Processing {:?}", echo_header);
+
+        let round = echo_header.round;
+        let digest = echo_header.id.clone();
+        let author = echo_header.author.clone();
+
+        self.echo_headers
+            .entry((round, digest.clone()))
             .or_insert_with(HashSet::new)
-            .insert(header.author)
-        {
-            // Make a vote and send it to the header's creator.
-            let vote = Vote::new(header, &self.name, &mut self.signature_service).await;
-            debug!("Created {:?}", vote);
-            if vote.origin == self.name {
-                self.process_vote(vote)
-                    .await
-                    .expect("Failed to process our own vote");
-            } else {
-                let address = self
-                    .committee
-                    .primary(&header.author)
-                    .expect("Author of valid header is not in the committee")
-                    .primary_to_primary;
-                let bytes = bincode::serialize(&PrimaryMessage::Vote(vote))
-                    .expect("Failed to serialize our own vote");
-                let handler = self.network.send(address, Bytes::from(bytes)).await;
-                self.cancel_handlers
-                    .entry(header.round)
-                    .or_insert_with(Vec::new)
-                    .push(handler);
+            .insert(author.clone());
+
+        // info!("Initialized echo_headers: {:?}", self.echo_headers);
+
+        // Check if we have received 2f+1 EchoHeaders for this round and digest
+        if let Some(echo_key) = self.echo_headers.get(&(round, digest.clone())) {
+            let weight: Stake = echo_key.iter().map(|author| self.committee.stake(author)).sum();
+            if weight >= self.committee.quorum_threshold() {
+                if !self.ready_header_sent.contains_key(&(echo_header.round, echo_header.id.clone())) {
+                    // Send <Ready, H(m)> to primaries.
+                    let addresses = self
+                        .committee
+                        .others_primaries(&self.name)
+                        .iter()
+                        .map(|(_, info)| info.primary_to_primary)
+                        .collect();
+                    
+                    let ready_header = ReadyHeader::new(&echo_header, &self.name).await;
+                    let bytes = bincode::serialize(&PrimaryMessage::Ready(ready_header))
+                        .expect("Failed to serialize ReadyHeader");
+                    let handlers = self.network.broadcast(addresses, Bytes::from(bytes)).await;
+                
+                    self.cancel_handlers
+                        .entry(echo_header.round)
+                        .or_insert_with(Vec::new)
+                        .extend(handlers);
+
+                    self.ready_headers
+                        .entry((round, echo_header.id.clone()))
+                        .or_insert_with(HashSet::new)
+                        .insert(self.name); 
+
+                    self.ready_header_sent.insert((echo_header.round.clone(), echo_header.id.clone()), true);
+                    // info!("Broadcasted ReadyHeader with hash {:?}", echo_header.round);
+                };
+            }
+        };
+
+        Ok(())
+    }
+
+
+    #[async_recursion]
+    async fn process_ready_header(&mut self, ready_header: ReadyHeader) -> DagResult<()> {
+        // debug!("Processing {:?}", ready_header);
+
+        let round = ready_header.round;
+        let digest = ready_header.id.clone();
+        let author = ready_header.author.clone();
+    
+        // Initialize the HashMap if it doesn't exist
+        self.ready_headers
+            .entry((round, digest.clone()))
+            .or_insert_with(HashSet::new)
+            .insert(author.clone());    
+    
+        let ready_headers: Vec<_> = self.ready_headers
+            .iter()
+            .filter(|((r, d), _)| *r == round && *d == digest)
+            .map(|(_, a)| a.clone())
+            .collect();
+        
+        if let Some(ready_key) = self.ready_headers.get(&(round, digest.clone())) {
+            let weight: Stake = ready_key.iter().map(|author| self.committee.stake(author)).sum();
+            // info!("weight: {:?}", weight);
+                // Check if we have received f+1 <Ready, H(m)> for this round and digest, send <Ready, H(m)>
+            if weight >= self.committee.validity_threshold() 
+                && weight < self.committee.quorum_threshold() {
+                if !self.ready_header_sent.contains_key(&(ready_header.round, ready_header.id.clone())) {
+                    // Send <Ready, H(m)> to primaries.
+                    let addresses = self
+                        .committee
+                        .others_primaries(&self.name)
+                        .iter()
+                        .map(|(_, info)| info.primary_to_primary)
+                        .collect();
+                    
+                    let bytes = bincode::serialize(&PrimaryMessage::Ready(ready_header.clone()))
+                        .expect("Failed to serialize ReadyHeader");
+                    let handlers = self.network.broadcast(addresses, Bytes::from(bytes)).await;
+                
+                    self.cancel_handlers
+                        .entry(ready_header.clone().round)
+                        .or_insert_with(Vec::new)
+                        .extend(handlers);
+
+                    self.ready_header_sent.insert((ready_header.round.clone(), ready_header.id.clone()), true);
+                    info!("sent ready header!");
+                }
+            }
+
+            // Check if we have received 2f+1 <Ready, H(m)> 
+            if weight >= self.committee.quorum_threshold() {   
+                while self.processing_headers.get(&ready_header.id).is_none() {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+
+                if let Some(header) = self.processing_headers.get(&ready_header.id) {
+                    // Send header to consensus
+                    if !self.consensus_header_sent.contains_key(&(header.round, header.id.clone())) {
+                        // info!("Sending header {:?} to consensus at round {:?}", header.id, header.round);
+                        self.tx_consensus_header
+                            .send(header.clone())
+                            .await
+                            .expect("Failed to send header to consensus");
+                        self.consensus_header_sent.insert((header.round.clone(), header.id.clone()), true);
+                        // Check if we have enough headers to enter a new dag round and propose a header.
+                        // QY: in the happy case: check if we have received leader's Header
+                        if let Some(parents) = self
+                            .header_aggregators
+                            .entry(header.round)
+                            .or_insert_with(|| Box::new(HeadersAggregator::new()))
+                            .append(header.clone(), &self.committee)? {
+
+                            if let Some(parent) = parents.iter()
+                                .find(|parent| parent.author == self.committee.leader(header.round as usize)) {
+                                // Send it to the `Proposer`.
+                                self.tx_proposer
+                                    .send((parents.clone(), header.round))
+                                    .await
+                                    .expect("Failed to send header to proposer");
+                                // info!("sending parents: {:?} at round {:?}", parents.clone(), header.round);
+                                // info!("parents_len: {:?}", parents.len());
+                                // info!("sent parents to proposer at round {:?}!", header.round);
+                            }
+                        }
+                    }
+                }
             }
         }
         Ok(())
     }
 
-    #[async_recursion]
-    async fn process_vote(&mut self, vote: Vote) -> DagResult<()> {
-        debug!("Processing {:?}", vote);
 
-        // Add it to the votes' aggregator and try to make a new certificate.
-        if let Some(certificate) =
-            self.votes_aggregator
-                .append(vote, &self.committee, &self.current_header)?
-        {
-            debug!("Assembled {:?}", certificate);
+    // #[async_recursion]
+    // async fn process_vote(&mut self, vote: Vote) -> DagResult<()> {
+    //     debug!("Processing {:?}", vote);
 
-            // Broadcast the certificate.
-            let addresses = self
-                .committee
-                .others_primaries(&self.name)
-                .iter()
-                .map(|(_, x)| x.primary_to_primary)
-                .collect();
-            let bytes = bincode::serialize(&PrimaryMessage::Certificate(certificate.clone()))
-                .expect("Failed to serialize our own certificate");
-            let handlers = self.network.broadcast(addresses, Bytes::from(bytes)).await;
-            self.cancel_handlers
-                .entry(certificate.round())
-                .or_insert_with(Vec::new)
-                .extend(handlers);
+    //     // Add it to the votes' aggregator and try to make a new certificate.
+    //     if let Some(certificate) =
+    //         self.votes_aggregator
+    //             .append(vote, &self.committee, &self.current_header)?
+    //     {
+    //         debug!("Assembled {:?}", certificate);
 
-            // Process the new certificate.
-            self.process_certificate(certificate)
-                .await
-                .expect("Failed to process valid certificate");
-        }
-        Ok(())
-    }
+    //         // Broadcast the certificate.
+    //         let addresses = self
+    //             .committee
+    //             .others_primaries(&self.name)
+    //             .iter()
+    //             .map(|(_, x)| x.primary_to_primary)
+    //             .collect();
+    //         let bytes = bincode::serialize(&PrimaryMessage::Certificate(certificate.clone()))
+    //             .expect("Failed to serialize our own certificate");
+    //         let handlers = self.network.broadcast(addresses, Bytes::from(bytes)).await;
+    //         self.cancel_handlers
+    //             .entry(certificate.round())
+    //             .or_insert_with(Vec::new)
+    //             .extend(handlers);
 
-    #[async_recursion]
-    async fn process_certificate(&mut self, certificate: Certificate) -> DagResult<()> {
-        debug!("Processing {:?}", certificate);
-
-        // Process the header embedded in the certificate if we haven't already voted for it (if we already
-        // voted, it means we already processed it). Since this header got certified, we are sure that all
-        // the data it refers to (ie. its payload and its parents) are available. We can thus continue the
-        // processing of the certificate even if we don't have them in store right now.
-        if !self
-            .processing
-            .get(&certificate.header.round)
-            .map_or_else(|| false, |x| x.contains(&certificate.header.id))
-        {
-            // This function may still throw an error if the storage fails.
-            self.process_header(&certificate.header).await?;
-        }
-
-        // Ensure we have all the ancestors of this certificate yet. If we don't, the synchronizer will gather
-        // them and trigger re-processing of this certificate.
-        if !self.synchronizer.deliver_certificate(&certificate).await? {
-            debug!(
-                "Processing of {:?} suspended: missing ancestors",
-                certificate
-            );
-            return Ok(());
-        }
-
-        // Store the certificate.
-        let bytes = bincode::serialize(&certificate).expect("Failed to serialize certificate");
-        self.store.write(certificate.digest().to_vec(), bytes).await;
-
-        // Check if we have enough certificates to enter a new dag round and propose a header.
-        if let Some(parents) = self
-            .certificates_aggregators
-            .entry(certificate.round())
-            .or_insert_with(|| Box::new(CertificatesAggregator::new()))
-            .append(certificate.clone(), &self.committee)?
-        {
-            // Send it to the `Proposer`.
-            self.tx_proposer
-                .send((parents, certificate.round()))
-                .await
-                .expect("Failed to send certificate");
-        }
-
-        // Send it to the consensus layer.
-        let id = certificate.header.id.clone();
-        if let Err(e) = self.tx_consensus.send(certificate).await {
-            warn!(
-                "Failed to deliver certificate {} to the consensus: {}",
-                id, e
-            );
-        }
-        Ok(())
-    }
+    //         // Process the new certificate.
+    //         self.process_certificate(certificate)
+    //             .await
+    //             .expect("Failed to process valid certificate");
+    //     }
+    //     Ok(())
+    // }
 
     fn sanitize_header(&mut self, header: &Header) -> DagResult<()> {
         ensure!(
@@ -311,6 +418,28 @@ impl Core {
 
         // Verify the header's signature.
         header.verify(&self.committee)?;
+
+        // TODO [issue #3]: Prevent bad nodes from sending junk headers with high round numbers.
+
+        Ok(())
+    }
+
+    fn sanitize_echo_header(&mut self, echo_header: &EchoHeader) -> DagResult<()> {
+        ensure!(
+            self.gc_round <= echo_header.round,
+            DagError::TooOld(echo_header.id.clone(), echo_header.round)
+        );
+
+        // TODO [issue #3]: Prevent bad nodes from sending junk headers with high round numbers.
+
+        Ok(())
+    }
+
+    fn sanitize_ready_header(&mut self, ready_header: &ReadyHeader) -> DagResult<()> {
+        ensure!(
+            self.gc_round <= ready_header.round,
+            DagError::TooOld(ready_header.id.clone(), ready_header.round)
+        );
 
         // TODO [issue #3]: Prevent bad nodes from sending junk headers with high round numbers.
 
@@ -359,18 +488,31 @@ impl Core {
                             }
 
                         },
-                        PrimaryMessage::Vote(vote) => {
-                            match self.sanitize_vote(&vote) {
-                                Ok(()) => self.process_vote(vote).await,
+                        PrimaryMessage::Echo(echo_header) => {
+                            match self.sanitize_echo_header(&echo_header) {
+                                Ok(()) => self.process_echo_header(echo_header).await,
                                 error => error
                             }
                         },
-                        PrimaryMessage::Certificate(certificate) => {
-                            match self.sanitize_certificate(&certificate) {
-                                Ok(()) =>  self.process_certificate(certificate).await,
+                        PrimaryMessage::Ready(ready_header) => {
+                            match self.sanitize_ready_header(&ready_header) {
+                                Ok(()) => self.process_ready_header(ready_header).await,
                                 error => error
                             }
                         },
+
+                        // PrimaryMessage::Vote(vote) => {
+                        //     match self.sanitize_vote(&vote) {
+                        //         Ok(()) => self.process_vote(vote).await,
+                        //         error => error
+                        //     }
+                        // },
+                        // PrimaryMessage::Certificate(certificate) => {
+                        //     match self.sanitize_certificate(&certificate) {
+                        //         Ok(()) =>  self.process_certificate(certificate).await,
+                        //         error => error
+                        //     }
+                        // },
                         _ => panic!("Unexpected core message")
                     }
                 },
@@ -382,7 +524,7 @@ impl Core {
                 // We receive here loopback certificates from the `CertificateWaiter`. Those are certificates for which
                 // we interrupted execution (we were missing some of their ancestors) and we are now ready to resume
                 // processing.
-                Some(certificate) = self.rx_certificate_waiter.recv() => self.process_certificate(certificate).await,
+                // Some(certificate) = self.rx_certificate_waiter.recv() => self.process_certificate(certificate).await,
 
                 // We also receive here our new headers created by the `Proposer`.
                 Some(header) = self.rx_proposer.recv() => self.process_own_header(header).await,

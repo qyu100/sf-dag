@@ -10,23 +10,31 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::convert::TryInto;
 use std::fmt;
 
-#[derive(Clone, Serialize, Deserialize, Default)]
+#[derive(Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct Header {
     pub author: PublicKey,
     pub round: Round,
     pub payload: BTreeMap<Digest, WorkerId>,
     pub parents: BTreeSet<Digest>,
     pub id: Digest,
-    pub signature: Signature,
+    // pub signature: Signature,
 }
 
 impl Header {
+    pub fn default() -> Self {
+        Self {
+            author: PublicKey::default(),
+            round: Round::default(),
+            payload: BTreeMap::new(),
+            parents: BTreeSet::new(),
+            id: Digest::default(),
+        }
+    }
     pub async fn new(
         author: PublicKey,
         round: Round,
         payload: BTreeMap<Digest, WorkerId>,
         parents: BTreeSet<Digest>,
-        signature_service: &mut SignatureService,
     ) -> Self {
         let header = Self {
             author,
@@ -34,13 +42,10 @@ impl Header {
             payload,
             parents,
             id: Digest::default(),
-            signature: Signature::default(),
         };
         let id = header.digest();
-        let signature = signature_service.request_signature(id.clone()).await;
         Self {
             id,
-            signature,
             ..header
         }
     }
@@ -59,12 +64,21 @@ impl Header {
                 .worker(&self.author, worker_id)
                 .map_err(|_| DagError::MalformedHeader(self.id.clone()))?;
         }
-
-        // Check the signature.
-        self.signature
-            .verify(&self.id, &self.author)
-            .map_err(DagError::from)
+        Ok(())
+        // // Check the signature.
+        // self.signature
+        //     .verify(&self.id, &self.author)
+        //     .map_err(DagError::from)
     }
+
+    pub fn genesis(committee: &Committee) -> Vec<Self> {
+        committee
+            .authorities
+            .keys()
+            .map(|name| Self { ..Self::default() })
+            .collect()
+    }
+    
 }
 
 impl Hash for Header {
@@ -254,3 +268,49 @@ impl PartialEq for Certificate {
         ret
     }
 }
+
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EchoHeader {
+    pub id: Digest, 
+    pub round: Round,
+    pub author: PublicKey,
+    pub origin: PublicKey,
+}
+
+impl EchoHeader {
+    pub async fn new(
+        header: &Header,
+        author: &PublicKey) -> Self {
+        EchoHeader {
+            id: header.id.clone(), 
+            round: header.round,
+            author: *author,
+            origin: header.author,
+        }
+    }
+
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReadyHeader {
+    pub id: Digest, 
+    pub round: Round,
+    pub author: PublicKey,
+    pub origin: PublicKey,
+}
+
+impl ReadyHeader {
+    pub async fn new(
+        echo_header: &EchoHeader,
+        author: &PublicKey
+    ) -> Self {
+        ReadyHeader {
+            id: echo_header.id.clone(), 
+            round: echo_header.round,
+            author: *author,
+            origin: echo_header.origin,
+        }
+    }
+}
+
