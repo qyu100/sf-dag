@@ -1,5 +1,5 @@
 // Copyright(C) Facebook, Inc. and its affiliates.
-use crate::messages::{Header, Certificate};
+use crate::messages::{Header, Certificate, HeaderInfo};
 // use crate::primary::PrimaryWorkerMessage;
 use bytes::Bytes;
 use config::Committee;
@@ -15,7 +15,7 @@ pub struct GarbageCollector {
     /// The current consensus round (used for cleanup).
     consensus_round: Arc<AtomicU64>,
     /// Receives the ordered certificates from consensus.
-    rx_consensus: Receiver<Header>,
+    rx_consensus: Receiver<HeaderInfo>,
     /// The network addresses of our workers.
     addresses: Vec<SocketAddr>,
     /// A network sender to notify our workers of cleanup events.
@@ -27,7 +27,7 @@ impl GarbageCollector {
         name: &PublicKey,
         committee: &Committee,
         consensus_round: Arc<AtomicU64>,
-        rx_consensus: Receiver<Header>,
+        rx_consensus: Receiver<HeaderInfo>,
     ) {
         let addresses = committee
             .our_workers(name)
@@ -50,10 +50,10 @@ impl GarbageCollector {
 
     async fn run(&mut self) {
         let mut last_committed_round = 0;
-        while let Some(header) = self.rx_consensus.recv().await {
+        while let Some(header_info) = self.rx_consensus.recv().await {
             // TODO [issue #9]: Re-include batch digests that have not been sequenced into our next block.
 
-            let round = header.round;
+            let round = header_info.round;
             if round > last_committed_round {
                 last_committed_round = round;
 

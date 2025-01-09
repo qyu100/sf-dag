@@ -3,7 +3,7 @@ use config::{Committee, Stake};
 use crypto::Hash as _;
 use crypto::{Digest, PublicKey};
 use log::{debug, info, log_enabled, warn};
-use primary::{Certificate, Header, Round};
+use primary::{Certificate, Header, Round, HeaderType, HeaderInfo};
 use std::cmp::max;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -13,7 +13,7 @@ use tokio::sync::mpsc::{Receiver, Sender};
 // pub mod consensus_tests;
 
 /// The representation of the DAG in memory.
-type Dag = HashMap<Round, HashMap<PublicKey, (Digest, Header)>>;
+type Dag = HashMap<Round, HashMap<PublicKey, (Digest, HeaderInfo)>>;
 type ParentInfo = HashMap<Digest, BTreeSet<Digest>>;
 
 /// The state that needs to be persisted for crash-recovery.
@@ -29,7 +29,7 @@ struct State {
 }
 
 impl State {
-    fn new(genesis: Vec<Header>) -> Self {
+    fn new(genesis: Vec<HeaderInfo>) -> Self {
         let genesis = genesis
             .into_iter()
             .map(|x| (x.author, (x.id.clone(), x)))
@@ -43,7 +43,7 @@ impl State {
     }
 
     /// Update and clean up internal state base on committed certificates.
-    fn update(&mut self, header: &Header, gc_depth: Round) {
+    fn update(&mut self, header: &HeaderInfo, gc_depth: Round) {
         self.last_committed
             .entry(header.author)
             .and_modify(|r| *r = max(*r, header.round))
@@ -72,14 +72,14 @@ pub struct Consensus {
     /// if it already sent us its whole history.
     rx_primary: Receiver<Certificate>,
     /// Receives new headers from the primary.
-    rx_primary_header: Receiver<Header>,
+    rx_primary_header: Receiver<HeaderType>,
     /// Outputs the sequence of ordered certificates to the primary (for cleanup and feedback).
-    tx_primary: Sender<Header>,
+    tx_primary: Sender<HeaderInfo>,
     /// Outputs the sequence of ordered certificates to the application layer.
-    tx_output: Sender<Header>,
+    tx_output: Sender<HeaderInfo>,
 
     /// The genesis headers.
-    genesis: Vec<Header>,
+    genesis: Vec<HeaderInfo>,
     /// The stake vote received by the leader of a round.
     stake_vote: HashMap<Round, u32>,
 }
@@ -89,9 +89,9 @@ impl Consensus {
         committee: Committee,
         gc_depth: Round,
         rx_primary: Receiver<Certificate>,
-        rx_primary_header: Receiver<Header>,
-        tx_primary: Sender<Header>,
-        tx_output: Sender<Header>,
+        rx_primary_header: Receiver<HeaderType>,
+        tx_primary: Sender<HeaderInfo>,
+        tx_output: Sender<HeaderInfo>,
     ) {
         tokio::spawn(async move {
             Self {
@@ -101,7 +101,7 @@ impl Consensus {
                 rx_primary_header,
                 tx_primary,
                 tx_output,
-                genesis: Header::genesis(&committee),
+                genesis: HeaderInfo::genesis(&committee),
                 stake_vote: HashMap::with_capacity(2 * gc_depth as usize),
             }
             .run()
@@ -116,16 +116,24 @@ impl Consensus {
         loop {
             tokio::select! {
                 // Listen to incoming headers.
-                Some(header) = self.rx_primary_header.recv() => {
-                    debug!("Processing {:?}", header);
-
+                Some(header_type) = self.rx_primary_header.recv() => {
+                    debug!("Processing {:?}", header_type);
+                    let header_info: HeaderInfo;
+                    match header_type {
+                        HeaderType::Header(header) => {
+                            header_info = HeaderInfo::create_from(&header);
+                        }
+                        HeaderType::HeaderInfo(h_info) => {
+                            header_info = h_info.clone();
+                        }
+                    }
                     // Try to order the dag to commit. Start from the previous round.
-                    let r = header.round - 1;
+                    let r = header_info.round - 1;
                     state
                         .dag
-                        .entry(header.round)
+                        .entry(header_info.round)
                         .or_insert_with(HashMap::new)
-                        .insert(header.author, (header.id.clone(), header.clone()));
+                        .insert(header_info.author, (header_info.id.clone(), header_info.clone()));
 
                     let leader_round = r;
                     if leader_round <= state.last_committed_round {
@@ -136,15 +144,15 @@ impl Consensus {
                         Some(x) => x,
                         None => continue,
                     };
-                    if header.parents.contains(leader_digest) {
-                        *self.stake_vote.entry(header.round.clone()).or_insert(0) += self.committee.stake(&header.author);
+                    if header_info.parents.contains(leader_digest) {
+                        *self.stake_vote.entry(header_info.round.clone()).or_insert(0) += self.committee.stake(&header_info.author);
                     }
-                    let current_stake = self.stake_vote.get(&header.round);
+                    let current_stake = self.stake_vote.get(&header_info.round);
                     let current_stake_value = *current_stake.unwrap_or(&0);
                     // Commit if we have QT
                     if current_stake_value >= self.committee.quorum_threshold() {
                         // Get an ordered list of past leaders that are linked to the current leader.
-                        debug!("Leader {:?} has enough support with header", leader);
+                        // debug!("Leader {:?} has enough support with header", leader);
                         let mut sequence = Vec::new();
                         for leader in self.order_leaders(leader, &state).iter().rev() {
                             // Starting from the oldest leader, flatten the sub-dag referenced by the leader.
@@ -158,24 +166,24 @@ impl Consensus {
                         }
 
                         // Output the sequence in the right order.
-                        for header in sequence {
+                        for header_info in sequence {
                             // #[cfg(not(feature = "benchmark"))]
                             // info!("Committed {} with header", certificate.header);
 
-                            if header.round == leader_round {
-                                info!("Committed {:?} Leader", header.id);
-                            }else if header.round == leader_round-1 {
-                                info!("Committed {:?} NonLeader", header.id);
+                            if header_info.round == leader_round {
+                                info!("Committed {:?} Leader", header_info.id);
+                            }else if header_info.round == leader_round-1 {
+                                info!("Committed {:?} NonLeader", header_info.id);
                             } else{
-                                info!("Committed {:?} ", header.id);
+                                info!("Committed {:?} ", header_info.id);
                             }
                             // Garbage Collection.
                             self.tx_primary
-                                .send(header.clone())
+                                .send(header_info.clone())
                                 .await
                                 .expect("Failed to send header to primary for gc");
 
-                            if let Err(e) = self.tx_output.send(header).await {
+                            if let Err(e) = self.tx_output.send(header_info).await {
                                 warn!("Failed to output header: {} with header", e);
                             }
                         }
@@ -187,7 +195,7 @@ impl Consensus {
 
     /// Returns the certificate (and the certificate's digest) originated by the leader of the
     /// specified round (if any).
-    fn leader<'a>(&self, round: Round, dag: &'a Dag) -> Option<&'a (Digest, Header)> {
+    fn leader<'a>(&self, round: Round, dag: &'a Dag) -> Option<&'a (Digest, HeaderInfo)> {
         // TODO: We should elect the leader of round r-2 using the common coin revealed at round r.
         // At this stage, we are guaranteed to have 2f+1 certificates from round r (which is enough to
         // compute the coin). We currently just use round-robin.
@@ -203,7 +211,7 @@ impl Consensus {
     }
 
     /// Order the past leaders that we didn't already commit.
-    fn order_leaders(&self, leader: &Header, state: &State) -> Vec<Header> {
+    fn order_leaders(&self, leader: &HeaderInfo, state: &State) -> Vec<HeaderInfo> {
         let mut to_commit = vec![leader.clone()];
         let mut leader = leader;
         for r in (state.last_committed_round + 1..=leader.round - 1).rev() {
@@ -223,7 +231,7 @@ impl Consensus {
     }
 
     /// Checks if there is a path between two leaders.
-    fn linked(&self, leader: &Header, prev_leader: &Header, dag: &Dag) -> bool {
+    fn linked(&self, leader: &HeaderInfo, prev_leader: &HeaderInfo, dag: &Dag) -> bool {
         let mut parents = vec![leader];
         for r in (prev_leader.round..leader.round).rev() {
             parents = dag
@@ -239,7 +247,7 @@ impl Consensus {
 
     /// Flatten the dag referenced by the input certificate. This is a classic depth-first search (pre-order):
     /// https://en.wikipedia.org/wiki/Tree_traversal#Pre-order
-    fn order_dag(&self, leader: &Header, state: &State) -> Vec<Header> {
+    fn order_dag(&self, leader: &HeaderInfo, state: &State) -> Vec<HeaderInfo> {
         debug!("Processing sub-dag of {:?}", leader);
         let mut ordered = Vec::new();
         let mut already_ordered = HashSet::new();

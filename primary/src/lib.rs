@@ -18,5 +18,5 @@ mod garbage_collector;
 // #[path = "tests/common.rs"]
 // mod common;
 
-pub use crate::messages::{Certificate, Header};
-pub use crate::primary::{Primary, WorkerPrimaryMessage, PrimaryWorkerMessage, Round};
+pub use crate::messages::{Certificate, Header, HeaderInfo};
+pub use crate::primary::{HeaderType, Primary, WorkerPrimaryMessage, PrimaryWorkerMessage, Round, HeaderMessage};

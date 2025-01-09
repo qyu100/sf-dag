@@ -1,5 +1,5 @@
 // Copyright(C) Facebook, Inc. and its affiliates.
-use crate::messages::{Certificate, Header, NoVoteCert, NoVoteMsg, Timeout, TimeoutCert};
+use crate::messages::{Certificate, Header, HeaderInfo, HeaderWithParents, NoVoteCert, NoVoteMsg, Timeout, TimeoutCert};
 use crate::primary::Round;
 use config::Committee;
 use crypto::Hash as _;
@@ -32,11 +32,11 @@ pub struct Proposer {
     max_header_delay: u64,
 
     /// Receives the parents to include in the next header (along with their round number).
-    rx_core: Receiver<(Vec<Header>, Round)>,
+    rx_core: Receiver<(Vec<HeaderInfo>, Round)>,
     /// Receives the batch digest from our workers.
     rx_workers: Receiver<Vec<Transaction>>,
     /// Sends newly created headers to the `Core`.
-    tx_core: Sender<Header>,
+    tx_core: Sender<HeaderWithParents>,
     /// Sends newly created timeouts to the `Core`.
     tx_core_timeout: Sender<Timeout>,
     /// Receives timeout certs from the `Core`.
@@ -49,9 +49,9 @@ pub struct Proposer {
     /// The current round of the dag.
     round: Round,
     /// Holds the certificates' ids waiting to be included in the next header.
-    last_parents: Vec<Header>,
+    last_parents: Vec<HeaderInfo>,
     /// Holds the certificate of the last leader (if any).
-    last_leader: Option<Header>,
+    last_leader: Option<HeaderInfo>,
     /// Holds the txns waiting to be included in the next header.
     txns: Vec<Transaction>,
     /// Keeps track of the size (in bytes) of batches' digests that we received so far.
@@ -71,15 +71,15 @@ impl Proposer {
         batch_size: usize,
         tx_size: usize,
         max_header_delay: u64,
-        rx_core: Receiver<(Vec<Header>, Round)>,
+        rx_core: Receiver<(Vec<HeaderInfo>, Round)>,
         rx_workers: Receiver<Vec<Transaction>>,
-        tx_core: Sender<Header>,
+        tx_core: Sender<HeaderWithParents>,
         tx_core_timeout: Sender<Timeout>,
         rx_timeout_cert: Receiver<(TimeoutCert, Round)>,
         tx_core_no_vote_msg: Sender<NoVoteMsg>,
         rx_no_vote_cert: Receiver<(NoVoteCert, Round)>,
     ) {
-        let genesis = Header::genesis(&committee);
+        let genesis = HeaderInfo::genesis(&committee);
         tokio::spawn(async move {
             Self {
                 name,
@@ -156,11 +156,12 @@ impl Proposer {
             self.header_size / self.tx_size
         };
 
+        let parents: Vec<HeaderInfo> = self.last_parents.drain(..).collect();
         let header = Header::new(
             self.name,
             self.round,
             self.txns.drain(..limit).collect(),
-            self.last_parents.drain(..).map(|x| x.id.clone()).collect(),
+            parents.iter().map(|x| x.id).collect(),
         )
         .await;
 
@@ -174,9 +175,6 @@ impl Proposer {
                 header.id,
                 header.payload.len() * self.tx_size
             );
-            // info!("self.txns.len(): {:?}", self.txns.len());
-            // info!("self.header_size: {:?}", self.header_size);
-            // info!("payload_len: {:?}", header.payload.len());
             let tx_ids: Vec<_> = header
                 .payload
                 .clone()
@@ -195,8 +193,9 @@ impl Proposer {
         }
 
         // Send the new header to the `Core` that will broadcast and process it.
+        let header_with_parents = HeaderWithParents{header, parents};
         self.tx_core
-            .send(header)
+            .send(header_with_parents)
             .await
             .expect("Failed to send header");
     }

@@ -6,7 +6,7 @@ use crate::garbage_collector::GarbageCollector;
 use crate::header_waiter::HeaderWaiter;
 use crate::helper::Helper;
 use crate::worker::Worker;
-use crate::messages::{Certificate, Header, NoVoteMsg, Timeout, Vote, EchoHeader, ReadyHeader};
+use crate::messages::{Certificate, EchoHeader, Header, HeaderInfo, HeaderInfoWithParents, HeaderWithParents, NoVoteMsg, ReadyHeader, Timeout, Vote};
 use crate::payload_receiver::PayloadReceiver;
 use crate::proposer::Proposer;
 use crate::synchronizer::Synchronizer;
@@ -32,7 +32,7 @@ pub type Round = u64;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum PrimaryMessage {
-    Header(Header),
+    HeaderMsg(HeaderMessage),
     Timeout(Timeout),
     NoVoteMsg(NoVoteMsg),
     Vote(Vote),
@@ -41,6 +41,22 @@ pub enum PrimaryMessage {
     Echo(EchoHeader),
     Ready(ReadyHeader),
 }
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub enum HeaderMessage {
+    HeaderWithParents(HeaderWithParents),
+    HeaderInfoWithParents(HeaderInfoWithParents),
+    Header(Header),
+    HeaderInfo(HeaderInfo),
+}
+
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub enum HeaderType {
+    Header(Header),
+    HeaderInfo(HeaderInfo),
+} 
+
 
 /// The messages sent by the primary to its workers.
 #[derive(Debug, Serialize, Deserialize)]
@@ -69,8 +85,9 @@ impl Primary {
         parameters: Parameters,
         store: Store,
         tx_consensus: Sender<Certificate>,
-        rx_consensus: Receiver<Header>,
+        rx_consensus: Receiver<HeaderInfo>,
         tx_consensus_header: Sender<Header>,
+        tx_consensus_header_msg: Sender<HeaderType>,
     ) {
         // let (tx_others_digests, rx_others_digests) = channel(CHANNEL_CAPACITY);
         let (tx_our_digests, rx_our_digests) = channel(CHANNEL_CAPACITY);
@@ -171,6 +188,7 @@ impl Primary {
             tx_timeout_cert,
             tx_no_vote_cert,
             tx_consensus_header,
+            tx_consensus_header_msg,
         );
 
         // Keeps track of the latest consensus round and allows other tasks to clean up their their internal state
@@ -256,6 +274,7 @@ impl MessageHandler for PrimaryReceiverHandler {
                 .send((missing, requestor))
                 .await
                 .expect("Failed to send primary message"),
+
             
             request => self
                 .tx_primary_messages
