@@ -478,23 +478,24 @@ impl Core {
                             .await
                             .expect("Failed to send header_info to consensus");
                         self.consensus_header_sent.insert((header_info.round.clone(), header_info.id.clone()), true);
-                        // Check if we have enough headers to enter a new dag round and propose a header.
-                        // QY: in the happy case: check if we have received leader's Header
-                        if let Some(parents) = self
-                            .header_aggregators
-                            .entry(header_info.round)
-                            .or_insert_with(|| Box::new(HeadersAggregator::new()))
-                            .append(header_info.clone(), &self.committee)? {
-                            if let Some(parent) = parents.iter()
-                                .find(|parent| parent.author == self.committee.leader(header_info.round as usize)) {
-                                // Send it to the `Proposer`.
-                                self.tx_proposer
-                                    .send((parents, header_info.round))
-                                    .await
-                                    .expect("Failed to send header_info to proposer");
-                            }
+                    }
+                    // Check if we have enough headers to enter a new dag round and propose a header.
+                    // QY: in the happy case: check if we have received leader's Header
+                    if let Some(parents) = self
+                        .header_aggregators
+                        .entry(header_info.round)
+                        .or_insert_with(|| Box::new(HeadersAggregator::new()))
+                        .append(header_info.clone(), &self.committee)? {
+                        if let Some(parent) = parents.iter()
+                            .find(|parent| parent.author == self.committee.leader(header_info.round as usize)) {
+                            // Send it to the `Proposer`.
+                            self.tx_proposer
+                                .send((parents, header_info.round))
+                                .await
+                                .expect("Failed to send header_info to proposer");
                         }
                     }
+                    
                 }
             }
         }
