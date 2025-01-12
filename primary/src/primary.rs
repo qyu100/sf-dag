@@ -8,6 +8,7 @@ use crate::helper::Helper;
 use crate::messages::{Certificate, Header, Vote, EchoHeader, ReadyHeader};
 use crate::payload_receiver::PayloadReceiver;
 use crate::proposer::Proposer;
+use crate::worker::Worker;
 use crate::synchronizer::Synchronizer;
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -69,7 +70,7 @@ impl Primary {
         rx_consensus: Receiver<Header>,
         tx_consensus_header: Sender<Header>,
     ) {
-        let (tx_others_digests, rx_others_digests) = channel(CHANNEL_CAPACITY);
+        // let (tx_others_digests, rx_others_digests) = channel(CHANNEL_CAPACITY);
         let (tx_our_digests, rx_our_digests) = channel(CHANNEL_CAPACITY);
         let (tx_parents, rx_parents) = channel(CHANNEL_CAPACITY);
         let (tx_headers, rx_headers) = channel(CHANNEL_CAPACITY);
@@ -116,17 +117,25 @@ impl Primary {
             .expect("Our public key or worker id is not in the committee")
             .worker_to_primary;
         address.set_ip("0.0.0.0".parse().unwrap());
-        NetworkReceiver::spawn(
-            address,
-            /* handler */
-            WorkerReceiverHandler {
-                tx_our_digests,
-                tx_others_digests,
-            },
-        );
-        info!(
-            "Primary {} listening to workers messages on {}",
-            name, address
+        // NetworkReceiver::spawn(
+        //     address,
+        //     /* handler */
+        //     WorkerReceiverHandler {
+        //         tx_our_digests,
+        //         tx_others_digests,
+        //     },
+        // );
+        // info!(
+        //     "Primary {} listening to workers messages on {}",
+        //     name, address
+        // );
+
+        Worker::spawn(
+            name,
+            0,
+            committee.clone(),
+            parameters.clone(),
+            tx_our_digests,
         );
 
         // The `Synchronizer` provides auxiliary methods helping to `Core` to sync.
@@ -159,7 +168,7 @@ impl Primary {
         GarbageCollector::spawn(&name, &committee, consensus_round.clone(), rx_consensus);
 
         // Receives batch digests from other workers. They are only used to validate headers.
-        PayloadReceiver::spawn(store.clone(), /* rx_workers */ rx_others_digests);
+        // PayloadReceiver::spawn(store.clone(), /* rx_workers */ rx_others_digests);
 
         // Whenever the `Synchronizer` does not manage to validate a header due to missing parent certificates of
         // batch digests, it commands the `HeaderWaiter` to synchronizer with other nodes, wait for their reply, and
@@ -190,6 +199,7 @@ impl Primary {
             name,
             committee.clone(),
             parameters.header_size,
+            parameters.tx_size,
             parameters.max_header_delay,
             /* rx_core */ rx_parents,
             /* rx_workers */ rx_our_digests,

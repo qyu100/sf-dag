@@ -180,14 +180,15 @@ impl Consensus {
 
             // Output the sequence in the right order.
             for header in sequence {
-                #[cfg(not(feature = "benchmark"))]
-                info!("Committed {}", header);
+                // #[cfg(not(feature = "benchmark"))]
+                // info!("Committed {}", header);
 
-                #[cfg(feature = "benchmark")]
-                for digest in header.payload.keys() {
-                    // NOTE: This log entry is used to compute performance.
-                    info!("Committed {} -> {:?}", header, digest);
-                }
+                // #[cfg(feature = "benchmark")]
+                // for digest in header.payload.keys() {
+                //     // NOTE: This log entry is used to compute performance.
+                //     info!("Committed {} -> {:?}", header, digest);
+                // }
+                info!("Committed {:?}", header.id);
 
                 self.tx_primary
                     .send(header.clone())

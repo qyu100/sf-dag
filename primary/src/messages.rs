@@ -10,30 +10,23 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::convert::TryInto;
 use std::fmt;
 
+pub type Transaction = Vec<u8>;
+
 #[derive(Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct Header {
     pub author: PublicKey,
     pub round: Round,
-    pub payload: BTreeMap<Digest, WorkerId>,
+    pub payload: Vec<Transaction>,
     pub parents: BTreeSet<Digest>,
     pub id: Digest,
     // pub signature: Signature,
 }
 
 impl Header {
-    pub fn default() -> Self {
-        Self {
-            author: PublicKey::default(),
-            round: Round::default(),
-            payload: BTreeMap::new(),
-            parents: BTreeSet::new(),
-            id: Digest::default(),
-        }
-    }
     pub async fn new(
         author: PublicKey,
         round: Round,
-        payload: BTreeMap<Digest, WorkerId>,
+        payload: Vec<Transaction>,
         parents: BTreeSet<Digest>,
     ) -> Self {
         let header = Self {
@@ -58,17 +51,7 @@ impl Header {
         let voting_rights = committee.stake(&self.author);
         ensure!(voting_rights > 0, DagError::UnknownAuthority(self.author));
 
-        // Ensure all worker ids are correct.
-        for worker_id in self.payload.values() {
-            committee
-                .worker(&self.author, worker_id)
-                .map_err(|_| DagError::MalformedHeader(self.id.clone()))?;
-        }
         Ok(())
-        // // Check the signature.
-        // self.signature
-        //     .verify(&self.id, &self.author)
-        //     .map_err(DagError::from)
     }
 
     pub fn genesis(committee: &Committee) -> Vec<Self> {
@@ -86,9 +69,8 @@ impl Hash for Header {
         let mut hasher = Sha512::new();
         hasher.update(&self.author);
         hasher.update(self.round.to_le_bytes());
-        for (x, y) in &self.payload {
+        for (x) in &self.payload {
             hasher.update(x);
-            hasher.update(y.to_le_bytes());
         }
         for x in &self.parents {
             hasher.update(x);
@@ -101,11 +83,10 @@ impl fmt::Debug for Header {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         write!(
             f,
-            "{}: B{}({}, {})",
+            "{}: B{}({})",
             self.id,
             self.round,
             self.author,
-            self.payload.keys().map(|x| x.size()).sum::<usize>(),
         )
     }
 }

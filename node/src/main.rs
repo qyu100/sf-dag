@@ -9,7 +9,6 @@ use env_logger::Env;
 use primary::{Certificate, Primary, Header};
 use store::Store;
 use tokio::sync::mpsc::{channel, Receiver};
-use worker::Worker;
 
 /// The default channel capacity.
 pub const CHANNEL_CAPACITY: usize = 1_000;
@@ -117,15 +116,15 @@ async fn run(matches: &ArgMatches<'_>) -> Result<()> {
             );
         }
 
-        // Spawn a single worker.
-        ("worker", Some(sub_matches)) => {
-            let id = sub_matches
-                .value_of("id")
-                .unwrap()
-                .parse::<WorkerId>()
-                .context("The worker id must be a positive integer")?;
-            Worker::spawn(keypair.name, id, committee, parameters, store);
-        }
+        // // Spawn a single worker.
+        // ("worker", Some(sub_matches)) => {
+        //     let id = sub_matches
+        //         .value_of("id")
+        //         .unwrap()
+        //         .parse::<WorkerId>()
+        //         .context("The worker id must be a positive integer")?;
+        //     Worker::spawn(keypair.name, id, committee, parameters, store);
+        // }
         _ => unreachable!(),
     }
 

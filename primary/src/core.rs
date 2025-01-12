@@ -187,12 +187,6 @@ impl Core {
                 DagError::HeaderRequiresQuorum(header.id.clone())
             );
 
-            // Ensure we have the payload. If we don't, the synchronizer will ask our workers to get it, and then
-            // reschedule processing of this header once we have it.
-            if self.synchronizer.missing_payload(header).await? {
-                debug!("Processing of {} suspended: missing payload", header);
-                return Ok(());
-            }
         }
         // Store the header.
         let bytes = bincode::serialize(header).expect("Failed to serialize header");

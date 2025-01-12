@@ -12,6 +12,8 @@ mod payload_receiver;
 mod primary;
 mod proposer;
 mod synchronizer;
+mod worker;
+mod batch_maker;
 
 // #[cfg(test)]
 // #[path = "tests/common.rs"]

@@ -10,6 +10,8 @@ use log::{debug, log_enabled, warn};
 use std::cmp::Ordering;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::time::{sleep, Duration, Instant};
+pub type Transaction = Vec<u8>;
+use std::convert::TryInto;
 
 // #[cfg(test)]
 // #[path = "tests/proposer_tests.rs"]
@@ -24,12 +26,13 @@ pub struct Proposer {
     /// The size of the headers' payload.
     header_size: usize,
     /// The maximum delay to wait for batches' digests.
+    tx_size:usize,
     max_header_delay: u64,
 
     /// Receives the parents to include in the next header (along with their round number).
     rx_core: Receiver<(Vec<Header>, Round)>,
     /// Receives the batches' digests from our workers.
-    rx_workers: Receiver<(Digest, WorkerId)>,
+    rx_workers: Receiver<Vec<Transaction>>,
     /// Sends newly created headers to the `Core`.
     tx_core: Sender<Header>,
 
@@ -39,6 +42,8 @@ pub struct Proposer {
     last_parents: Vec<Header>,
     /// Holds the header of the last leader (if any).
     last_leader: Option<Header>,
+    /// Holds the txns waiting to be included in the next header.
+    txns: Vec<Transaction>,
     /// Holds the batches' digests waiting to be included in the next header.
     digests: Vec<(Digest, WorkerId)>,
     /// Keeps track of the size (in bytes) of batches' digests that we received so far.
@@ -51,9 +56,10 @@ impl Proposer {
         name: PublicKey,
         committee: Committee,
         header_size: usize,
+        tx_size: usize,
         max_header_delay: u64,
         rx_core: Receiver<(Vec<Header>, Round)>,
-        rx_workers: Receiver<(Digest, WorkerId)>,
+        rx_workers: Receiver<Vec<Transaction>>,
         tx_core: Sender<Header>,
     ) {
         let genesis = Header::genesis(&committee);
@@ -62,6 +68,7 @@ impl Proposer {
                 name,
                 committee,
                 header_size,
+                tx_size,
                 max_header_delay,
                 rx_core,
                 rx_workers,
@@ -69,6 +76,7 @@ impl Proposer {
                 round: 0,
                 last_parents: genesis,
                 last_leader: None,
+                txns: Vec::new(),
                 digests: Vec::with_capacity(2 * header_size),
                 payload_size: 0,
             }
@@ -79,20 +87,49 @@ impl Proposer {
 
     async fn make_header(&mut self) {
         // Make a new header.
+        let limit = if self.txns.len() * self.tx_size <= self.header_size {
+            self.txns.len()
+        } else {
+            self.header_size / self.tx_size
+        };
+
         let header = Header::new(
             self.name,
             self.round,
-            self.digests.drain(..).collect(),
+            self.txns.drain(..limit).collect(),
             self.last_parents.drain(..).map(|x| x.id).collect(),
         )
         .await;
-        debug!("Created {:?}", header);
+        // debug!("Created {:?}", header);
 
         #[cfg(feature = "benchmark")]
-        for digest in header.payload.keys() {
+        {
+            info!("Created {:?}", header.id);
+            info!(
+                "Header {:?} contains {} B",
+                header.id,
+                header.payload.len() * self.tx_size
+            );
+            // info!("self.txns.len(): {:?}", self.txns.len());
+            // info!("self.header_size: {:?}", self.header_size);
+            // info!("payload_len: {:?}", header.payload.len());
+            let tx_ids: Vec<_> = header
+                .payload
+                .clone()
+                .iter()
+                .filter(|tx| tx[0] == 0u8 && tx.len() > 8)
+                .filter_map(|tx| tx[1..9].try_into().ok())
+                .collect();
+            for id in tx_ids {
+                info!(
+                    "Header {:?} contains sample tx {}",
+                    header.id,
+                    u64::from_be_bytes(id)
+                );
+            }
             // NOTE: This log entry is used to compute performance.
-            info!("Created {} -> {:?}", header, digest);
         }
+
 
         // Send the new header to the `Core` that will broadcast and process it.
         self.tx_core
@@ -213,12 +250,9 @@ impl Proposer {
                         _ => self.enough_votes(),
                     }
                 }
-                Some((digest, worker_id)) = self.rx_workers.recv() => {
-                    self.payload_size += digest.size();
-                    self.digests.push((digest, worker_id));
-                }
-                () = &mut timer => {
-                    // Nothing to do.
+                Some(txns) = self.rx_workers.recv() => {
+                    self.payload_size += txns.iter().map(|txn| txn.len()).sum::<usize>();
+                    self.txns.extend(txns);
                 }
             }
         }

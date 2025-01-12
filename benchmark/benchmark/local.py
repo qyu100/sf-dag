@@ -100,24 +100,24 @@ class LocalBench:
                     PathMaker.committee_file(),
                     PathMaker.db_path(i),
                     PathMaker.parameters_file(),
-                    debug=debug,
+                    debug=debug
                 )
                 log_file = PathMaker.primary_log_file(i)
                 self._background_run(cmd, log_file)
 
-            # Run the workers (except the faulty ones).
-            for i, addresses in enumerate(workers_addresses):
-                for id, address in addresses:
-                    cmd = CommandMaker.run_worker(
-                        PathMaker.key_file(i),
-                        PathMaker.committee_file(),
-                        PathMaker.db_path(i, id),
-                        PathMaker.parameters_file(),
-                        id,  # The worker's id.
-                        debug=debug,
-                    )
-                    log_file = PathMaker.worker_log_file(i, id)
-                    self._background_run(cmd, log_file)
+            # # Run the workers (except the faulty ones).
+            # for i, addresses in enumerate(workers_addresses):
+            #     for id, address in addresses:
+            #         cmd = CommandMaker.run_worker(
+            #             PathMaker.key_file(i),
+            #             PathMaker.committee_file(),
+            #             PathMaker.db_path(i, id),
+            #             PathMaker.parameters_file(),
+            #             id,  # The worker's id.
+            #             debug=debug,
+            #         )
+            #         log_file = PathMaker.worker_log_file(i, id)
+            #         self._background_run(cmd, log_file)
 
             # Wait for all transactions to be processed.
             Print.info(f"Running benchmark ({self.duration} sec)...")
