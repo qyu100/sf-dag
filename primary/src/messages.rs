@@ -115,7 +115,6 @@ impl EchoHeader {
             origin: header_info.author,
         }
     }
-
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

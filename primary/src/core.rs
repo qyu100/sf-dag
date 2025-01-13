@@ -494,8 +494,7 @@ impl Core {
                                 .await
                                 .expect("Failed to send header_info to proposer");
                         }
-                    }
-                    
+                    } 
                 }
             }
         }
@@ -632,25 +631,6 @@ impl Core {
                             }
 
                         },
-                        // PrimaryMessage::NoVoteMsg(no_vote_msg) => {
-                        //     match self.sanitize_no_vote_msg(&no_vote_msg) {
-                        //         Ok(()) => self.process_no_vote_msg(no_vote_msg).await,
-                        //         error => error
-                        //     }
-
-                        // },
-                        // PrimaryMessage::Vote(vote) => {
-                        //     match self.sanitize_vote(&vote) {
-                        //         Ok(()) => self.process_vote(vote).await,
-                        //         error => error
-                        //     }
-                        // },
-                        // PrimaryMessage::Certificate(certificate) => {
-                        //     match self.sanitize_certificate(&certificate) {
-                        //         Ok(()) =>  self.process_certificate(certificate).await,
-                        //         error => error
-                        //     }
-                        // },
                         _ => panic!("Unexpected core message")
                     }
                 },
@@ -659,13 +639,8 @@ impl Core {
                 // execution (we were missing some of their dependencies) and we are now ready to resume processing.
                 Some(header_msg) = self.rx_header_waiter.recv() => self.process_header(&header_msg).await,
 
-                // // We receive here loopback certificates from the `CertificateWaiter`. Those are certificates for which
-                // // we interrupted execution (we were missing some of their ancestors) and we are now ready to resume
-                // // processing.
-                // Some(certificate) = self.rx_certificate_waiter.recv() => self.process_certificate(certificate).await,
-
                 // We also receive here our new headers created by the `Proposer`.
-                Some(header) = self.rx_proposer.recv() => self.process_own_header(header).await,
+                Some(header_with_parents) = self.rx_proposer.recv() => self.process_own_header(header_with_parents).await,
                 // We also receive here our timeout created by the `Proposer`.
                 Some(timeout) = self.rx_timeout.recv() => self.process_own_timeout(timeout).await,
                 // // We also receive here our no vote messages created by the `Proposer`.
