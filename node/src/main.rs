@@ -6,7 +6,7 @@ use config::Import as _;
 use config::{Committee, KeyPair, Parameters, WorkerId};
 use consensus::Consensus;
 use env_logger::Env;
-use primary::{Certificate, Primary, Header};
+use primary::{Primary, HeaderInfo};
 use store::Store;
 use tokio::sync::mpsc::{channel, Receiver};
 
@@ -97,6 +97,7 @@ async fn run(matches: &ArgMatches<'_>) -> Result<()> {
             let (tx_new_certificates, rx_new_certificates) = channel(CHANNEL_CAPACITY);
             let (tx_feedback, rx_feedback) = channel(CHANNEL_CAPACITY);
             let (tx_consensus_header, rx_consensus_header) = channel(CHANNEL_CAPACITY);
+            let (tx_consensus_header_msg, rx_consensus_header_msg) = channel(CHANNEL_CAPACITY);
             Primary::spawn(
                 keypair,
                 committee.clone(),
@@ -105,12 +106,13 @@ async fn run(matches: &ArgMatches<'_>) -> Result<()> {
                 /* tx_consensus */ tx_new_certificates,
                 /* rx_consensus */ rx_feedback,
                 tx_consensus_header,
+                tx_consensus_header_msg,
             );
             Consensus::spawn(
                 committee,
                 parameters.gc_depth,
                 /* rx_primary */ rx_new_certificates,
-                rx_consensus_header,
+                rx_consensus_header_msg,
                 /* tx_primary */ tx_feedback,
                 tx_output,
             );
@@ -136,7 +138,7 @@ async fn run(matches: &ArgMatches<'_>) -> Result<()> {
 }
 
 /// Receives an ordered list of certificates and apply any application-specific logic.
-async fn analyze(mut rx_output: Receiver<Header>) {
+async fn analyze(mut rx_output: Receiver<HeaderInfo>) {
     while let Some(_certificate) = rx_output.recv().await {
         // NOTE: Here goes the application logic.
     }

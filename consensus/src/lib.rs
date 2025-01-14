@@ -3,7 +3,7 @@ use config::{Committee, Stake};
 use crypto::Hash as _;
 use crypto::{Digest, PublicKey};
 use log::{debug, info, log_enabled, warn};
-use primary::{Certificate, Header, Round};
+use primary::{Certificate, Header, Round, HeaderInfo, HeaderType};
 use std::cmp::max;
 use std::collections::{HashMap, HashSet};
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -13,7 +13,7 @@ use tokio::sync::mpsc::{Receiver, Sender};
 pub mod consensus_tests;
 
 /// The representation of the DAG in memory.
-type Dag = HashMap<Round, HashMap<PublicKey, (Digest, Header)>>;
+type Dag = HashMap<Round, HashMap<PublicKey, (Digest, HeaderInfo)>>;
 
 /// The state that needs to be persisted for crash-recovery.
 struct State {
@@ -28,7 +28,7 @@ struct State {
 }
 
 impl State {
-    fn new(genesis: Vec<Header>) -> Self {
+    fn new(genesis: Vec<HeaderInfo>) -> Self {
         let genesis = genesis
             .into_iter()
             .map(|x| (x.author, (x.id.clone(), x)))
@@ -42,7 +42,7 @@ impl State {
     }
 
     /// Update and clean up internal state base on committed headers.
-    fn update(&mut self, header: &Header, gc_depth: Round) {
+    fn update(&mut self, header: &HeaderInfo, gc_depth: Round) {
         self.last_committed
             .entry(header.author)
             .and_modify(|r| *r = max(*r, header.round))
@@ -72,13 +72,13 @@ pub struct Consensus {
     /// if it already sent us its whole history.
     rx_primary: Receiver<Certificate>,
     /// Outputs the sequence of ordered headers to the primary (for cleanup and feedback).
-    rx_primary_header: Receiver<Header>,
-    tx_primary: Sender<Header>,
+    rx_primary_header: Receiver<HeaderType>,
+    tx_primary: Sender<HeaderInfo>,
     /// Outputs the sequence of ordered headers to the application layer.
-    tx_output: Sender<Header>,
+    tx_output: Sender<HeaderInfo>,
 
     /// The genesis headers.
-    genesis: Vec<Header>,
+    genesis: Vec<HeaderInfo>,
 }
 
 impl Consensus {
@@ -86,9 +86,9 @@ impl Consensus {
         committee: Committee,
         gc_depth: Round,
         rx_primary: Receiver<Certificate>,
-        rx_primary_header: Receiver<Header>,
-        tx_primary: Sender<Header>,
-        tx_output: Sender<Header>,
+        rx_primary_header: Receiver<HeaderType>,
+        tx_primary: Sender<HeaderInfo>,
+        tx_output: Sender<HeaderInfo>,
     ) {
         tokio::spawn(async move {
             Self {
@@ -98,7 +98,7 @@ impl Consensus {
                 rx_primary_header,
                 tx_primary,
                 tx_output,
-                genesis: Header::genesis(&committee),
+                genesis: HeaderInfo::genesis(&committee),
             }
             .run()
             .await;
@@ -110,16 +110,25 @@ impl Consensus {
         let mut state = State::new(self.genesis.clone());
 
         // Listen to incoming headers.
-        while let Some(header) = self.rx_primary_header.recv().await {
-            debug!("Processing {:?}", header);
-            let round = header.round;
+        while let Some(header_type) = self.rx_primary_header.recv().await {
+            debug!("Processing {:?}", header_type);
+            let header_info: HeaderInfo;
+            match header_type {
+                HeaderType::Header(header) => {
+                    header_info = HeaderInfo::create_from(&header);
+                }
+                HeaderType::HeaderInfo(h_info) => {
+                    header_info = h_info.clone();
+                }
+            }
+            let round = header_info.round;
 
             // Add the new header to the local storage.
             state
                 .dag
-                .entry(header.round)
+                .entry(header_info.round)
                 .or_insert_with(HashMap::new)
-                .insert(header.author, (header.id.clone(), header.clone()));
+                .insert(header_info.author, (header_info.id.clone(), header_info.clone()));
 
             // Try to order the dag to commit. Start from the previous round and check if it is a leader round.
             let r = round - 1;
@@ -204,7 +213,7 @@ impl Consensus {
 
     /// Returns the header (and the header's digest) originated by the leader of the
     /// specified round (if any).
-    fn leader<'a>(&self, round: Round, dag: &'a Dag) -> Option<&'a (Digest, Header)> {
+    fn leader<'a>(&self, round: Round, dag: &'a Dag) -> Option<&'a (Digest, HeaderInfo)> {
         // TODO: We should elect the leader of round r-2 using the common coin revealed at round r.
         // At this stage, we are guaranteed to have 2f+1 headers from round r (which is enough to
         // compute the coin). We currently just use round-robin.
@@ -221,7 +230,7 @@ impl Consensus {
     }
 
     /// Order the past leaders that we didn't already commit.
-    fn order_leaders(&self, leader: &Header, state: &State) -> Vec<Header> {
+    fn order_leaders(&self, leader: &HeaderInfo, state: &State) -> Vec<HeaderInfo> {
         let mut to_commit = vec![leader.clone()];
         let mut leader = leader;
         for r in (state.last_committed_round + 2..=leader.round - 2)
@@ -244,7 +253,7 @@ impl Consensus {
     }
 
     /// Checks if there is a path between two leaders.
-    fn linked(&self, leader: &Header, prev_leader: &Header, dag: &Dag) -> bool {
+    fn linked(&self, leader: &HeaderInfo, prev_leader: &HeaderInfo, dag: &Dag) -> bool {
         let mut parents = vec![leader];
         for r in (prev_leader.round..leader.round).rev() {
             parents = dag
@@ -260,7 +269,7 @@ impl Consensus {
 
     /// Flatten the dag referenced by the input header. This is a classic depth-first search (pre-order):
     /// https://en.wikipedia.org/wiki/Tree_traversal#Pre-order
-    fn order_dag(&self, leader: &Header, state: &State) -> Vec<Header> {
+    fn order_dag(&self, leader: &HeaderInfo, state: &State) -> Vec<HeaderInfo> {
         debug!("Processing sub-dag of {:?}", leader);
         let mut ordered = Vec::new();
         let mut already_ordered = HashSet::new();

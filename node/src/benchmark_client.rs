@@ -69,7 +69,7 @@ async fn main() -> Result<()> {
 
     // Wait for all nodes to be online and synchronized.
     client.wait().await;
-
+    
     // Start the benchmark.
     client.send().await.context("Failed to submit transactions")
 }

@@ -18,7 +18,7 @@ pub mod crypto_tests;
 pub type CryptoError = ed25519::Error;
 
 /// Represents a hash digest (32 bytes).
-#[derive(Hash, PartialEq, Default, Eq, Clone, Deserialize, Serialize, Ord, PartialOrd)]
+#[derive(Hash, PartialEq, Default, Eq, Clone, Copy, Deserialize, Serialize, Ord, PartialOrd)]
 pub struct Digest(pub [u8; 32]);
 
 impl Digest {

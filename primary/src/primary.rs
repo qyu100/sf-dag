@@ -5,15 +5,14 @@ use crate::error::DagError;
 use crate::garbage_collector::GarbageCollector;
 use crate::header_waiter::HeaderWaiter;
 use crate::helper::Helper;
-use crate::messages::{Certificate, Header, Vote, EchoHeader, ReadyHeader};
-use crate::payload_receiver::PayloadReceiver;
+use crate::messages::{Certificate, Header, Vote, EchoHeader, ReadyHeader, HeaderInfo, HeaderInfoWithParents, HeaderWithParents};
 use crate::proposer::Proposer;
 use crate::worker::Worker;
 use crate::synchronizer::Synchronizer;
 use async_trait::async_trait;
 use bytes::Bytes;
 use config::{Committee, KeyPair, Parameters, WorkerId};
-use crypto::{Digest, PublicKey, SignatureService};
+use crypto::{Digest, PublicKey};
 use futures::sink::SinkExt as _;
 use log::info;
 use network::{MessageHandler, Receiver as NetworkReceiver, Writer};
@@ -32,13 +31,27 @@ pub type Round = u64;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum PrimaryMessage {
-    Header(Header),
+    HeaderMsg(HeaderMessage),
     Vote(Vote),
     Certificate(Certificate),
     CertificatesRequest(Vec<Digest>, /* requestor */ PublicKey),
     Echo(EchoHeader),
     Ready(ReadyHeader),
 }
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub enum HeaderMessage {
+    HeaderWithParents(HeaderWithParents),
+    HeaderInfoWithParents(HeaderInfoWithParents),
+    Header(Header),
+    HeaderInfo(HeaderInfo),
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub enum HeaderType {
+    Header(Header),
+    HeaderInfo(HeaderInfo),
+} 
 
 /// The messages sent by the primary to its workers.
 #[derive(Debug, Serialize, Deserialize)]
@@ -67,8 +80,9 @@ impl Primary {
         parameters: Parameters,
         store: Store,
         tx_consensus: Sender<Certificate>,
-        rx_consensus: Receiver<Header>,
+        rx_consensus: Receiver<HeaderInfo>,
         tx_consensus_header: Sender<Header>,
+        tx_consensus_header_msg: Sender<HeaderType>,
     ) {
         // let (tx_others_digests, rx_others_digests) = channel(CHANNEL_CAPACITY);
         let (tx_our_digests, rx_our_digests) = channel(CHANNEL_CAPACITY);
@@ -117,18 +131,6 @@ impl Primary {
             .expect("Our public key or worker id is not in the committee")
             .worker_to_primary;
         address.set_ip("0.0.0.0".parse().unwrap());
-        // NetworkReceiver::spawn(
-        //     address,
-        //     /* handler */
-        //     WorkerReceiverHandler {
-        //         tx_our_digests,
-        //         tx_others_digests,
-        //     },
-        // );
-        // info!(
-        //     "Primary {} listening to workers messages on {}",
-        //     name, address
-        // );
 
         Worker::spawn(
             name,
@@ -162,6 +164,7 @@ impl Primary {
             tx_consensus,
             /* tx_proposer */ tx_parents,    
             tx_consensus_header, 
+            tx_consensus_header_msg,
         );
 
         // Keeps track of the latest consensus round and allows other tasks to clean up their their internal state

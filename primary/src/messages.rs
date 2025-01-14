@@ -1,12 +1,12 @@
 // Copyright(C) Facebook, Inc. and its affiliates.
 use crate::error::{DagError, DagResult};
 use crate::primary::Round;
-use config::{Committee, WorkerId};
+use config::Committee;
 use crypto::{Digest, Hash, PublicKey, Signature, SignatureService};
 use ed25519_dalek::Digest as _;
 use ed25519_dalek::Sha512;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashSet};
 use std::convert::TryInto;
 use std::fmt;
 
@@ -17,9 +17,8 @@ pub struct Header {
     pub author: PublicKey,
     pub round: Round,
     pub payload: Vec<Transaction>,
-    pub parents: BTreeSet<Digest>,
+    pub parents: Vec<Digest>,
     pub id: Digest,
-    // pub signature: Signature,
 }
 
 impl Header {
@@ -27,7 +26,7 @@ impl Header {
         author: PublicKey,
         round: Round,
         payload: Vec<Transaction>,
-        parents: BTreeSet<Digest>,
+        parents: Vec<Digest>,
     ) -> Self {
         let header = Self {
             author,
@@ -69,7 +68,7 @@ impl Hash for Header {
         let mut hasher = Sha512::new();
         hasher.update(&self.author);
         hasher.update(self.round.to_le_bytes());
-        for (x) in &self.payload {
+        for x in &self.payload {
             hasher.update(x);
         }
         for x in &self.parents {
@@ -94,6 +93,109 @@ impl fmt::Debug for Header {
 impl fmt::Display for Header {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         write!(f, "B{}({})", self.round, self.author)
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct HeaderInfo {
+    pub author: PublicKey,
+    pub round: Round,
+    pub payload: Digest,
+    pub parents: Vec<Digest>,
+    pub id: Digest,
+}
+
+impl HeaderInfo {
+    pub fn create_from(header: &Header) -> Self {
+        let header_info = Self {
+            author: header.author,
+            round: header.round,
+            payload: payload_digest(&header),
+            parents: header.parents.clone(),
+            id: header.id.clone(),
+        };
+
+        header_info
+    }
+
+    pub fn verify(&self, committee: &Committee) -> DagResult<()> {
+        // Ensure the authority has voting rights.
+        let voting_rights = committee.stake(&self.author);
+        ensure!(voting_rights > 0, DagError::UnknownAuthority(self.author));
+        Ok(())
+    }
+
+    pub fn genesis(committee: &Committee) -> Vec<Self> {
+        committee
+            .authorities
+            .keys()
+            .map(|_| Self { ..Self::default() })
+            .collect()
+    }
+}
+
+fn payload_digest(header: &Header) -> Digest {
+    let mut hasher = Sha512::new();
+
+    for x in &header.payload {
+        hasher.update(x);
+    }
+
+    Digest(hasher.finalize().as_slice()[..32].try_into().unwrap())
+}
+
+impl fmt::Debug for HeaderInfo {
+    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+        write!(f, "{}: B{}({})", self.id, self.round, self.author,)
+    }
+}
+
+impl fmt::Display for HeaderInfo {
+    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+        write!(f, "B{}({})", self.round, self.author)
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, Default)]
+pub struct HeaderWithParents {
+    pub header: Header,
+    pub parents: Vec<HeaderInfo>,
+}
+impl fmt::Debug for HeaderWithParents {
+    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+        write!(
+            f,
+            "{}: B{}({})",
+            self.header.id, self.header.round, self.header.author,
+        )
+    }
+}
+impl fmt::Display for HeaderWithParents {
+    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+        write!(f, "B{}({})", self.header.round, self.header.author)
+    }
+}
+#[derive(Clone, Serialize, Deserialize, Default)]
+pub struct HeaderInfoWithParents {
+    pub header_info: HeaderInfo,
+    pub parents: Vec<HeaderInfo>,
+}
+impl fmt::Debug for HeaderInfoWithParents {
+    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+        write!(
+            f,
+            "{}: B{}({})",
+            self.header_info.id, self.header_info.round, self.header_info.author,
+        )
+    }
+}
+impl fmt::Display for HeaderInfoWithParents {
+    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+        write!(
+            f,
+            "B{}({})",
+            self.header_info.round, self.header_info.author
+        )
     }
 }
 
@@ -250,7 +352,6 @@ impl PartialEq for Certificate {
     }
 }
 
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EchoHeader {
     pub id: Digest, 
@@ -261,16 +362,15 @@ pub struct EchoHeader {
 
 impl EchoHeader {
     pub async fn new(
-        header: &Header,
+        header_info: &HeaderInfo,
         author: &PublicKey) -> Self {
         EchoHeader {
-            id: header.id.clone(), 
-            round: header.round,
+            id: header_info.id.clone(), 
+            round: header_info.round,
             author: *author,
-            origin: header.author,
+            origin: header_info.author,
         }
     }
-
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

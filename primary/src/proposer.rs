@@ -1,5 +1,5 @@
 // Copyright(C) Facebook, Inc. and its affiliates.
-use crate::messages::{Certificate, Header};
+use crate::messages::{Certificate, Header, HeaderWithParents, HeaderInfo};
 use crate::primary::Round;
 use config::{Committee, WorkerId};
 use crypto::Hash as _;
@@ -30,18 +30,18 @@ pub struct Proposer {
     max_header_delay: u64,
 
     /// Receives the parents to include in the next header (along with their round number).
-    rx_core: Receiver<(Vec<Header>, Round)>,
+    rx_core: Receiver<(Vec<HeaderInfo>, Round)>,
     /// Receives the batches' digests from our workers.
     rx_workers: Receiver<Vec<Transaction>>,
     /// Sends newly created headers to the `Core`.
-    tx_core: Sender<Header>,
+    tx_core: Sender<HeaderWithParents>,
 
     /// The current round of the dag.
     round: Round,
     /// Holds the headers' ids waiting to be included in the next header.
-    last_parents: Vec<Header>,
+    last_parents: Vec<HeaderInfo>,
     /// Holds the header of the last leader (if any).
-    last_leader: Option<Header>,
+    last_leader: Option<HeaderInfo>,
     /// Holds the txns waiting to be included in the next header.
     txns: Vec<Transaction>,
     /// Holds the batches' digests waiting to be included in the next header.
@@ -58,11 +58,11 @@ impl Proposer {
         header_size: usize,
         tx_size: usize,
         max_header_delay: u64,
-        rx_core: Receiver<(Vec<Header>, Round)>,
+        rx_core: Receiver<(Vec<HeaderInfo>, Round)>,
         rx_workers: Receiver<Vec<Transaction>>,
-        tx_core: Sender<Header>,
+        tx_core: Sender<HeaderWithParents>,
     ) {
-        let genesis = Header::genesis(&committee);
+        let genesis = HeaderInfo::genesis(&committee);
         tokio::spawn(async move {
             Self {
                 name,
@@ -93,14 +93,14 @@ impl Proposer {
             self.header_size / self.tx_size
         };
 
+        let parents: Vec<HeaderInfo> = self.last_parents.drain(..).collect();
         let header = Header::new(
             self.name,
             self.round,
             self.txns.drain(..limit).collect(),
-            self.last_parents.drain(..).map(|x| x.id).collect(),
+            parents.iter().map(|x| x.id).collect(),
         )
         .await;
-        // debug!("Created {:?}", header);
 
         #[cfg(feature = "benchmark")]
         {
@@ -132,8 +132,9 @@ impl Proposer {
 
 
         // Send the new header to the `Core` that will broadcast and process it.
+        let header_with_parents = HeaderWithParents{header, parents};
         self.tx_core
-            .send(header)
+            .send(header_with_parents)
             .await
             .expect("Failed to send header");
     }
@@ -204,7 +205,6 @@ impl Proposer {
             let enough_parents = !self.last_parents.is_empty();
             let enough_digests = self.payload_size >= self.header_size;
             let timer_expired = timer.is_elapsed();
-
             if (timer_expired || (enough_digests && advance)) && enough_parents {
                 if timer_expired {
                     warn!("Timer expired for round {}", self.round);
