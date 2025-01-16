@@ -109,23 +109,22 @@ impl Proposer {
     }
 
     async fn make_timeout_msg(&mut self) {
-        let timeout_cert_msg =
+        let timeout_msg =
             Timeout::new(self.round, self.name).await;
 
-        debug!("Created {:?}", timeout_cert_msg);
+        debug!("Created {:?}", timeout_msg);
 
         // Send the new timeout to the `Core` that will broadcast and process it.
         self.tx_core_timeout
-            .send(timeout_cert_msg)
+            .send(timeout_msg)
             .await
             .expect("Failed to send timeout");
     }
 
     async fn make_no_vote_msg(&mut self) {
-        let no_vote_msg = NoVoteMsg::new(self.round, self.name).await;
+        let no_vote_msg = NoVoteMsg::new(self.round, self.name);
 
         debug!("Created {:?}", no_vote_msg);
-
         // Send the new timeout to the `Core` that will broadcast and process it.
         self.tx_core_no_vote_msg
             .send(no_vote_msg)
@@ -135,21 +134,6 @@ impl Proposer {
 
     async fn make_header(&mut self) {
         // Make a new header.
-        // Prepare the timeout and no vote certificates
-        // let timeout_cert = if self.last_timeout_cert.round == self.round - 1 {
-        //     self.last_timeout_cert.clone()
-        // } else {
-        //     TimeoutCert::new(0) // Assuming TimeoutCert::new creates an empty certificate
-        // };
-
-        // let no_vote_cert = if self.committee.leader((self.round) as usize) == self.name
-        //     && self.last_no_vote_cert.round == self.round - 1
-        // {
-        //     self.last_no_vote_cert.clone()
-        // } else {
-        //     NoVoteCert::new(0) // Assuming NoVoteCert::new creates an empty certificate
-        // };
-
         let limit = if self.txns.len() * self.tx_size <= self.header_size {
             self.txns.len()
         } else {
@@ -169,7 +153,6 @@ impl Proposer {
 
         #[cfg(feature = "benchmark")]
         {
-            info!("Created {:?}", header.id);
             info!(
                 "Header {:?} contains {} B",
                 header.id,
@@ -212,7 +195,7 @@ impl Proposer {
         if let Some(leader) = self.last_leader.as_ref() {
             debug!("Got leader {} for round {}", leader.author, self.round);
         }
-
+        
         self.last_leader.is_some()
     }
 
@@ -238,28 +221,35 @@ impl Proposer {
             let no_vote_cert_gathered = self.last_no_vote_cert.round == self.round;
             let enough_digests = self.payload_size >= self.header_size;
             let timer_expired = timer.is_elapsed();
-
+            
             // TODO: This has to be fixed by sending timeout only once.
             if timer_expired && !timeout_sent {
                 warn!("Timer expired for round {}", self.round);
                 self.make_timeout_msg().await;
                 timeout_sent = true;
             }
-            // QY: happy case
-            // if ((timer_expired
-            //     && timeout_cert_gathered
-            //     && (!is_next_leader || no_vote_cert_gathered))
-            //     || (enough_digests && advance))
-            //     && enough_parents
-            if enough_digests && advance && enough_parents
+            
+            if timer_expired && self.last_leader.is_none() {
+                self.make_no_vote_msg().await;
+            }
+
+            if timer_expired {
+                info!("enough_digests:{:?}",enough_digests);
+                info!("advance:{:?}",advance);
+                info!("enough_parents:{:?}",self.last_parents.len() as u32);
+                info!("last_leader_none:{:?}",self.last_leader.is_none());
+                break;
+            }
+            if ((timer_expired
+                && timeout_cert_gathered
+                && (!is_next_leader || no_vote_cert_gathered))
+                || (enough_digests && advance))
+                && enough_parents
             {
-                if timer_expired && self.last_leader.is_none() && !is_next_leader {
-                    self.make_no_vote_msg().await;
-                }
-                // info!("enough_parents: {:?}", self.last_parents.len());
                 // Advance to the next round.
                 self.round += 1;
                 debug!("Dag moved to round {}", self.round);
+
                 // Make a new header.
                 self.make_header().await;
                 self.payload_size = 0;
@@ -272,6 +262,7 @@ impl Proposer {
 
             tokio::select! {
                 Some((parents, round)) = self.rx_core.recv() => {
+                    info!("parents:{:?} for round:{:?}",parents, round);
                     // Compare the parents' round number with our current round.
                     match round.cmp(&self.round) {
                         Ordering::Greater => {

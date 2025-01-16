@@ -3,7 +3,9 @@ use crate::aggregators::{
     CertificatesAggregator, NoVoteAggregator, TimeoutAggregator, VotesAggregator, HeadersAggregator 
 };
 use crate::error::{DagError, DagResult};
-use crate::messages::{Certificate, Header, HeaderWithParents, HeaderInfoWithParents, HeaderInfo, NoVoteCert, NoVoteMsg, Timeout, TimeoutCert, EchoHeader, ReadyHeader};
+use crate::messages::{Certificate, Header, HeaderWithParents, HeaderInfoWithParents, 
+    HeaderInfo, NoVoteCert, NoVoteMsg, Timeout, TimeoutCert, EchoHeader, ReadyHeader
+    ,EchoNoVoteMsg, ReadyNoVoteMsg};
 use crate::primary::{HeaderMessage, HeaderType, PrimaryMessage, Round};
 use crate::synchronizer::Synchronizer;
 use async_recursion::async_recursion;
@@ -67,14 +69,12 @@ pub struct Core {
     gc_round: Round,
     /// The authors of the last voted headers.
     last_voted: HashMap<Round, HashSet<PublicKey>>,
-    // /// The set of headers we are currently processing.
-    // processing: HashMap<Round, HashSet<Digest>>,
     /// The last header we proposed (for which we are waiting votes).
     current_header: Header,
     /// Aggregates votes into a certificate.
     votes_aggregator: VotesAggregator,
-    processing_headers: HashMap<Digest, Header>,
-    processing_header_infos: HashMap<Digest, HeaderInfo>,
+    processing_header_infos: HashMap<Digest, (HeaderInfo, bool)>,
+    processing_no_vote_msgs: HashMap<Digest, NoVoteMsg>,
     // Aggregates certificates to use as parents for new headers.
     certificates_aggregators: HashMap<Round, Box<CertificatesAggregator>>,
     // A network sender to send the batches to the other workers.
@@ -91,6 +91,12 @@ pub struct Core {
     ready_headers: HashMap<(Round, Digest), HashSet<PublicKey>>,
     ready_header_sent: HashMap<(Round, Digest), bool>,
     consensus_header_sent: HashMap<(Round, Digest), bool>,
+    timeout_sent: HashMap<Round, bool>,
+    timeouts: HashMap<Round, HashSet<PublicKey>>,
+    timeout_weight: HashMap<Round, Stake>,
+    echo_no_vote_msgs: HashMap<(Round, Digest), HashSet<PublicKey>>,
+    ready_no_vote_sent: HashMap<(Round, Digest), bool>,
+    ready_no_vote_msgs: HashMap<(Round, Digest), HashSet<PublicKey>>,
 }
 
 impl Core {
@@ -139,13 +145,10 @@ impl Core {
                 tx_consensus_header_msg,
                 gc_round: 0,
                 last_voted: HashMap::with_capacity(2 * gc_depth as usize),
-                // processing: HashMap::with_capacity(2 * gc_depth as usize),
                 current_header: Header::default(),
                 votes_aggregator: VotesAggregator::new(),
-                processing_headers: HashMap::new(),
                 processing_header_infos: HashMap::new(),
-                // processing_vote_aggregators: HashMap::new(),
-                // processed_headers: HashSet::new(),
+                processing_no_vote_msgs: HashMap::new(),
                 certificates_aggregators: HashMap::with_capacity(2 * gc_depth as usize),
                 network: ReliableSender::new(),
                 cancel_handlers: HashMap::with_capacity(2 * gc_depth as usize),
@@ -156,6 +159,12 @@ impl Core {
                 ready_headers: HashMap::new(),
                 ready_header_sent: HashMap::new(),
                 consensus_header_sent: HashMap::new(),
+                timeout_sent: HashMap::new(),
+                timeouts: HashMap::new(),
+                timeout_weight: HashMap::new(),
+                echo_no_vote_msgs: HashMap::new(),
+                ready_no_vote_sent: HashMap::new(),
+                ready_no_vote_msgs: HashMap::new(),
             }
             .run()
             .await;
@@ -182,6 +191,8 @@ impl Core {
             .entry(timeout.round)
             .or_insert_with(Vec::new)
             .extend(handlers);
+
+        self.timeout_sent.insert(timeout.round.clone(), true);
 
         // Log the broadcast for debugging purposes.
         debug!("Broadcasted own timeout for round {}", timeout.round);
@@ -251,13 +262,10 @@ impl Core {
             }
         }
 
-        self.processing_header_infos
-            .entry(header_info.id)
-            .or_insert(header_info.clone());
-
         // Ensure we have the parents. If at least one parent is missing, the synchronizer returns an empty
         // vector; it will gather the missing parents (as well as all ancestors) from other nodes and then
         // reschedule processing of this header.
+        let mut has_leader = true;
 
         if header_info.round != 1 {
             let parents = self.synchronizer.get_parents(&HeaderType::HeaderInfo(header_info.clone())).await?;
@@ -268,7 +276,7 @@ impl Core {
             }
             // Ensure the parents form a quorum and are all from the previous round.
             let mut stake = 0;
-            let mut has_leader = false;
+
             for parent in &parents {
                 let parent_header_info: HeaderInfo;
                 match parent {
@@ -296,42 +304,16 @@ impl Core {
                 stake >= self.committee.quorum_threshold(),
                 DagError::HeaderRequiresQuorum(header_info.id.clone())
             );
-            
-            // Check if the header is valid
-            if !has_leader {
-                // Check if we have enough timeout messages to meet the quorum threshold
-                while !self
-                    .timeouts_aggregators
-                    .entry(header_info.round - 1)
-                    .or_insert_with(|| Box::new(TimeoutAggregator::new()))
-                    .has_quorum(&self.committee) {
-                        // Wait for a short duration before checking again
-                        tokio::time::sleep(Duration::from_millis(100)).await;
-                }
-                debug!("Timeout aggregator has reached quorum for round {:?}", header_info.round - 1);
-
-                if self.committee.leader(header_info.round as usize).eq(&header_info.author) {
-                    // Check if we have enough no_vote messages to meet the quorum threshold
-                    // [TODO: 2f+1 different pks]
-                    while !self
-                        .no_vote_aggregators
-                        .entry(header_info.round - 1)
-                        .or_insert_with(|| Box::new(NoVoteAggregator::new()))
-                        .has_quorum(&self.committee) {
-                            // Wait for a short duration before checking again
-                            tokio::time::sleep(Duration::from_millis(100)).await;
-                    }
-                }
-            }
         }
-
+        self.processing_header_infos
+            .entry(header_info.id)
+            .or_insert((header_info.clone(), has_leader));
         // Store the header.
         let hid = header_info.id;
         let header_type = HeaderType::HeaderInfo(header_info.clone());
         let bytes = bincode::serialize(&header_type).expect("Failed to serialize header");
         self.store.write(hid.to_vec(), bytes).await;
         
-        // QY: TODO: make sure echo is sent once.
         // Send <ECHO, H(m)> to primaries.
         let addresses = self
             .committee
@@ -357,7 +339,7 @@ impl Core {
             .insert(self.name.clone());
 
         // Log the broadcast for debugging purposes
-        // debug!("Broadcasted EchoHeader with hash {:?}", header_info.clone().round);
+        debug!("Broadcasted EchoHeader with hash {:?}", header_info.clone().round);
 
         Ok(())
     }
@@ -427,17 +409,11 @@ impl Core {
             .entry((round, digest.clone()))
             .or_insert_with(HashSet::new)
             .insert(author.clone());    
-    
-        let ready_headers: Vec<_> = self.ready_headers
-            .iter()
-            .filter(|((r, d), _)| *r == round && *d == digest)
-            .map(|(_, a)| a.clone())
-            .collect();
         
         if let Some(ready_key) = self.ready_headers.get(&(round, digest.clone())) {
             let weight: Stake = ready_key.iter().map(|author| self.committee.stake(author)).sum();
-            // info!("weight: {:?}", weight);
-                // Check if we have received f+1 <Ready, H(m)> for this round and digest, send <Ready, H(m)>
+            info!("Weight: {:?} at round {:?}", weight, round);
+            // Check if we have received f+1 <Ready, H(m)> for this round and digest, send <Ready, H(m)>
             if weight >= self.committee.validity_threshold() 
                 && weight < self.committee.quorum_threshold() {
                 if !self.ready_header_sent.contains_key(&(ready_header.round, ready_header.id.clone())) {
@@ -459,7 +435,7 @@ impl Core {
                         .extend(handlers);
 
                     self.ready_header_sent.insert((ready_header.round.clone(), ready_header.id.clone()), true);
-                    // info!("sent ready header!");
+                    info!("sent ready header!");
                 }
             }
 
@@ -468,8 +444,33 @@ impl Core {
                 while self.processing_header_infos.get(&ready_header.id).is_none() {
                     tokio::time::sleep(Duration::from_millis(1)).await;
                 }
+                if let Some((header_info, has_leader)) = self.processing_header_infos.get(&ready_header.id) {
+                    info!("has_leader:{:?}", has_leader);
+                    // Check if the header is valid
+                    if !has_leader {
+                        info!("Header {:?} has no leader at round {:?}", header_info.id, header_info.round);
+                        // Check if we have enough timeout messages to meet the quorum threshold
+                        while let Some(timeout_weight) = self.timeout_weight.get(&(header_info.round - 1)) {
+                            if *timeout_weight >= self.committee.quorum_threshold() {
+                                if header_info.author.eq(&self.committee.leader(header_info.round as usize)) {
+                                    // Check if we have enough no_vote messages to meet the quorum threshold
+                                    while !self
+                                        .no_vote_aggregators
+                                        .entry(header_info.round - 1)
+                                        .or_insert_with(|| Box::new(NoVoteAggregator::new()))
+                                        .has_quorum(&self.committee) {
+                                            // Wait for a short duration for no_vote messages to meet the quorum threshold
+                                            tokio::time::sleep(Duration::from_millis(100)).await;
+                                    }
+                                }
+                                break;
+                            }
+                            // Wait for a short duration for timeout messages to meet the quorum threshold
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                        }
+                        debug!("Timeout has reached quorum for round {:?}", header_info.round - 1);
+                    }
 
-                if let Some(header_info) = self.processing_header_infos.get(&ready_header.id) {
                     // Send header to consensus
                     if !self.consensus_header_sent.contains_key(&(header_info.round, header_info.id.clone())) {
                         // info!("Sending header {:?} to consensus at round {:?}", header_info.id, header_info.round);
@@ -479,13 +480,14 @@ impl Core {
                             .expect("Failed to send header_info to consensus");
                         self.consensus_header_sent.insert((header_info.round.clone(), header_info.id.clone()), true);
                     }
+
                     // Check if we have enough headers to enter a new dag round and propose a header.
-                    // QY: in the happy case: check if we have received leader's Header
                     if let Some(parents) = self
                         .header_aggregators
                         .entry(header_info.round)
                         .or_insert_with(|| Box::new(HeadersAggregator::new()))
-                        .append(header_info.clone(), &self.committee)? {
+                        .append(header_info.clone(), &self.committee)? {    
+                            info!("parents: {:?}", parents);
                         if let Some(parent) = parents.iter()
                             .find(|parent| parent.author == self.committee.leader(header_info.round as usize)) {
                             // Send it to the `Proposer`.
@@ -493,6 +495,7 @@ impl Core {
                                 .send((parents, header_info.round))
                                 .await
                                 .expect("Failed to send header_info to proposer");
+                            info!("Sent header to proposer at round {:?}", header_info.round);
                         }
                     } 
                 }
@@ -504,6 +507,64 @@ impl Core {
     #[async_recursion]
     async fn process_timeout(&mut self, timeout: Timeout) -> DagResult<()> {
         debug!("Processing {:?}", timeout);
+        
+        let round = timeout.round;
+        let author = timeout.author;
+        // Initialize the HashMap if it doesn't exist
+        self.timeouts
+            .entry(round)
+            .or_insert_with(HashSet::new)
+            .insert(author);    
+        
+        if let Some(timeout_key) = self.timeouts.get(&round) {
+            let weight: Stake = timeout_key.iter().map(|author| self.committee.stake(author)).sum();
+            self.timeout_weight
+                .entry(round)
+                .and_modify(|existing_weight| *existing_weight = weight)
+                .or_insert(weight);
+
+            // Check if we have received f+1 timeout for this round, send timeout
+            if weight >= self.committee.validity_threshold() 
+                && weight < self.committee.quorum_threshold() {
+                if !self.timeout_sent.contains_key(&round) {
+                    let bytes = bincode::serialize(&PrimaryMessage::Timeout(timeout.clone()))
+                        .expect("Failed to serialize own timeout");
+
+                    // Broadcast the serialized Timeout to all other primaries.
+                    let addresses = self
+                        .committee
+                        .others_primaries(&self.name)
+                        .iter()
+                        .map(|(_, info)| info.primary_to_primary)
+                        .collect();
+
+                    // Send the Timeout to each address.
+                    let handlers = self.network.broadcast(addresses, Bytes::from(bytes)).await;
+
+                    self.cancel_handlers
+                        .entry(timeout.round)
+                        .or_insert_with(Vec::new)
+                        .extend(handlers);
+
+                    self.timeout_sent.insert(timeout.round.clone(), true);
+                }
+            }
+            if weight >= self.committee.quorum_threshold() {
+                let timeout_cert = TimeoutCert {
+                    round,
+                    timeouts: self
+                        .timeouts
+                        .get(&round)
+                        .map(|set| set.iter().cloned().collect())
+                        .unwrap_or_default(),
+                };
+                    
+                self.tx_timeout_cert
+                    .send((timeout_cert, timeout.round))
+                    .await
+                    .expect("Failed to send timeout");
+            }
+        }
 
         // Check if we have enough timeout messages to create a timeout cert to propose next header.
         if let Some(timeout_cert) = self
@@ -512,12 +573,163 @@ impl Core {
             .or_insert_with(|| Box::new(TimeoutAggregator::new()))
             .append(timeout.clone(), &self.committee)?
         {
-            debug!("Aggregated timeout cert {:?}", timeout);
             // Send it to the `Proposer`.
             self.tx_timeout_cert
                 .send((timeout_cert, timeout.round))
                 .await
                 .expect("Failed to send timeout");
+        }
+        Ok(())
+    }
+
+    #[async_recursion]
+    async fn process_no_vote_msg(&mut self, no_vote_msg: NoVoteMsg) -> DagResult<()> {
+        debug!("Processing {:?}", no_vote_msg);
+
+        self.processing_no_vote_msgs
+            .entry(no_vote_msg.id)
+            .or_insert(no_vote_msg.clone());
+
+        // Send <ECHO, H(m)> to primaries.
+        let addresses = self
+            .committee
+            .others_primaries(&self.name)
+            .iter()
+            .map(|(_, info)| info.primary_to_primary)
+            .collect();
+
+        let echo_no_vote_msg = EchoNoVoteMsg::new(&no_vote_msg.clone(), &self.name).await;
+        let bytes = bincode::serialize(&PrimaryMessage::EchoNoVoteMsg(echo_no_vote_msg))
+            .expect("Failed to serialize EchoNoVoteMsg");
+        let handlers = self.network.broadcast(addresses, Bytes::from(bytes)).await;
+
+        self.cancel_handlers
+            .entry(no_vote_msg.clone().round)
+            .or_insert_with(Vec::new)
+            .extend(handlers);
+
+        // Initialize the HashMap if it doesn't exist
+        self.echo_no_vote_msgs
+            .entry((no_vote_msg.clone().round, no_vote_msg.clone().id))
+            .or_insert_with(HashSet::new)
+            .insert(self.name.clone());
+
+        Ok(())
+    }
+
+    #[async_recursion]
+    async fn process_echo_no_vote_msg(&mut self, echo_no_vote_msg: EchoNoVoteMsg) -> DagResult<()> {
+        // debug!("Processing {:?}", echo_no_vote_msg);
+
+        let round = echo_no_vote_msg.round;
+        let digest = echo_no_vote_msg.id.clone();
+        let author = echo_no_vote_msg.author.clone();
+
+        self.echo_no_vote_msgs
+            .entry((round, digest.clone()))
+            .or_insert_with(HashSet::new)
+            .insert(author.clone());
+
+        // Check if we have received 2f+1 EchoNoVotes for this round and digest
+        if let Some(echo_key) = self.echo_no_vote_msgs.get(&(round, digest.clone())) {
+            let weight: Stake = echo_key.iter().map(|author| self.committee.stake(author)).sum();
+            if weight >= self.committee.quorum_threshold() {
+                if !self.ready_no_vote_sent.contains_key(&(echo_no_vote_msg.round, echo_no_vote_msg.id.clone())) {
+                    // Send <Ready, H(m)> to primaries.
+                    let addresses = self
+                        .committee
+                        .others_primaries(&self.name)
+                        .iter()
+                        .map(|(_, info)| info.primary_to_primary)
+                        .collect();
+                    
+                    let ready_no_vote_msg = ReadyNoVoteMsg::new(&echo_no_vote_msg, &self.name).await;
+                    let bytes = bincode::serialize(&PrimaryMessage::ReadyNoVoteMsg(ready_no_vote_msg))
+                        .expect("Failed to serialize ReadyNoVoteMsg");
+                    let handlers = self.network.broadcast(addresses, Bytes::from(bytes)).await;
+                
+                    self.cancel_handlers
+                        .entry(echo_no_vote_msg.round)
+                        .or_insert_with(Vec::new)
+                        .extend(handlers);
+
+                    self.ready_no_vote_msgs
+                        .entry((round, echo_no_vote_msg.id.clone()))
+                        .or_insert_with(HashSet::new)
+                        .insert(self.name); 
+
+                    self.ready_no_vote_sent.insert((echo_no_vote_msg.round.clone(), echo_no_vote_msg.id.clone()), true);
+                    // info!("Broadcasted ReadyNoVoteMsg with hash {:?}", echo_no_vote_msg.round);
+                };
+            }
+        };
+
+        Ok(())
+    }
+
+    #[async_recursion]
+    async fn process_ready_no_vote_msg(&mut self, ready_no_vote_msg: ReadyNoVoteMsg) -> DagResult<()> {
+        // debug!("Processing {:?}", ready_no_vote_msg);
+
+        let round = ready_no_vote_msg.round;
+        let digest = ready_no_vote_msg.id.clone();
+        let author = ready_no_vote_msg.author.clone();
+    
+        // Initialize the HashMap if it doesn't exist
+        self.ready_no_vote_msgs
+            .entry((round, digest.clone()))
+            .or_insert_with(HashSet::new)
+            .insert(author.clone());    
+        
+        if let Some(ready_key) = self.ready_no_vote_msgs.get(&(round, digest.clone())) {
+            let weight: Stake = ready_key.iter().map(|author| self.committee.stake(author)).sum();
+            // Check if we have received f+1 <Ready, H(m)> for this round and digest, send <Ready, H(m)>
+            if weight >= self.committee.validity_threshold() 
+                && weight < self.committee.quorum_threshold() {
+                if !self.ready_no_vote_sent.contains_key(&(ready_no_vote_msg.round, ready_no_vote_msg.id.clone())) {
+                    // Send <Ready, H(m)> to primaries.
+                    let addresses = self
+                        .committee
+                        .others_primaries(&self.name)
+                        .iter()
+                        .map(|(_, info)| info.primary_to_primary)
+                        .collect();
+                    
+                    let bytes = bincode::serialize(&PrimaryMessage::ReadyNoVoteMsg(ready_no_vote_msg.clone()))
+                        .expect("Failed to serialize ReadyNoVoteMsg");
+                    let handlers = self.network.broadcast(addresses, Bytes::from(bytes)).await;
+                
+                    self.cancel_handlers
+                        .entry(ready_no_vote_msg.clone().round)
+                        .or_insert_with(Vec::new)
+                        .extend(handlers);
+
+                    self.ready_no_vote_sent.insert((ready_no_vote_msg.round.clone(), ready_no_vote_msg.id.clone()), true);
+                }
+            }
+
+            // Check if we have received 2f+1 <Ready, H(m)> 
+            if weight >= self.committee.quorum_threshold() {  
+                while self.processing_no_vote_msgs.get(&ready_no_vote_msg.id).is_none() {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+
+                if let Some(no_vote_msg) = self.processing_no_vote_msgs.get(&ready_no_vote_msg.id) {
+                    let no_vote_cert = NoVoteCert {
+                        round,
+                        no_votes: self
+                            .ready_no_vote_msgs
+                            .get(&(round, ready_no_vote_msg.id))
+                            .map(|set| set.iter().cloned().collect())
+                            .unwrap_or_default(),
+                    };
+                        
+                    self.tx_no_vote_cert
+                        .send((no_vote_cert, no_vote_msg.round))
+                        .await
+                        .expect("Failed to send no vote cert");
+                }
+            }
         }
         Ok(())
     }
@@ -593,8 +805,36 @@ impl Core {
             DagError::TooOld(timeout.digest(), timeout.round)
         );
 
-        // Verify the timeout's signature.
         timeout.verify(&self.committee)?;
+
+        Ok(())
+    }
+
+    fn sanitize_no_vote_msg(&mut self, no_vote_msg: &NoVoteMsg) -> DagResult<()> {
+        ensure!(
+            self.gc_round <= no_vote_msg.round,
+            DagError::TooOld(no_vote_msg.digest(), no_vote_msg.round)
+        );
+
+        no_vote_msg.verify(&self.committee)?;
+
+        Ok(())
+    }
+
+    fn sanitize_echo_no_vote_msg(&mut self, echo_no_vote_msg: &EchoNoVoteMsg) -> DagResult<()> {
+        ensure!(
+            self.gc_round <= echo_no_vote_msg.round,
+            DagError::TooOld(echo_no_vote_msg.id.clone(), echo_no_vote_msg.round)
+        );
+
+        Ok(())
+    }
+
+    fn sanitize_ready_no_vote_msg(&mut self, ready_no_vote_msg: &ReadyNoVoteMsg) -> DagResult<()> {
+        ensure!(
+            self.gc_round <= ready_no_vote_msg.round,
+            DagError::TooOld(ready_no_vote_msg.id.clone(), ready_no_vote_msg.round)
+        );
 
         Ok(())
     }
@@ -629,7 +869,24 @@ impl Core {
                                 Ok(()) => self.process_timeout(timeout).await,
                                 error => error
                             }
-
+                        },
+                        PrimaryMessage::NoVoteMsg(no_vote_msg) => {
+                            match self.sanitize_no_vote_msg(&no_vote_msg) {
+                                Ok(()) => self.process_no_vote_msg(no_vote_msg).await,
+                                error => error
+                            }
+                        },
+                        PrimaryMessage::EchoNoVoteMsg(echo_no_vote_msg) => {
+                            match self.sanitize_echo_no_vote_msg(&echo_no_vote_msg) {
+                                Ok(()) => self.process_echo_no_vote_msg(echo_no_vote_msg).await,
+                                error => error
+                            }
+                        },
+                        PrimaryMessage::ReadyNoVoteMsg(ready_no_vote_msg) => {
+                            match self.sanitize_ready_no_vote_msg(&ready_no_vote_msg) {
+                                Ok(()) => self.process_ready_no_vote_msg(ready_no_vote_msg).await,
+                                error => error
+                            }
                         },
                         _ => panic!("Unexpected core message")
                     }
@@ -638,7 +895,6 @@ impl Core {
                 // We receive here loopback headers from the `HeaderWaiter`. Those are headers for which we interrupted
                 // execution (we were missing some of their dependencies) and we are now ready to resume processing.
                 Some(header_msg) = self.rx_header_waiter.recv() => self.process_header(&header_msg).await,
-
                 // We also receive here our new headers created by the `Proposer`.
                 Some(header_with_parents) = self.rx_proposer.recv() => self.process_own_header(header_with_parents).await,
                 // We also receive here our timeout created by the `Proposer`.
@@ -661,13 +917,17 @@ impl Core {
             if round > self.gc_depth {
                 let gc_round = round - self.gc_depth;
                 self.last_voted.retain(|k, _| k >= &gc_round);
-                self.processing_header_infos.retain(|_, h| &h.round >= &gc_round);
+                self.processing_header_infos.retain(|_, (h, _)| &h.round >= &gc_round);
                 self.cancel_handlers.retain(|k, _| k >= &gc_round);
                 self.gc_round = gc_round;
                 self.echo_headers.retain(|(k,_),_| k>= &gc_round);
                 self.ready_headers.retain(|(k,_),_| k>= &gc_round);
                 self.ready_header_sent.retain(|(k,_),_| k>= &gc_round);
                 self.consensus_header_sent.retain(|(k,_),_| k>= &gc_round);
+                self.timeout_sent.retain(|k,_| k>= &gc_round);
+                self.echo_no_vote_msgs.retain(|(k,_),_| k>= &gc_round);
+                self.ready_no_vote_sent.retain(|(k,_),_| k>= &gc_round);
+                self.ready_no_vote_msgs.retain(|(k,_),_| k>= &gc_round);
             }
         }
     }

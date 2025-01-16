@@ -6,7 +6,9 @@ use crate::garbage_collector::GarbageCollector;
 use crate::header_waiter::HeaderWaiter;
 use crate::helper::Helper;
 use crate::worker::Worker;
-use crate::messages::{Certificate, EchoHeader, Header, HeaderInfo, HeaderInfoWithParents, HeaderWithParents, NoVoteMsg, ReadyHeader, Timeout, Vote};
+use crate::messages::{Certificate, EchoHeader, EchoNoVoteMsg, ReadyNoVoteMsg, 
+    Header, HeaderInfo, HeaderInfoWithParents, HeaderWithParents, 
+    NoVoteMsg, ReadyHeader, Timeout, Vote};
 use crate::payload_receiver::PayloadReceiver;
 use crate::proposer::Proposer;
 use crate::synchronizer::Synchronizer;
@@ -40,6 +42,8 @@ pub enum PrimaryMessage {
     CertificatesRequest(Vec<Digest>, /* requestor */ PublicKey),
     Echo(EchoHeader),
     Ready(ReadyHeader),
+    EchoNoVoteMsg(EchoNoVoteMsg),
+    ReadyNoVoteMsg(ReadyNoVoteMsg),
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

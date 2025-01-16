@@ -139,6 +139,49 @@ impl ReadyHeader {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EchoNoVoteMsg {
+    pub id: Digest, 
+    pub round: Round,
+    pub author: PublicKey,
+    pub origin: PublicKey,
+}
+
+impl EchoNoVoteMsg {
+    pub async fn new(
+        no_vote_msg: &NoVoteMsg,
+        author: &PublicKey) -> Self {
+        EchoNoVoteMsg {
+            id: no_vote_msg.id.clone(), 
+            round: no_vote_msg.round,
+            author: *author,
+            origin: no_vote_msg.author,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReadyNoVoteMsg {
+    pub id: Digest, 
+    pub round: Round,
+    pub author: PublicKey,
+    pub origin: PublicKey,
+}
+
+impl ReadyNoVoteMsg {
+    pub async fn new(
+        echo_header: &EchoNoVoteMsg,
+        author: &PublicKey
+    ) -> Self {
+        ReadyNoVoteMsg {
+            id: echo_header.id.clone(), 
+            round: echo_header.round,
+            author: *author,
+            origin: echo_header.origin,
+        }
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct HeaderInfo {
     pub author: PublicKey,
@@ -250,17 +293,8 @@ pub struct Timeout {
 }
 
 impl Timeout {
-    pub async fn new(
-        round: Round,
-        author: PublicKey,
-    ) -> Self {
-        let timeout = Self {
-            round,
-            author,
-        };
-        Self {
-            ..timeout
-        }
+    pub async fn new(round: Round, author: PublicKey) -> Self {
+        Self { round, author }
     }
 
     pub fn verify(&self, committee: &Committee) -> DagResult<()> {
@@ -303,21 +337,20 @@ impl fmt::Display for Timeout {
 pub struct NoVoteMsg {
     pub round: Round,
     pub author: PublicKey,
+    pub id: Digest,
 }
 
 impl NoVoteMsg {
-    pub async fn new(
-        round: Round,
-        author: PublicKey,
-    ) -> Self {
-        let msg = Self {
+    pub fn new(round: Round, author: PublicKey) -> Self {
+        let mut no_vote_msg = Self {
             round,
             author,
+            id: Digest::default(), 
         };
-        Self {
-            ..msg
-        }
+        no_vote_msg.id = no_vote_msg.digest();
+        no_vote_msg
     }
+
 
     pub fn verify(&self, committee: &Committee) -> DagResult<()> {
         // Ensure the authority has voting rights.
@@ -406,7 +439,7 @@ impl fmt::Debug for Vote {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct TimeoutCert {
     pub round: Round,
     pub timeouts: Vec<PublicKey>,
