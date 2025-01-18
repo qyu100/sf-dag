@@ -104,7 +104,7 @@ impl Proposer {
 
         #[cfg(feature = "benchmark")]
         {
-            info!("Created {:?}", header.id);
+            info!("Created {:?} for round {:?}", header.id, header.round);
             info!(
                 "Header {:?} contains {} B",
                 header.id,

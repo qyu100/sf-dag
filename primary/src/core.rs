@@ -253,11 +253,8 @@ impl Core {
             .or_insert_with(HashSet::new)
             .insert(self.name.clone());
 
-        // info!("self.name: {:?}", self.name);
-        // info!("Initialized echo_headers from header: {:?}", self.echo_headers);
-
         // Log the broadcast for debugging purposes
-        debug!("Broadcasted EchoHeader with hash {:?}", header_info.clone().round);
+        // debug!("Broadcasted EchoHeader with hash {:?}", header_info.clone().round);
 
         Ok(())
     }
