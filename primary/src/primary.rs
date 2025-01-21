@@ -107,6 +107,7 @@ impl Primary {
         let (tx_certificates_loopback, rx_certificates_loopback) = channel(CHANNEL_CAPACITY);
         let (tx_primary_messages, rx_primary_messages) = channel(CHANNEL_CAPACITY);
         let (tx_cert_requests, rx_cert_requests) = channel(CHANNEL_CAPACITY);
+        let (tx_timeout_core, rx_timeout_proposer) = channel(CHANNEL_CAPACITY);
 
         // Write the parameters to the logs.
         parameters.log();
@@ -189,6 +190,7 @@ impl Primary {
             rx_no_vote_msg,
             tx_consensus,
             /* tx_proposer */ tx_parents,
+            tx_timeout_core,
             tx_timeout_cert,
             tx_no_vote_cert,
             tx_consensus_header,
@@ -236,6 +238,7 @@ impl Primary {
             /* rx_core */ rx_parents,
             /* rx_workers */ rx_our_digests,
             /* tx_core */ tx_headers,
+            rx_timeout_proposer,
             /* tx_core_timeout */ tx_timeout,
             rx_timeout_cert,
             tx_no_vote_msg,

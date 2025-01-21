@@ -57,6 +57,7 @@ pub struct Core {
     tx_consensus: Sender<Certificate>,
     /// Send valid a quorum of certificates' ids to the `Proposer` (along with their round).
     tx_proposer: Sender<(Vec<HeaderInfo>, Round)>,
+    tx_timeout: Sender<Timeout>,
     /// Send a valid TimeoutCertificate along with the round to the `Proposer`.
     tx_timeout_cert: Sender<(TimeoutCert, Round)>,
     /// Send a valid NoVoteCert along with the round to the `Proposer`.
@@ -108,7 +109,6 @@ impl Core {
         synchronizer: Synchronizer,
         consensus_round: Arc<AtomicU64>,
         gc_depth: Round,
-        // tx_primary: Sender<PrimaryMessage>,
         rx_primaries: Receiver<PrimaryMessage>,
         rx_header_waiter: Receiver<HeaderMessage>,
         rx_certificate_waiter: Receiver<Certificate>,
@@ -117,6 +117,7 @@ impl Core {
         rx_no_vote_msg: Receiver<NoVoteMsg>,
         tx_consensus: Sender<Certificate>,
         tx_proposer: Sender<(Vec<HeaderInfo>, Round)>,
+        tx_timeout: Sender<Timeout>,
         tx_timeout_cert: Sender<(TimeoutCert, Round)>,
         tx_no_vote_cert: Sender<(NoVoteCert, Round)>,
         tx_consensus_header: Sender<Header>,
@@ -130,7 +131,6 @@ impl Core {
                 synchronizer,
                 consensus_round,
                 gc_depth,
-                // tx_primary,
                 rx_primaries,
                 rx_header_waiter,
                 rx_certificate_waiter,
@@ -139,6 +139,7 @@ impl Core {
                 rx_no_vote_msg,
                 tx_consensus,
                 tx_proposer,
+                tx_timeout,
                 tx_timeout_cert,
                 tx_no_vote_cert,
                 tx_consensus_header,
@@ -195,15 +196,41 @@ impl Core {
         self.timeout_sent.insert(timeout.round.clone(), true);
 
         // Log the broadcast for debugging purposes.
-        debug!("Broadcasted own timeout for round {}", timeout.round);
+        // debug!("Broadcasted own timeout {:?} for round {}", timeout, timeout.round);
 
         self.process_timeout(timeout).await
     }
-    
+
+    async fn process_own_no_vote_msg(&mut self, no_vote_msg: NoVoteMsg) -> DagResult<()> {
+        let bytes = bincode::serialize(&PrimaryMessage::NoVoteMsg(no_vote_msg.clone()))
+            .expect("Failed to serialize own no_vote_msg");
+
+        // Broadcast the serialized NoVoteMsg to all other primaries.
+        let addresses = self
+            .committee
+            .others_primaries(&self.name)
+            .iter()
+            .map(|(_, info)| info.primary_to_primary)
+            .collect();
+
+        // Send the NoVoteMsg to each address.
+        let handlers = self.network.broadcast(addresses, Bytes::from(bytes)).await;
+
+        self.cancel_handlers
+            .entry(no_vote_msg.round)
+            .or_insert_with(Vec::new)
+            .extend(handlers);
+
+        // Log the broadcast for debugging purposes.
+        // debug!("Broadcasted own no_vote_msg for round {}", no_vote_msg.round);
+
+        self.process_no_vote_msg(no_vote_msg).await
+    }
+
     async fn process_own_header(&mut self, 
         header_with_parents: HeaderWithParents
     ) -> DagResult<()> {
-        // debug!("Processing own {:?}", header);
+        debug!("Processing own {:?}", header_with_parents);
         
         let round = header_with_parents.header.round;
         let parents = header_with_parents.parents.clone();
@@ -339,7 +366,7 @@ impl Core {
             .insert(self.name.clone());
 
         // Log the broadcast for debugging purposes
-        debug!("Broadcasted EchoHeader with hash {:?}", header_info.clone().round);
+        // debug!("Broadcasted EchoHeader with hash {:?} by {:?} for origin {:?}", header_info.clone().round, self.name, header_info.clone().author);
 
         Ok(())
     }
@@ -388,7 +415,7 @@ impl Core {
                         .insert(self.name); 
 
                     self.ready_header_sent.insert((echo_header.round.clone(), echo_header.id.clone()), true);
-                    // info!("Broadcasted ReadyHeader with hash {:?}", echo_header.round);
+                    // info!("Broadcasted ReadyHeader with hash {:?} by {:?}", echo_header.round, self.name);
                 };
             }
         };
@@ -411,8 +438,7 @@ impl Core {
             .insert(author.clone());    
         
         if let Some(ready_key) = self.ready_headers.get(&(round, digest.clone())) {
-            let weight: Stake = ready_key.iter().map(|author| self.committee.stake(author)).sum();
-            info!("Weight: {:?} at round {:?}", weight, round);
+            let mut weight: Stake = ready_key.iter().map(|author| self.committee.stake(author)).sum();
             // Check if we have received f+1 <Ready, H(m)> for this round and digest, send <Ready, H(m)>
             if weight >= self.committee.validity_threshold() 
                 && weight < self.committee.quorum_threshold() {
@@ -434,21 +460,27 @@ impl Core {
                         .or_insert_with(Vec::new)
                         .extend(handlers);
 
+                    self.ready_headers
+                        .entry((round, ready_header.id))
+                        .or_insert_with(HashSet::new)
+                        .insert(self.name); 
+
                     self.ready_header_sent.insert((ready_header.round.clone(), ready_header.id.clone()), true);
+                    weight += self.committee.stake(&self.name);
                     info!("sent ready header!");
                 }
             }
 
             // Check if we have received 2f+1 <Ready, H(m)> 
             if weight >= self.committee.quorum_threshold() {  
-                while self.processing_header_infos.get(&ready_header.id).is_none() {
-                    tokio::time::sleep(Duration::from_millis(1)).await;
+                loop {
+                    if self.processing_header_infos.get(&ready_header.id).is_some() {
+                        break;
+                    }
                 }
                 if let Some((header_info, has_leader)) = self.processing_header_infos.get(&ready_header.id) {
-                    info!("has_leader:{:?}", has_leader);
                     // Check if the header is valid
                     if !has_leader {
-                        info!("Header {:?} has no leader at round {:?}", header_info.id, header_info.round);
                         // Check if we have enough timeout messages to meet the quorum threshold
                         while let Some(timeout_weight) = self.timeout_weight.get(&(header_info.round - 1)) {
                             if *timeout_weight >= self.committee.quorum_threshold() {
@@ -487,16 +519,11 @@ impl Core {
                         .entry(header_info.round)
                         .or_insert_with(|| Box::new(HeadersAggregator::new()))
                         .append(header_info.clone(), &self.committee)? {    
-                            info!("parents: {:?}", parents);
-                        if let Some(parent) = parents.iter()
-                            .find(|parent| parent.author == self.committee.leader(header_info.round as usize)) {
-                            // Send it to the `Proposer`.
-                            self.tx_proposer
-                                .send((parents, header_info.round))
-                                .await
-                                .expect("Failed to send header_info to proposer");
-                            info!("Sent header to proposer at round {:?}", header_info.round);
-                        }
+                        // Send it to the `Proposer`.
+                        self.tx_proposer
+                            .send((parents, header_info.round))
+                            .await
+                            .expect("Failed to send header_info to proposer");
                     } 
                 }
             }
@@ -506,7 +533,7 @@ impl Core {
 
     #[async_recursion]
     async fn process_timeout(&mut self, timeout: Timeout) -> DagResult<()> {
-        debug!("Processing {:?}", timeout);
+        // debug!("Processing {:?}", timeout);
         
         let round = timeout.round;
         let author = timeout.author;
@@ -517,7 +544,7 @@ impl Core {
             .insert(author);    
         
         if let Some(timeout_key) = self.timeouts.get(&round) {
-            let weight: Stake = timeout_key.iter().map(|author| self.committee.stake(author)).sum();
+            let mut weight: Stake = timeout_key.iter().map(|author| self.committee.stake(author)).sum();
             self.timeout_weight
                 .entry(round)
                 .and_modify(|existing_weight| *existing_weight = weight)
@@ -527,7 +554,8 @@ impl Core {
             if weight >= self.committee.validity_threshold() 
                 && weight < self.committee.quorum_threshold() {
                 if !self.timeout_sent.contains_key(&round) {
-                    let bytes = bincode::serialize(&PrimaryMessage::Timeout(timeout.clone()))
+                    let new_timeout = Timeout::new(round, self.name).await;
+                    let bytes = bincode::serialize(&PrimaryMessage::Timeout(new_timeout.clone()))
                         .expect("Failed to serialize own timeout");
 
                     // Broadcast the serialized Timeout to all other primaries.
@@ -542,11 +570,24 @@ impl Core {
                     let handlers = self.network.broadcast(addresses, Bytes::from(bytes)).await;
 
                     self.cancel_handlers
-                        .entry(timeout.round)
+                        .entry(round)
                         .or_insert_with(Vec::new)
                         .extend(handlers);
 
-                    self.timeout_sent.insert(timeout.round.clone(), true);
+                    // Send it to the `Proposer`.
+                    self.tx_timeout
+                        .send(new_timeout.clone())
+                        .await
+                        .expect("Failed to send timeout");
+
+                    self.timeout_sent.insert(round, true);
+                    weight += self.committee.stake(&self.name);
+                    self.timeouts
+                        .entry(round)
+                        .or_insert_with(HashSet::new)
+                        .insert(self.name.clone());
+
+                    // info!("Broadcasted Timeout {:?} for round {}", new_timeout.clone(), round);
                 }
             }
             if weight >= self.committee.quorum_threshold() {
@@ -563,28 +604,16 @@ impl Core {
                     .send((timeout_cert, timeout.round))
                     .await
                     .expect("Failed to send timeout");
+                // info!("Sent timeout cert for round {}", round);
             }
         }
 
-        // Check if we have enough timeout messages to create a timeout cert to propose next header.
-        if let Some(timeout_cert) = self
-            .timeouts_aggregators
-            .entry(timeout.round)
-            .or_insert_with(|| Box::new(TimeoutAggregator::new()))
-            .append(timeout.clone(), &self.committee)?
-        {
-            // Send it to the `Proposer`.
-            self.tx_timeout_cert
-                .send((timeout_cert, timeout.round))
-                .await
-                .expect("Failed to send timeout");
-        }
         Ok(())
     }
 
     #[async_recursion]
     async fn process_no_vote_msg(&mut self, no_vote_msg: NoVoteMsg) -> DagResult<()> {
-        debug!("Processing {:?}", no_vote_msg);
+        // debug!("Processing {:?}", no_vote_msg);
 
         self.processing_no_vote_msgs
             .entry(no_vote_msg.id)
@@ -900,7 +929,7 @@ impl Core {
                 // We also receive here our timeout created by the `Proposer`.
                 Some(timeout) = self.rx_timeout.recv() => self.process_own_timeout(timeout).await,
                 // // We also receive here our no vote messages created by the `Proposer`.
-                // Some(no_vote_msg) = self.rx_no_vote_msg.recv() => self.process_own_no_vote_msg(no_vote_msg).await,
+                Some(no_vote_msg) = self.rx_no_vote_msg.recv() => self.process_own_no_vote_msg(no_vote_msg).await,
             };
             match result {
                 Ok(()) => (),

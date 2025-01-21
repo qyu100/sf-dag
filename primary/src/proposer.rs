@@ -37,6 +37,7 @@ pub struct Proposer {
     rx_workers: Receiver<Vec<Transaction>>,
     /// Sends newly created headers to the `Core`.
     tx_core: Sender<HeaderWithParents>,
+    rx_core_timeout: Receiver<Timeout>,
     /// Sends newly created timeouts to the `Core`.
     tx_core_timeout: Sender<Timeout>,
     /// Receives timeout certs from the `Core`.
@@ -60,6 +61,8 @@ pub struct Proposer {
     last_timeout_cert: TimeoutCert,
     /// Holds the latest No Vote Certificate received.
     last_no_vote_cert: NoVoteCert,
+    timeout_sent: HashMap<Round, bool>,
+    no_vote_sent: HashMap<Round, bool>,
 }
 
 impl Proposer {
@@ -74,6 +77,7 @@ impl Proposer {
         rx_core: Receiver<(Vec<HeaderInfo>, Round)>,
         rx_workers: Receiver<Vec<Transaction>>,
         tx_core: Sender<HeaderWithParents>,
+        rx_core_timeout: Receiver<Timeout>,
         tx_core_timeout: Sender<Timeout>,
         rx_timeout_cert: Receiver<(TimeoutCert, Round)>,
         tx_core_no_vote_msg: Sender<NoVoteMsg>,
@@ -91,6 +95,7 @@ impl Proposer {
                 rx_core,
                 rx_workers,
                 tx_core,
+                rx_core_timeout,
                 tx_core_timeout,
                 rx_timeout_cert,
                 tx_core_no_vote_msg,
@@ -102,6 +107,8 @@ impl Proposer {
                 payload_size: 0,
                 last_timeout_cert: TimeoutCert::new(0),
                 last_no_vote_cert: NoVoteCert::new(0),
+                timeout_sent: HashMap::new(),
+                no_vote_sent: HashMap::new(),
             }
             .run()
             .await;
@@ -111,9 +118,8 @@ impl Proposer {
     async fn make_timeout_msg(&mut self) {
         let timeout_msg =
             Timeout::new(self.round, self.name).await;
-
-        debug!("Created {:?}", timeout_msg);
-
+            
+        // debug!("Created {:?}", timeout_msg);
         // Send the new timeout to the `Core` that will broadcast and process it.
         self.tx_core_timeout
             .send(timeout_msg)
@@ -124,7 +130,7 @@ impl Proposer {
     async fn make_no_vote_msg(&mut self) {
         let no_vote_msg = NoVoteMsg::new(self.round, self.name);
 
-        debug!("Created {:?}", no_vote_msg);
+        // debug!("Created {:?}", no_vote_msg);
         // Send the new timeout to the `Core` that will broadcast and process it.
         self.tx_core_no_vote_msg
             .send(no_vote_msg)
@@ -205,7 +211,6 @@ impl Proposer {
         let mut advance = true;
 
         let timer = sleep(Duration::from_millis(self.max_header_delay));
-        let mut timeout_sent = false;
         tokio::pin!(timer);
 
         loop {
@@ -222,30 +227,23 @@ impl Proposer {
             let enough_digests = self.payload_size >= self.header_size;
             let timer_expired = timer.is_elapsed();
             
-            // TODO: This has to be fixed by sending timeout only once.
-            if timer_expired && !timeout_sent {
+            if timer_expired && !self.timeout_sent.contains_key(&self.round) {
                 warn!("Timer expired for round {}", self.round);
                 self.make_timeout_msg().await;
-                timeout_sent = true;
+                self.timeout_sent.insert(self.round, true);
             }
             
-            if timer_expired && self.last_leader.is_none() {
+            if timer_expired && self.last_leader.is_none() && !self.no_vote_sent.contains_key(&self.round) {
                 self.make_no_vote_msg().await;
+                self.no_vote_sent.insert(self.round, true);
             }
 
-            if timer_expired {
-                info!("enough_digests:{:?}",enough_digests);
-                info!("advance:{:?}",advance);
-                info!("enough_parents:{:?}",self.last_parents.len() as u32);
-                info!("last_leader_none:{:?}",self.last_leader.is_none());
-                break;
-            }
             if ((timer_expired
                 && timeout_cert_gathered
                 && (!is_next_leader || no_vote_cert_gathered))
                 || (enough_digests && advance))
                 && enough_parents
-            {
+            {   
                 // Advance to the next round.
                 self.round += 1;
                 debug!("Dag moved to round {}", self.round);
@@ -257,12 +255,10 @@ impl Proposer {
                 // Reschedule the timer.
                 let deadline = Instant::now() + Duration::from_millis(self.max_header_delay);
                 timer.as_mut().reset(deadline);
-                timeout_sent = false;
             }
 
             tokio::select! {
                 Some((parents, round)) = self.rx_core.recv() => {
-                    info!("parents:{:?} for round:{:?}",parents, round);
                     // Compare the parents' round number with our current round.
                     match round.cmp(&self.round) {
                         Ordering::Greater => {
@@ -297,7 +293,6 @@ impl Proposer {
                             // We accept round bigger than our current round to jump ahead in case we were
                             // late (or just joined the network).
                             self.last_timeout_cert = timeout_cert.clone();
-
                             // TODO: How do we react?
                         },
                         Ordering::Less => {
@@ -308,6 +303,9 @@ impl Proposer {
                             self.last_timeout_cert = timeout_cert.clone();
                         }
                     }
+                }
+                Some(timeout) = self.rx_core_timeout.recv() => {
+                    self.timeout_sent.insert(timeout.round, true);
                 }
                 Some((no_vote_cert, round)) = self.rx_no_vote_cert.recv() => {
                     match round.cmp(&self.last_no_vote_cert.round) {
