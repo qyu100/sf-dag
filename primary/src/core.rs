@@ -357,8 +357,10 @@ impl Core {
 
             // Check if we have received 2f+1 <Ready, H(m)> 
             if weight >= self.committee.quorum_threshold() {  
-                while self.processing_header_infos.get(&ready_header.id).is_none() {
-                    tokio::time::sleep(Duration::from_millis(1)).await;
+                loop {
+                    if self.processing_header_infos.get(&ready_header.id).is_some() {
+                        break;
+                    }
                 }
 
                 if let Some(header_info) = self.processing_header_infos.get(&ready_header.id) {
