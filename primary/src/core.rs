@@ -482,23 +482,26 @@ impl Core {
                     // Check if the header is valid
                     if !has_leader {
                         // Check if we have enough timeout messages to meet the quorum threshold
-                        while let Some(timeout_weight) = self.timeout_weight.get(&(header_info.round - 1)) {
-                            if *timeout_weight >= self.committee.quorum_threshold() {
-                                if header_info.author.eq(&self.committee.leader(header_info.round as usize)) {
-                                    // Check if we have enough no_vote messages to meet the quorum threshold
-                                    while !self
-                                        .no_vote_aggregators
-                                        .entry(header_info.round - 1)
-                                        .or_insert_with(|| Box::new(NoVoteAggregator::new()))
-                                        .has_quorum(&self.committee) {
-                                            // Wait for a short duration for no_vote messages to meet the quorum threshold
-                                            tokio::time::sleep(Duration::from_millis(100)).await;
+                        loop {
+                            if let Some(timeout_weight) = self.timeout_weight.get(&(header_info.round - 1)) {
+                                if *timeout_weight >= self.committee.quorum_threshold() {
+                                    if header_info.author.eq(&self.committee.leader(header_info.round as usize)) {
+                                        // Wait for no_vote messages to meet the quorum threshold
+                                        loop {
+                                            let has_quorum = self
+                                                .no_vote_aggregators
+                                                .entry(header_info.round - 1)
+                                                .or_insert_with(|| Box::new(NoVoteAggregator::new()))
+                                                .has_quorum(&self.committee);
+                        
+                                            if has_quorum {
+                                                break;
+                                            }
+                                        }
                                     }
+                                    break;
                                 }
-                                break;
                             }
-                            // Wait for a short duration for timeout messages to meet the quorum threshold
-                            tokio::time::sleep(Duration::from_millis(100)).await;
                         }
                         debug!("Timeout has reached quorum for round {:?}", header_info.round - 1);
                     }
@@ -739,8 +742,10 @@ impl Core {
 
             // Check if we have received 2f+1 <Ready, H(m)> 
             if weight >= self.committee.quorum_threshold() {  
-                while self.processing_no_vote_msgs.get(&ready_no_vote_msg.id).is_none() {
-                    tokio::time::sleep(Duration::from_millis(1)).await;
+                loop {
+                    if self.processing_no_vote_msgs.get(&ready_no_vote_msg.id).is_some() {
+                        break;
+                    }
                 }
 
                 if let Some(no_vote_msg) = self.processing_no_vote_msgs.get(&ready_no_vote_msg.id) {
