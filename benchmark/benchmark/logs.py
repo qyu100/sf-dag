@@ -14,12 +14,12 @@ class ParseError(Exception):
 
 
 class LogParser:
-    def __init__(self, clients, primaries, faults=0):
+    def __init__(self, clients, primaries, burst, faults=0):
         inputs = [clients, primaries]
         assert all(isinstance(x, list) for x in inputs)
         assert all(isinstance(x, str) for y in inputs for x in y)
         assert all(x for x in inputs)
-
+        self.burst = burst
         self.faults = faults
         if isinstance(faults, int):
             self.committee_size = len(primaries) + int(faults)
@@ -221,6 +221,7 @@ class LogParser:
             f' Input rate: {sum(self.rate):,} tx/s\n'
             f' Transaction size: {self.size[0]:,} B\n'
             f' Execution time: {round(duration):,} s\n'
+            f' Burst: {self.burst:,} s\n'
             '\n'
             f' Header size: {header_size:,} B\n'
             f' Max header delay: {max_header_delay:,} ms\n'
@@ -247,7 +248,7 @@ class LogParser:
             f.write(self.result())
 
     @classmethod
-    def process(cls, directory, faults=0):
+    def process(cls, directory, burst, faults=0):
         assert isinstance(directory, str)
 
         clients = []
@@ -263,4 +264,4 @@ class LogParser:
         #     with open(filename, 'r') as f:
         #         workers += [f.read()]
 
-        return cls(clients, primaries, faults=faults)
+        return cls(clients, primaries, burst, faults=faults)
