@@ -327,7 +327,7 @@ impl Core {
             .insert(author.clone());    
         
         if let Some(ready_key) = self.ready_headers.get(&(round, digest.clone())) {
-            let weight: Stake = ready_key.iter().map(|author| self.committee.stake(author)).sum();
+            let mut weight: Stake = ready_key.iter().map(|author| self.committee.stake(author)).sum();
             // info!("weight: {:?}", weight);
                 // Check if we have received f+1 <Ready, H(m)> for this round and digest, send <Ready, H(m)>
             if weight >= self.committee.validity_threshold() 
@@ -349,9 +349,15 @@ impl Core {
                         .entry(ready_header.clone().round)
                         .or_insert_with(Vec::new)
                         .extend(handlers);
+                    
+                    self.ready_headers
+                        .entry((round, ready_header.id))
+                        .or_insert_with(HashSet::new)
+                        .insert(self.name); 
 
                     self.ready_header_sent.insert((ready_header.round.clone(), ready_header.id.clone()), true);
-                    info!("sent ready header!");
+                    weight += self.committee.stake(&self.name);
+                    // info!("sent ready header!");
                 }
             }
 
@@ -374,20 +380,16 @@ impl Core {
                         self.consensus_header_sent.insert((header_info.round.clone(), header_info.id.clone()), true);
                     }
                     // Check if we have enough headers to enter a new dag round and propose a header.
-                    // QY: in the happy case: check if we have received leader's Header
                     if let Some(parents) = self
                         .header_aggregators
                         .entry(header_info.round)
                         .or_insert_with(|| Box::new(HeadersAggregator::new()))
                         .append(header_info.clone(), &self.committee)? {
-                        if let Some(parent) = parents.iter()
-                            .find(|parent| parent.author == self.committee.leader(header_info.round as usize)) {
-                            // Send it to the `Proposer`.
-                            self.tx_proposer
-                                .send((parents, header_info.round))
-                                .await
-                                .expect("Failed to send header_info to proposer");
-                        }
+                        // Send it to the `Proposer`.
+                        self.tx_proposer
+                            .send((parents, header_info.round))
+                            .await
+                            .expect("Failed to send header_info to proposer");
                     } 
                 }
             }

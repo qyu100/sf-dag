@@ -114,14 +114,8 @@ impl HeadersAggregator {
 
         self.header_infos.push(header_info.clone());
         self.weight += committee.stake(&author);
-        // QY: happy case: parents have leader.
         if self.weight >= committee.quorum_threshold() {
-            if let Some(headers) = self.header_infos.iter().find(|headers| headers.author 
-                == committee.leader(header_info.round as usize))      
-            {
-                // self.weight = 0; // Ensures quorum is only reached once.
-                return Ok(Some(self.header_infos.drain(..).collect()));
-            }
+            return Ok(Some(self.header_infos.drain(..).collect()));
         }
         Ok(None)
     }
