@@ -386,37 +386,60 @@ impl Core {
 
         // info!("Initialized echo_headers: {:?}", self.echo_headers);
 
-        // Check if we have received 2f+1 EchoHeaders for this round and digest
+        // Check if we have received 2.5f+1 EchoHeaders for this round and digest
         if let Some(echo_key) = self.echo_headers.get(&(round, digest.clone())) {
             let weight: Stake = echo_key.iter().map(|author| self.committee.stake(author)).sum();
-            if weight >= self.committee.quorum_threshold() {
-                if !self.ready_header_sent.contains_key(&(echo_header.round, echo_header.id.clone())) {
+            if weight >= self.committee.optimistic_threshold() {
+                if let Some((header_info, has_leader)) = self.processing_header_infos.get(&echo_header.id) {
+                    // Send header to consensus
+                    if !self.consensus_header_sent.contains_key(&(header_info.round, header_info.id.clone())) {
+                        // info!("Sending header {:?} to consensus at round {:?}", header_info.id, header_info.round);
+                        self.tx_consensus_header_msg
+                            .send(HeaderType::HeaderInfo(header_info.clone()))
+                            .await
+                            .expect("Failed to send header_info to consensus");
+                        self.consensus_header_sent.insert((header_info.round.clone(), header_info.id.clone()), true);
+                    }
+                    // Check if we have enough headers to enter a new dag round and propose a header.
+                    if let Some(parents) = self
+                        .header_aggregators
+                        .entry(header_info.round)
+                        .or_insert_with(|| Box::new(HeadersAggregator::new()))
+                        .append(header_info.clone(), &self.committee)? {    
+                        // Send it to the `Proposer`.
+                        self.tx_proposer
+                            .send((parents, header_info.round))
+                            .await
+                            .expect("Failed to send header_info to proposer");
+                    } 
+                }
+                // if !self.ready_header_sent.contains_key(&(echo_header.round, echo_header.id.clone())) {
                     // Send <Ready, H(m)> to primaries.
-                    let addresses = self
-                        .committee
-                        .others_primaries(&self.name)
-                        .iter()
-                        .map(|(_, info)| info.primary_to_primary)
-                        .collect();
+                    // let addresses = self
+                    //     .committee
+                    //     .others_primaries(&self.name)
+                    //     .iter()
+                    //     .map(|(_, info)| info.primary_to_primary)
+                    //     .collect();
                     
-                    let ready_header = ReadyHeader::new(&echo_header, &self.name).await;
-                    let bytes = bincode::serialize(&PrimaryMessage::Ready(ready_header))
-                        .expect("Failed to serialize ReadyHeader");
-                    let handlers = self.network.broadcast(addresses, Bytes::from(bytes)).await;
+                    // let ready_header = ReadyHeader::new(&echo_header, &self.name).await;
+                    // let bytes = bincode::serialize(&PrimaryMessage::Ready(ready_header))
+                    //     .expect("Failed to serialize ReadyHeader");
+                    // let handlers = self.network.broadcast(addresses, Bytes::from(bytes)).await;
                 
-                    self.cancel_handlers
-                        .entry(echo_header.round)
-                        .or_insert_with(Vec::new)
-                        .extend(handlers);
+                    // self.cancel_handlers
+                    //     .entry(echo_header.round)
+                    //     .or_insert_with(Vec::new)
+                    //     .extend(handlers);
 
-                    self.ready_headers
-                        .entry((round, echo_header.id.clone()))
-                        .or_insert_with(HashSet::new)
-                        .insert(self.name); 
+                    // self.ready_headers
+                    //     .entry((round, echo_header.id.clone()))
+                    //     .or_insert_with(HashSet::new)
+                    //     .insert(self.name); 
 
-                    self.ready_header_sent.insert((echo_header.round.clone(), echo_header.id.clone()), true);
+                    // self.ready_header_sent.insert((echo_header.round.clone(), echo_header.id.clone()), true);
                     // info!("Broadcasted ReadyHeader with hash {:?} by {:?}", echo_header.round, self.name);
-                };
+                // };
             }
         };
 

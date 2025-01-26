@@ -182,6 +182,12 @@ impl Committee {
         (total_votes + 2) / 3
     }
 
+    /// Returns the stake required to reach a quorum (2.5f+1).
+    pub fn optimistic_threshold(&self) -> Stake {
+        let total_votes: Stake = self.authorities.values().map(|x| x.stake).sum();
+        5 * total_votes / 6 + 1
+    }
+
     /// Returns a leader node in a round-robin fashion.
     /// This does not have to be changed because it works for odd and even numbers.
     pub fn leader(&self, seed: usize) -> PublicKey {
