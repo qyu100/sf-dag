@@ -182,10 +182,15 @@ impl Committee {
         (total_votes + 2) / 3
     }
 
-    /// Returns the stake required to reach a quorum (2.5f+1).
+    /// Returns the stake required to reach a quorum (n+2f+1)/2.
     pub fn optimistic_threshold(&self) -> Stake {
         let total_votes: Stake = self.authorities.values().map(|x| x.stake).sum();
-        5 * total_votes / 6 + 1
+        let ceil_result = if (5 * total_votes + 1) % 6 == 0 {
+            (5 * total_votes + 1) / 6
+        } else {
+            ((5 * total_votes + 1) + 6 - 1) / 6
+        };
+        ceil_result
     }
 
     /// Returns a leader node in a round-robin fashion.

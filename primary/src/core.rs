@@ -413,7 +413,7 @@ impl Core {
                     info!("Broadcasted ReadyHeader {:?}", ready_header.clone());
                 }
             }
-            // Check if we have received 2.5f+1 EchoHeaders for this round and digest
+            // Check if we have received (n+2f+1)/2 EchoHeaders for this round and digest
             if weight >= self.committee.optimistic_threshold() {
                 if let Some((header_info, _has_leader)) = self.processing_header_infos.get(&echo_header.id) {
                     // Send header to consensus
