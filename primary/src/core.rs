@@ -341,7 +341,8 @@ impl Core {
                         .map(|(_, info)| info.primary_to_primary)
                         .collect();
                     
-                    let bytes = bincode::serialize(&PrimaryMessage::Ready(ready_header.clone()))
+                    let new_ready_header = ReadyHeader::new_ready_header(&ready_header, &self.name).await;
+                    let bytes = bincode::serialize(&PrimaryMessage::Ready(new_ready_header.clone()))
                         .expect("Failed to serialize ReadyHeader");
                     let handlers = self.network.broadcast(addresses, Bytes::from(bytes)).await;
                 

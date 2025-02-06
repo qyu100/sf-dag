@@ -393,5 +393,17 @@ impl ReadyHeader {
             origin: echo_header.origin,
         }
     }
+
+    pub async fn new_ready_header(
+        ready_header: &ReadyHeader,
+        author: &PublicKey
+    ) -> Self {
+        ReadyHeader {
+            id: ready_header.id.clone(), 
+            round: ready_header.round,
+            author: *author,
+            origin: ready_header.origin,
+        }
+    }
 }
 
