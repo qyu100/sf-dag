@@ -43,7 +43,11 @@ class Bench:
                 'username': 'ubuntu'
             }
 
-            self.keep_alive = 5
+            # self.keep_alive = 5
+            ctx.connect_kwargs.pkey = RSAKey.from_private_key_file(
+                self.manager.settings.key_path
+            )
+            self.connect = ctx.connect_kwargs
         except (IOError, PasswordRequiredException, SSHException) as e:
             raise BenchError('Failed to load SSH key', e)
         
@@ -70,9 +74,40 @@ class Bench:
         self._parse_task_results(func, hosts_and_results, False)
         return hosts_and_results
 
-    def install(self):
-        asyncio.get_event_loop().run_until_complete(self._install())
+    # def install(self):
+    #     asyncio.get_event_loop().run_until_complete(self._install())
 
+    def install(self):
+        Print.info('Installing rust and cloning the repo...')
+        cmd = [
+            'sudo apt-get update',
+            'sudo apt-get -y upgrade',
+            'sudo apt-get -y autoremove',
+
+            # The following dependencies prevent the error: [error: linker `cc` not found].
+            'sudo apt-get -y install build-essential',
+            'sudo apt-get -y install cmake',
+
+            # Install rust (non-interactive).
+            'curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y',
+            'source $HOME/.cargo/env',
+            'rustup default stable',
+
+            # This is missing from the Rocksdb installer (needed for Rocksdb).
+            'sudo apt-get install -y clang',
+
+            # Clone the repo.
+            f'(git clone {self.settings.repo_url} || (cd {self.settings.repo_name} ; git pull))'
+        ]
+        hosts = self.manager.hosts(flat=True)
+        try:
+            g = Group(*hosts, user='ubuntu', connect_kwargs=self.connect)
+            g.run(' && '.join(cmd), hide=True)
+            Print.heading(f'Initialized testbed of {len(hosts)} nodes')
+        except (GroupException, ExecutionError) as e:
+            e = FabricError(e) if isinstance(e, GroupException) else e
+            raise BenchError('Failed to install repo on testbed', e)
+        
     async def _run_client(self, host, cmd: str) -> asyncssh.SSHCompletedProcess:
         async with asyncssh.connect(host) as conn:
             return await conn.run(cmd)
@@ -111,7 +146,7 @@ class Bench:
         
     async def _install(self):
         Print.info('Installing rust and cloning the repo...')
-        deploy_key = self.settings.key_name
+        deploy_key = self.settings.instance_key_name
         bootstrap = [
             'cd /home/ubuntu',
             # Run the bootstrap script in the background.
@@ -269,7 +304,7 @@ class Bench:
             return host, Exception(f'Failed to run {cmd} on {host} because of {e}')
 
     async def _update_one(self, host, connection):
-        deploy_key = self.settings.key_name
+        deploy_key = self.settings.instance_key_name
         update = [
             'cd /home/ubuntu',
             # Run the bootstrap script in the background.
