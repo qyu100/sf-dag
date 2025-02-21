@@ -113,7 +113,7 @@ class Bench:
         
     async def _install(self):
         Print.info('Installing rust and cloning the repo...')
-        deploy_key = self.settings.instance_key_name
+        deploy_key = self.settings.instance_key_name + '.pem'
         bootstrap = [
             'cd /home/ubuntu',
             # Run the bootstrap script in the background.
@@ -241,7 +241,7 @@ class Bench:
             return host, Exception(f'Failed to run {cmd} on {host} because of {e}')
 
     async def _update_one(self, host, connection):
-        deploy_key = self.settings.instance_key_name
+        deploy_key = self.settings.instance_key_name + '.pem'
         update = [
             'cd /home/ubuntu',
             # Run the bootstrap script in the background.
