@@ -183,15 +183,30 @@ class LogParser:
         return tps, bps, duration
 
     def _consensus_latency(self):
-        latency = [c - self.proposals[d] for d, c in self.commits.items()]
+        latency = []
+        for d, c in self.commits.items():
+            try:
+                latency.append(c - self.proposals[d])
+            except:
+                 pass
         return mean(latency) if latency else 0
     
     def _consensus_leader_latency(self):
-        latency = [c - self.proposals[d] for d, c in self.leader_commits.items()]
+        latency = []
+        for d, c in self.leader_commits.items():
+            try:
+                latency.append(c - self.proposals[d])
+            except:
+                 pass
         return mean(latency) if latency else 0
     
     def _consensus_non_leader_latency(self):
-        latency = [c - self.proposals[d] for d, c in self.non_leader_commits.items()]
+        latency = []
+        for d, c in self.non_leader_commits.items():
+            try:
+                latency.append(c - self.proposals[d])
+            except:
+                 pass
         return mean(latency) if latency else 0
 
     def _end_to_end_throughput(self):

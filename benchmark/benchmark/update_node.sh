@@ -8,22 +8,22 @@ trap 'last_command=$current_command; current_command=$BASH_COMMAND' DEBUG
 trap 'echo "\"${last_command}\" returned exit code $?." >&2' EXIT
 
 if [ "$#" -ne 3 ]; then
-    echo "Usage: ./update_node.sh <key_name> <github_repo_name> <repo_branch_name>"
+    echo "Usage: ./update_node.sh <github_deploy_key_name> <github_repo_name> <repo_branch_name>"
     exit 1
 fi
 
-KEY_NAME="$1"
+DEPLOY_KEY_NAME="$1"
 REPO_NAME="$2"
 BRANCH_NAME="$3"
 
 FUNC="update"
 
 eval $(ssh-agent)
-ssh-add /home/ubuntu/.ssh/"$KEY_NAME"
+ssh-add /home/ubuntu/.ssh/"$DEPLOY_KEY_NAME"
 cd /home/ubuntu/"$REPO_NAME" 
-git fetch 
-git checkout "$BRANCH_NAME"
-git pull 
+git fetch -f
+git checkout -f "$BRANCH_NAME"
+git pull -f
 
 source "$HOME"/.cargo/env
 cd /home/ubuntu/"$REPO_NAME"/node
