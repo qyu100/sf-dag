@@ -155,7 +155,7 @@ impl Proposer {
         )
         .await;
 
-        debug!("Created {:?}", header.id);
+        info!("Created {:?}", header.id);
 
         #[cfg(feature = "benchmark")]
         {
