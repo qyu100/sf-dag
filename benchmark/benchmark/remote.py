@@ -295,7 +295,7 @@ class Bench:
             addresses = OrderedDict(
                 (x, y) for x, y in zip(names, hosts)
             )
-        committee = Committee.from_address_list(addresses, self.settings.base_port, bench_parameters.faults)
+        committee = Committee.from_address_list(addresses, self.settings.base_port, bench_parameters.faults, node_parameters.f_num)
         committee.print(PathMaker.committee_file())
         node_parameters.print(PathMaker.parameters_file())
         return (committee, names)

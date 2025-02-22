@@ -45,7 +45,7 @@ class Committee:
     def __init__(self, json):
         self.json = json
 
-    def address_list_to_json(addresses, base_port, faults):
+    def address_list_to_json(addresses, base_port, faults, f_num=3):
         ''' The `addresses` field looks as follows:
             { 
                 "name": ["host", "host", ...],
@@ -67,6 +67,7 @@ class Committee:
         json = {'authorities': OrderedDict()}
         num_authorities = len(addresses)
 
+        json['f_num'] = f_num
         for i, (name, hosts) in enumerate(addresses.items()):
             host = hosts.pop(0)
             consensus_addr = {
@@ -100,8 +101,8 @@ class Committee:
         return json
 
     @classmethod
-    def from_address_list(cls, addresses, base_port, faults):
-        return cls(Committee.address_list_to_json(addresses, base_port, faults))
+    def from_address_list(cls, addresses, base_port, faults, f_num=3):
+        return cls(Committee.address_list_to_json(addresses, base_port, faults, f_num))
 
     def primary_addresses(self, faults=0):
         ''' Returns an ordered list of primaries' addresses. '''
@@ -202,6 +203,7 @@ class NodeParameters:
             inputs += [json['batch_size']]
             inputs += [json['tx_size']]
             inputs += [json['max_batch_delay']]
+            inputs += [json['f_num']]
         except KeyError as e:
             raise ConfigError(f'Malformed parameters: missing key {e}')
 
