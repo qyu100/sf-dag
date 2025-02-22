@@ -20,11 +20,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use store::Store;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::sync::Mutex;
-
-// #[cfg(test)]
-// #[path = "tests/core_tests.rs"]
-// pub mod core_tests;
 
 pub struct Core {
     /// The public key of this primary.
@@ -90,7 +85,7 @@ pub struct Core {
     header_aggregators: HashMap<Round, Box<HeadersAggregator>>,
     echo_headers: HashMap<(Round, Digest), HashSet<PublicKey>>,
     ready_headers: HashMap<(Round, Digest), HashSet<PublicKey>>,
-    ready_header_sent: Mutex<HashMap<(Round, Digest), bool>>,
+    ready_header_sent: HashMap<(Round, Digest), bool>,
     consensus_header_sent: HashMap<(Round, Digest), bool>,
     no_vote_cert_sent: HashMap<Round, bool>,
     timeout_sent: HashMap<Round, bool>,
@@ -159,7 +154,7 @@ impl Core {
                 header_aggregators: HashMap::with_capacity(2 * gc_depth as usize),
                 echo_headers: HashMap::new(),
                 ready_headers: HashMap::new(),
-                ready_header_sent: Mutex::new(HashMap::new()),
+                ready_header_sent: HashMap::new(),
                 consensus_header_sent: HashMap::new(),
                 no_vote_cert_sent: HashMap::new(),
                 timeout_sent: HashMap::new(),
@@ -389,7 +384,7 @@ impl Core {
             let weight: Stake = echo_key.iter().map(|author| self.committee.stake(author)).sum();
             // Check if we have received 2f+1 EchoHeaders for this round and digest
             if weight >= self.committee.quorum_threshold() {
-                let mut ready_header_sent = self.ready_header_sent.lock().await;
+                let mut ready_header_sent = self.ready_header_sent.clone();
                 if ready_header_sent.entry((round, digest)).or_insert(false) == &false {
                     *ready_header_sent.get_mut(&(round, digest)).unwrap() = true;
                     // Send <Ready, H(m)> to primaries.
@@ -413,7 +408,7 @@ impl Core {
                         .or_insert_with(HashSet::new)
                         .insert(self.name); 
 
-                    info!("Broadcasted ReadyHeader {:?}", ready_header.clone());
+                    // info!("Broadcasted ReadyHeader {:?}", ready_header.clone());
                 }
             }
             // Check if we have received (n+2f+1)/2 EchoHeaders for this round and digest
@@ -465,7 +460,7 @@ impl Core {
             // Check if we have received f+1 <Ready, H(m)> for this round and digest, send <Ready, H(m)>
             if weight >= self.committee.validity_threshold() 
                 && weight < self.committee.quorum_threshold() {
-                let mut ready_header_sent = self.ready_header_sent.lock().await;
+                let mut ready_header_sent = self.ready_header_sent.clone();
                 if ready_header_sent.entry((round, digest)).or_insert(false) == &false {
                     *ready_header_sent.get_mut(&(round, digest)).unwrap() = true;
                     // Send <Ready, H(m)> to primaries.
@@ -998,10 +993,7 @@ impl Core {
                 self.gc_round = gc_round;
                 self.echo_headers.retain(|(k,_),_| k>= &gc_round);
                 self.ready_headers.retain(|(k,_),_| k>= &gc_round);
-                self.ready_header_sent
-                    .lock()
-                    .await
-                    .retain(|(k, _), _| k >= &gc_round);
+                self.ready_header_sent.retain(|(k, _), _| k >= &gc_round);
                 self.consensus_header_sent.retain(|(k,_),_| k>= &gc_round);
                 self.timeout_sent.retain(|k,_| k>= &gc_round);
                 self.echo_no_vote_msgs.retain(|(k,_),_| k>= &gc_round);
