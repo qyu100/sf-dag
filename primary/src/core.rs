@@ -338,10 +338,13 @@ impl Core {
             .or_insert((header_info.clone(), has_leader));
         // Store the header.
         let hid = header_info.id;
+        let hr = header_info.round;
+
         let header_type = HeaderType::HeaderInfo(header_info.clone());
         let bytes = bincode::serialize(&header_type).expect("Failed to serialize header");
         self.store.write(hid.to_vec(), bytes).await;
-        
+        self.synchronizer.deliver_vertex(hr, header_type).await?;
+
         // Send <ECHO, H(m)> to primaries.
         let addresses = self
             .committee

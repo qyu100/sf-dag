@@ -1,5 +1,4 @@
 // Copyright(C) Facebook, Inc. and its affiliates.
-use crate::certificate_waiter::CertificateWaiter;
 use crate::core::Core;
 use crate::error::DagError;
 use crate::garbage_collector::GarbageCollector;
@@ -9,7 +8,6 @@ use crate::worker::Worker;
 use crate::messages::{Certificate, EchoHeader, EchoNoVoteMsg, ReadyNoVoteMsg, 
     Header, HeaderInfo, HeaderInfoWithParents, HeaderWithParents, 
     NoVoteMsg, ReadyHeader, Timeout, Vote};
-use crate::payload_receiver::PayloadReceiver;
 use crate::proposer::Proposer;
 use crate::synchronizer::Synchronizer;
 use async_trait::async_trait;
@@ -172,6 +170,7 @@ impl Primary {
             store.clone(),
             /* tx_header_waiter */ tx_sync_headers,
             /* tx_certificate_waiter */ tx_sync_certificates,
+            parameters.gc_depth,
         );
 
         // The `Core` receives and handles headers, votes, and certificates from the other primaries.

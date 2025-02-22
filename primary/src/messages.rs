@@ -12,7 +12,7 @@ use std::fmt;
 
 pub type Transaction = Vec<u8>;
 
-#[derive(Clone, Serialize, Deserialize, Default, PartialEq)]
+#[derive(Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct Header {
     pub author: PublicKey,
     pub round: Round,
@@ -60,6 +60,19 @@ impl Header {
             .keys()
             .map(|name| Self { ..Self::default() })
             .collect()
+    }
+
+    pub fn digest(&self) -> Digest {
+        let mut hasher = Sha512::new();
+        hasher.update(&self.author);
+        hasher.update(self.round.to_le_bytes());
+        for x in &self.payload {
+            hasher.update(x);
+        }
+        for x in &self.parents {
+            hasher.update(x);
+        }
+        Digest(hasher.finalize().as_slice()[..32].try_into().unwrap())
     }
 }
 
