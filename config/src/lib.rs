@@ -80,6 +80,7 @@ pub struct Parameters {
     /// The delay after which the workers seal a batch of transactions, even if `max_batch_size`
     /// is not reached. Denominated in ms.
     pub max_batch_delay: u64,
+    pub f_num: u32,
 }
 
 impl Default for Parameters {
@@ -93,6 +94,7 @@ impl Default for Parameters {
             batch_size: 500_000,
             tx_size: 512,
             max_batch_delay: 100,
+            f_num: 3,
         }
     }
 }
@@ -108,6 +110,7 @@ impl Parameters {
         info!("Sync retry nodes set to {} nodes", self.sync_retry_nodes);
         info!("Batch size set to {} B", self.batch_size);
         info!("Max batch delay set to {} ms", self.max_batch_delay);
+        info!("F set to {} B", self.f_num);
     }
 }
 
@@ -142,11 +145,22 @@ pub struct Authority {
 #[derive(Clone, Deserialize)]
 pub struct Committee {
     pub authorities: BTreeMap<PublicKey, Authority>,
+    pub f_num: u32,
 }
 
 impl Import for Committee {}
 
 impl Committee {
+    pub fn new(authorities: BTreeMap<PublicKey, Authority>, f_num: u32) -> Committee {
+        let mut keys: Vec<_> = authorities.keys().cloned().collect();
+        keys.sort();
+        let committee = Self {
+            authorities,
+            f_num,
+        };
+        committee
+    }
+
     /// Returns the number of authorities.
     pub fn size(&self) -> usize {
         self.authorities.len()
@@ -182,14 +196,10 @@ impl Committee {
         (total_votes + 2) / 3
     }
 
-    /// Returns the stake required to reach a quorum (n+2f+1)/2.
     pub fn optimistic_threshold(&self) -> Stake {
         let total_votes: Stake = self.authorities.values().map(|x| x.stake).sum();
-        let ceil_result = if (5 * total_votes + 1) % 6 == 0 {
-            (5 * total_votes + 1) / 6
-        } else {
-            ((5 * total_votes + 1) + 6 - 1) / 6
-        };
+        let x = (total_votes + 2 * self.f_num - 2) as f64 / 2.0;
+        let ceil_result = x.ceil() as u32;
         ceil_result
     }
 
