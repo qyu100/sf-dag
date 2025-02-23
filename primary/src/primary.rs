@@ -192,7 +192,6 @@ impl Primary {
             tx_timeout_core,
             tx_timeout_cert,
             tx_no_vote_cert,
-            tx_consensus_header,
             tx_consensus_header_msg,
         );
 

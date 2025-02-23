@@ -185,7 +185,9 @@ impl Committee {
         // If N = 3f + 1 + k (0 <= k < 3)
         // then (2 N + 3) / 3 = 2f + 1 + (2k + 2)/3 = 2f + 1 + k = N - f
         let total_votes: Stake = self.authorities.values().map(|x| x.stake).sum();
-        2 * total_votes / 3 + 1
+        let x = (total_votes + self.f_num - 1) as f64 / 2.0;
+        let ceil_result = x.ceil() as u32;
+        ceil_result
     }
 
     /// Returns the stake required to reach availability (f+1).
