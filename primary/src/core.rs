@@ -296,13 +296,14 @@ impl Core {
                 header_info = h_info.clone();
             }
         }
-
+        let round = header_info.round;
+        let digest = header_info.id;
         // Ensure we have the parents. If at least one parent is missing, the synchronizer returns an empty
         // vector; it will gather the missing parents (as well as all ancestors) from other nodes and then
         // reschedule processing of this header.
         let mut has_leader = true;
-
-        if header_info.round != 1 {
+        
+        if round != 1 {
             let parents = self.synchronizer.get_parents(&HeaderType::HeaderInfo(header_info.clone())).await?;
             
             if parents.is_empty() {
@@ -342,6 +343,39 @@ impl Core {
         self.processing_header_infos
             .entry(header_info.id)
             .or_insert((header_info.clone(), has_leader));
+
+        if self.ready_header_aggregators
+            .get(&(round, digest))
+            .map(|ready_aggregator| ready_aggregator.check_threshold(self.committee.quorum_threshold()))
+            .unwrap_or(false){
+            // Optimistic threshold reached, send to proposer
+            debug!("Processing missing header for digest: {:?}", digest);
+            if !has_leader {
+                if let Some(timeout_agg) = self.timeout_aggregators.get(&(round - 1)) {
+                    if !timeout_agg.check_threshold(self.committee.quorum_threshold()) {
+                        self.timeout_suspended
+                            .entry(round - 1)
+                            .or_insert_with(Vec::new)
+                            .push(header_info.clone());
+                        debug!("Processing of {} suspended: missing timeout quorum", digest);
+                        return Ok(());
+                    }
+                    if header_info.author == self.committee.leader(round as usize) {
+                        self.no_vote_suspended
+                            .entry(round - 1)
+                            .or_insert_with(Vec::new)
+                            .push(header_info.clone());
+                        if !self.no_vote_cert_sent.get(&(header_info.round - 1)).unwrap_or(&false) == true {
+                            debug!("Processing of {} suspended: missing no_vote quorum", digest);
+                            return Ok(());          
+                        }
+                    }
+                debug!("Timeout has reached quorum for round {:?}", round - 1);
+                }
+            }
+            self.send_consensus_header(round, digest, header_info.clone()).await?;  
+        }
+    
         // Store the header.
         let hid = header_info.id;
         let hr = header_info.round;
@@ -466,10 +500,9 @@ impl Core {
         }
 
         if weight >= self.committee.quorum_threshold() {
-            loop {
-                if self.processing_header_infos.get(&digest).is_some() {
-                    break;
-                }
+            if !self.processing_header_infos.contains_key(&digest) {
+                debug!("Processing of {} suspended: missing header message", digest);
+                return Ok(());
             }
             if let Some((header_info, has_leader)) = self.processing_header_infos.get(&digest) {
                 if !has_leader {
@@ -566,13 +599,39 @@ impl Core {
     #[async_recursion]
     async fn process_no_vote_msg(&mut self, no_vote_msg: NoVoteMsg) -> DagResult<()> {
         // debug!("Processing {:?}", no_vote_msg);
-        let nrd = no_vote_msg.round;
-        let nid = no_vote_msg.id;
+        let round = no_vote_msg.round;
+        let digest = no_vote_msg.id;
 
         self.processing_no_vote_msgs
-            .entry(nid)
+            .entry(digest)
             .or_insert(no_vote_msg.clone());
 
+        if let Some(ready_no_vote_aggregator) = self.ready_no_vote_aggregators.get(&(round, digest)) {
+            if ready_no_vote_aggregator.check_threshold(self.committee.quorum_threshold()) {
+                // Optimistic threshold reached, send to proposer
+                debug!("Processing missing no_vote for digest: {:?}", digest);
+                if self.no_vote_cert_sent.contains_key(&round) {
+                    return Ok(());
+                }
+                let no_vote_cert = NoVoteCert {
+                    round,
+                    no_votes: ready_no_vote_aggregator.authors().into_iter().cloned().collect(),
+                };
+        
+                self.tx_no_vote_cert
+                    .send((no_vote_cert, no_vote_msg.round))
+                    .await
+                    .expect("Failed to send no vote cert");
+                self.no_vote_cert_sent.insert(round, true);
+                // process has_leader no_vote suspended vertex.
+                if let Some(header_infos) = self.no_vote_suspended.remove(&round) {
+                    for header_info in header_infos {
+                        let digest = header_info.id;
+                        self.send_consensus_header(round, digest, header_info.clone()).await?;
+                    }
+                }
+            }
+        }
         // Send <ECHO, H(m)> to primaries.
         let addresses = self
             .committee
@@ -587,13 +646,13 @@ impl Core {
         let handlers = self.network.broadcast(addresses, Bytes::from(bytes)).await;
 
         self.cancel_handlers
-            .entry(nrd)
+            .entry(round)
             .or_insert_with(Vec::new)
             .extend(handlers);
 
         // Initialize the HashMap if it doesn't exist
         let aggregator = self.echo_no_vote_aggregators
-            .entry((nrd, nid))
+            .entry((round, digest))
             .or_insert_with(ThresholdAggregator::new);
         aggregator.append(self.name, &self.committee)?;
 
@@ -692,15 +751,8 @@ impl Core {
             return Ok(());
         }
 
-        if self.processing_no_vote_msgs.get(&digest).is_none() {
-            loop {
-                if self.processing_no_vote_msgs.get(&digest).is_some() {
-                    break;
-                }
-            }
-        }
-
         let Some(no_vote_msg) = self.processing_no_vote_msgs.get(&digest) else {
+            debug!("Processing of {} suspended: missing no_vote message", digest);
             return Ok(());
         };
     
@@ -927,5 +979,4 @@ impl Core {
             }
         }
     }
-
 }
