@@ -6,7 +6,6 @@ use crate::messages::{Certificate, HeaderWithParents, HeaderInfoWithParents,
     ,EchoNoVoteMsg, ReadyNoVoteMsg};
 use crate::primary::{HeaderMessage, HeaderType, PrimaryMessage, Round};
 use crate::synchronizer::Synchronizer;
-use crate::Header;
 use async_recursion::async_recursion;
 use bytes::Bytes;
 use config::Committee;
@@ -348,7 +347,6 @@ impl Core {
             .get(&(round, digest))
             .map(|ready_aggregator| ready_aggregator.check_threshold(self.committee.quorum_threshold()))
             .unwrap_or(false){
-            // Optimistic threshold reached, send to proposer
             debug!("Processing missing header for digest: {:?}", digest);
             if !has_leader {
                 if let Some(timeout_agg) = self.timeout_aggregators.get(&(round - 1)) {
@@ -423,7 +421,6 @@ impl Core {
 
         let weight = aggregator.append(author, &self.committee)?;
         if weight >= self.committee.optimistic_threshold() {
-            // Optimistic threshold reached, send to proposer
             if let Some((header_info, has_leader)) = self.processing_header_infos.get(&digest) {
                 if !has_leader {
                     if let Some(timeout_agg) = self.timeout_aggregators.get(&(round - 1)) {
@@ -608,7 +605,6 @@ impl Core {
 
         if let Some(ready_no_vote_aggregator) = self.ready_no_vote_aggregators.get(&(round, digest)) {
             if ready_no_vote_aggregator.check_threshold(self.committee.quorum_threshold()) {
-                // Optimistic threshold reached, send to proposer
                 debug!("Processing missing no_vote for digest: {:?}", digest);
                 if self.no_vote_cert_sent.contains_key(&round) {
                     return Ok(());
