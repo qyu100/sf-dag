@@ -1,4 +1,8 @@
 // Copyright(C) Facebook, Inc. and its affiliates.
+use blsttc::{
+    G1Affine, G1Projective, G2Affine, G2Projective, PublicKeyG2, PublicKeyShareG2, SecretKeySet,
+    SecretKeyShare, SignatureG1, SignatureShareG1,
+};
 use ed25519_dalek as dalek;
 use ed25519_dalek::ed25519;
 use ed25519_dalek::Signer as _;
@@ -11,7 +15,12 @@ use std::fmt;
 use tokio::sync::mpsc::{channel, Sender};
 use tokio::sync::oneshot;
 
+#[cfg(test)]
+#[path = "tests/crypto_tests.rs"]
+pub mod crypto_tests;
+
 pub type CryptoError = ed25519::Error;
+pub type BlsError = blsttc::Error;
 
 /// Represents a hash digest (32 bytes).
 #[derive(Hash, PartialEq, Default, Eq, Copy, Clone, Deserialize, Serialize, Ord, PartialOrd)]
@@ -237,6 +246,133 @@ impl SignatureService {
     pub async fn request_signature(&mut self, digest: Digest) -> Signature {
         let (sender, receiver): (oneshot::Sender<_>, oneshot::Receiver<_>) = oneshot::channel();
         if let Err(e) = self.channel.send((digest, sender)).await {
+            panic!("Failed to send message Signature Service: {}", e);
+        }
+        receiver
+            .await
+            .expect("Failed to receive signature from Signature Service")
+    }
+}
+
+// #######################################################################
+// BLS implementation
+
+#[derive(Serialize, Deserialize)]
+pub struct NodeKeyInfo {
+    /// The node's public key (and identifier).
+    pub nameg2: String,
+    /// The node's secret key
+    pub secret: String,
+}
+
+pub fn create_bls_key_pairs(nodes: usize, threshold: usize, path: String) {
+    let mut rng = blsttc::rand::rngs::OsRng;
+    // Generate a set of secret key shares
+    let sk_set = SecretKeySet::random(threshold, &mut rng);
+
+    // Get the corresponding public key set
+    let pk_set_g2 = sk_set.public_keys_g2();
+
+    for node_id in 0..nodes {
+        let sk_share = sk_set.secret_key_share(node_id);
+        let pk_share_g2 = pk_set_g2.public_key_share(node_id);
+
+        // Create a NodeInfo struct for the current nodes
+        let node_info = NodeKeyInfo {
+            nameg2: pk_share_g2.encode_base64(),
+            secret: sk_share.encode_base64(),
+        };
+
+        let id = node_id.to_string();
+        let path = path.replace('x', id.as_str());
+        let json_data = serde_json::to_string_pretty(&node_info).unwrap();
+        std::fs::write(path, json_data).expect("Failed to write JSON data to file");
+    }
+}
+
+pub fn aggregate_sign(agg_sig: &SignatureShareG1, new_sign: &SignatureShareG1) -> SignatureShareG1 {
+    let agg_sign = G1Affine::from(agg_sig.0 .0 + G1Projective::from(new_sign.0 .0));
+    let sign = SignatureShareG1(SignatureG1(agg_sign));
+    sign
+}
+
+pub fn aggregate_pubkey(
+    agg_key: &PublicKeyShareG2,
+    new_key: &PublicKeyShareG2,
+) -> PublicKeyShareG2 {
+    let agg_key = G2Affine::from(agg_key.0 .0 + G2Projective::from(new_key.0 .0));
+    let key = PublicKeyShareG2(PublicKeyG2(agg_key));
+    key
+}
+
+pub fn remove_pubkeys(
+    agg_key: &PublicKeyShareG2,
+    ids: Vec<usize>,
+    sorted_keys: &Vec<PublicKeyShareG2>,
+) -> PublicKeyShareG2 {
+    let mut agg_pub_key = agg_key.clone();
+    for i in ids {
+        let new_key = G2Affine::from(agg_pub_key.0 .0 - G2Projective::from(sorted_keys[i].0 .0));
+        agg_pub_key = PublicKeyShareG2(PublicKeyG2(new_key));
+    }
+    agg_pub_key
+}
+
+pub fn combine_keys(keys: &Vec<PublicKeyShareG2>) -> PublicKeyShareG2 {
+    if keys.len() == 1 {
+        keys[0]
+    } else {
+        let mut agg_key = keys[0];
+        for i in 1..keys.len() {
+            let new_key = G2Affine::from(agg_key.0 .0 + G2Projective::from(keys[i].0 .0));
+            agg_key = PublicKeyShareG2(PublicKeyG2(new_key));
+        }
+        agg_key
+    }
+}
+
+pub fn combine_key_from_ids(
+    ids: Vec<usize>,
+    sorted_keys: &Vec<PublicKeyShareG2>,
+) -> PublicKeyShareG2 {
+    if ids.len() == 1 {
+        sorted_keys[ids[0]]
+    } else {
+        let mut agg_key = sorted_keys[ids[0]];
+        for i in 1..ids.len() {
+            let new_key =
+                G2Affine::from(agg_key.0 .0 + G2Projective::from(sorted_keys[ids[i]].0 .0));
+            agg_key = PublicKeyShareG2(PublicKeyG2(new_key));
+        }
+        agg_key
+    }
+}
+
+/// This service holds the node's private key. It takes digests as input and returns a signature
+/// over the digest (through a oneshot channel).
+#[derive(Clone)]
+pub struct BlsSignatureService {
+    channel: Sender<([u8; 32], oneshot::Sender<SignatureShareG1>)>,
+}
+
+impl BlsSignatureService {
+    pub fn new(secret: SecretKeyShare) -> Self {
+        let (tx, mut rx): (Sender<(_, oneshot::Sender<_>)>, _) = channel(100);
+        tokio::spawn(async move {
+            while let Some((digest, sender)) = rx.recv().await {
+                let signature = SignatureShareG1::new(&digest, &secret);
+                let _ = sender.send(signature);
+            }
+        });
+        Self { channel: tx }
+    }
+
+    pub async fn request_signature(&mut self, digest: Digest) -> SignatureShareG1 {
+        let (sender, receiver): (
+            oneshot::Sender<SignatureShareG1>,
+            oneshot::Receiver<SignatureShareG1>,
+        ) = oneshot::channel();
+        if let Err(e) = self.channel.send((digest.0, sender)).await {
             panic!("Failed to send message Signature Service: {}", e);
         }
         receiver

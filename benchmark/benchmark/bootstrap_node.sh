@@ -8,11 +8,11 @@ trap 'last_command=$current_command; current_command=$BASH_COMMAND' DEBUG
 trap 'echo "\"${last_command}\" returned exit code $?." >&2' EXIT
 
 if [ "$#" -ne 3 ]; then
-    echo "Usage: ./bootstrap_node.sh <github_deploy_key_name> <github_repo_url> <github_repo_name>"
+    echo "Usage: ./bootstrap_node.sh <key_name> <github_repo_url> <github_repo_name>"
     exit 1
 fi
 
-DEPLOY_KEY_NAME="$1"
+KEY_NAME="$1"
 REPO_URL="$2"
 REPO_NAME="$3"
 
@@ -43,15 +43,15 @@ echo "ulimit -n 65535" >> /home/ubuntu/.bashrc
 echo "ulimit -n 65535" >> /home/ubuntu/.profile
 
 # Generate the public key corresponding to the GitHub deploy key.
-ssh-keygen -y -f /home/ubuntu/"$DEPLOY_KEY_NAME" > /home/ubuntu/"$DEPLOY_KEY_NAME".pub
+ssh-keygen -y -f /home/ubuntu/"$KEY_NAME" > /home/ubuntu/"$KEY_NAME".pub
 # Move the previously-copied deploy key to its proper location and set it 
 # as the default for GitHub.
-mv /home/ubuntu/"$DEPLOY_KEY_NAME"* /home/ubuntu/.ssh
+mv /home/ubuntu/"$KEY_NAME"* /home/ubuntu/.ssh
 echo -e \
-    "Host github.com\n  HostName github.com\n  IdentityFile ~/.ssh/$DEPLOY_KEY_NAME" \
+    "Host github.com\n  HostName github.com\n  IdentityFile ~/.ssh/$KEY_NAME" \
     > /home/ubuntu/.ssh/config
 eval $(ssh-agent)
-ssh-add /home/ubuntu/.ssh/"$DEPLOY_KEY_NAME"
+ssh-add /home/ubuntu/.ssh/"$KEY_NAME"
 
 # Update the distro
 sudo apt-get update

@@ -11,7 +11,6 @@ class BenchError(Exception):
 
 
 class PathMaker:
-    
     @staticmethod
     def binary_path():
         return join('..', 'target', 'release')
@@ -37,7 +36,16 @@ class PathMaker:
         return '.parameters.json'
 
     @staticmethod
-    def key_file(i):
+    def bls_file_default_path():
+        return f'.node-bls-x.json'
+
+    @staticmethod
+    def bls_key_file(i):
+        assert isinstance(i, int) and i >= 0
+        return f'.node-bls-{i}.json'
+
+    @staticmethod
+    def ed_key_file(i):
         assert isinstance(i, int) and i >= 0
         return f'.node-{i}.json'
 

@@ -4,16 +4,15 @@ from fabric import Connection, ThreadingGroup as Group
 from fabric.exceptions import GroupException
 from paramiko import RSAKey
 from paramiko.ssh_exception import PasswordRequiredException, SSHException
-from os import chmod
 from os.path import basename, splitext
 from time import sleep
 from math import ceil
 from copy import deepcopy
 import subprocess
 from subprocess import SubprocessError
+from os import chmod
 import traceback
-
-from benchmark.config import Committee, Key, NodeParameters, BenchParameters, ConfigError
+from benchmark.config import Committee, EdKey,BlsKey, NodeParameters, BenchParameters, ConfigError
 from benchmark.utils import BenchError, Print, PathMaker, progress_bar
 from benchmark.commands import CommandMaker
 from benchmark.logs import LogParser, ParseError
@@ -23,29 +22,28 @@ import asyncio, asyncssh
 STATUS_FAILURE=25
 STATUS_SUCCESS=0
 
+
 class ExecutionError(Exception):
     pass
+
 
 class Bench:
     def __init__(self, ctx):
         self.manager = InstanceManager.make()
         self.settings = self.manager.settings
+        self.hosts_to_connections = {}
         try:
             self.connect_options = {
                 'client_keys': [self.manager.settings.key_path],
                 'connect_timeout': 30,
                 'keepalive_interval': 10,
-                'keepalive_count_max': 6,
+                'keepalive_count_max': 60,
                 'known_hosts': None,
                 'login_timeout': 30,
                 'username': 'ubuntu'
             }
 
-            # self.keep_alive = 5
-            ctx.connect_kwargs.pkey = RSAKey.from_private_key_file(
-                self.manager.settings.key_path
-            )
-            self.connect = ctx.connect_kwargs
+            self.keep_alive = 5
         except (IOError, PasswordRequiredException, SSHException) as e:
             raise BenchError('Failed to load SSH key', e)
         
@@ -113,7 +111,7 @@ class Bench:
         
     async def _install(self):
         Print.info('Installing rust and cloning the repo...')
-        deploy_key = self.settings.instance_key_name + '.pem'
+        deploy_key = self.settings.key_name
         bootstrap = [
             'cd /home/ubuntu',
             # Run the bootstrap script in the background.
@@ -172,9 +170,26 @@ class Bench:
     
     async def _kill_one(self, host, connection, cmd):
         try:
+            # Execute the command on the remote host using the SSH connection
             result = await connection.run(cmd)
+            # Return the host and the result of the command execution
             return host, result
+        except asyncssh.ChannelOpenError:
+            # If the SSH connection is closed, attempt to reconnect
+            try:
+                print(f"SSH connection to {host} closed. Attempting to reconnect...")
+                # Reconnect to the SSH server
+                connection = await asyncssh.connect(host, **self.connect_options)
+                self.hosts_to_connections[host] = connection
+                # Retry executing the command on the reestablished connection
+                result = await connection.run(cmd)
+                return host, result
+            except Exception as e:
+                # If reconnection fails, return the host and the exception
+                return host, Exception(f'Failed to reconnect to {host} because of {e}')
         except Exception as e:
+            # If an exception other than ChannelOpenError occurs during command execution, catch it
+            # and return a tuple containing the host and the exception
             return host, Exception(f'Failed to kill {host} because of {e}')
     
     def kill(self):
@@ -237,11 +252,24 @@ class Bench:
             cmd = f'tmux new -d -s "{name}" "{cmd} |& tee {log}"'
             result = await connection.create_process(cmd)
             return host, result
+        except asyncssh.ChannelOpenError:
+            # If the SSH connection is closed, attempt to reconnect
+            try:
+                print(f"SSH connection to {host} closed. Attempting to reconnect...")
+                # Reconnect to the SSH server
+                connection = await asyncssh.connect(host, **self.connect_options)
+                self.hosts_to_connections[host] = connection
+                # Retry executing the command on the reestablished connection
+                result = await connection.create_process(cmd)
+                return host, result
+            except Exception as e:
+                # If reconnection fails, return the host and the exception
+                return host, Exception(f'Failed to reconnect to {host} because of {e}')
         except Exception as e:
             return host, Exception(f'Failed to run {cmd} on {host} because of {e}')
 
     async def _update_one(self, host, connection):
-        deploy_key = self.settings.instance_key_name + '.pem'
+        deploy_key = self.settings.key_name
         update = [
             'cd /home/ubuntu',
             # Run the bootstrap script in the background.
@@ -258,7 +286,8 @@ class Bench:
             # Copy the Deploy Key to /home/ubuntu
             await sftp.put(PathMaker.committee_file(), '.', preserve=True)
             # Copy the installation and update scripts to the same location
-            await sftp.put(PathMaker.key_file(id), '.', preserve=True)
+            await sftp.put(PathMaker.bls_key_file(id), '.', preserve=True)
+            await sftp.put(PathMaker.ed_key_file(id), '.', preserve=True)
             await sftp.put(PathMaker.parameters_file(), '.', preserve=True)
 
     def _generate_config(self, hosts, node_parameters, bench_parameters):
@@ -276,15 +305,25 @@ class Bench:
         cmd = CommandMaker.alias_binaries(PathMaker.binary_path())
         subprocess.run([cmd], shell=True)
 
+        cmd = CommandMaker.generate_bls_keys(len(hosts), 2, PathMaker.bls_file_default_path()).split()
+        subprocess.run(cmd, check=True)
+
         # Generate configuration files.
         keys = []
-        key_files = [PathMaker.key_file(i) for i in range(len(hosts))]
+        key_files = [PathMaker.ed_key_file(i) for i in range(len(hosts))]
         for filename in key_files:
-            cmd = CommandMaker.generate_key(filename).split()
+            cmd = CommandMaker.generate_ed_key(filename).split()
             subprocess.run(cmd, check=True)
-            keys += [Key.from_file(filename)]
+            keys += [EdKey.from_file(filename)]
 
+        bls_keys = []
+        key_files = [PathMaker.bls_key_file(i) for i in range(len(hosts))]
+        for filename in key_files:
+            bls_keys += [BlsKey.from_file(filename)]
+
+            
         names = [x.name for x in keys]
+        bls_pubkeys_g2 = [_.nameg2 for _ in bls_keys]
 
         if bench_parameters.collocate:
             workers = bench_parameters.workers
@@ -295,7 +334,7 @@ class Bench:
             addresses = OrderedDict(
                 (x, y) for x, y in zip(names, hosts)
             )
-        committee = Committee.from_address_list(addresses, self.settings.base_port, bench_parameters.faults, node_parameters.f_num)
+        committee = Committee.from_address_list(addresses, self.settings.base_port, bench_parameters.faults, bls_pubkeys_g2)
         committee.print(PathMaker.committee_file())
         node_parameters.print(PathMaker.parameters_file())
         return (committee, names)
@@ -303,9 +342,9 @@ class Bench:
     async def _run_clients(self, rate, burst, committee, bench_parameters, connections):
         Print.info('Booting clients...')
         workers_addresses = committee.workers_addresses(bench_parameters.faults)
-        rate_share = ceil(rate / committee.workers())
+        rate_share = ceil(rate / len(workers_addresses))
         tasks = []
-
+        
         for i, addresses in enumerate(workers_addresses):
             for (id, address) in addresses:
                 host = Committee.ip(address)
@@ -316,7 +355,7 @@ class Bench:
                     rate_share,
                     [x for y in workers_addresses for _, x in y]
                 )
-                log_file = PathMaker.client_log_file(i, id)
+                log_file = PathMaker.client_log_file(i, int(id))
                 connection = connections[host]
                 tasks.append(self._run_on_host(host, cmd, log_file, connection))
         
@@ -330,7 +369,8 @@ class Bench:
         for i, address in enumerate(committee.primary_addresses(faults)):
             host = Committee.ip(address)
             cmd = CommandMaker.run_primary(
-                PathMaker.key_file(i),
+                PathMaker.ed_key_file(i),
+                PathMaker.bls_key_file(i),
                 PathMaker.committee_file(),
                 PathMaker.db_path(i),
                 PathMaker.parameters_file(),
@@ -350,7 +390,8 @@ class Bench:
             for (id, address) in addresses:
                 host = Committee.ip(address)
                 cmd = CommandMaker.run_worker(
-                    PathMaker.key_file(i),
+                    PathMaker.ed_key_file(i),
+                    PathMaker.bls_key_file(i),
                     PathMaker.committee_file(),
                     PathMaker.db_path(i, id),
                     PathMaker.parameters_file(),
@@ -377,17 +418,16 @@ class Bench:
         # hosts = committee.ips()
         await self._kill(hosts_to_connections=hosts_to_connections, delete_logs=True)
 
+        # Run the primaries (except the faulty ones).
+        primaries = self._run_primaries(committee, hosts_to_connections, bench_parameters.faults, debug)
+        await primaries
+        
         if not consensus_only:
             # Run the clients (they will wait for the nodes to be ready).
             # Filter all faulty nodes from the client addresses (or they will wait
             # for the faulty nodes to be online).
             workers_addresses = await self._run_clients(
                 rate, burst, committee, bench_parameters, hosts_to_connections)
-
-        # Run the primaries (except the faulty ones).
-        await self._run_primaries(committee, hosts_to_connections, bench_parameters.faults, debug)
-
-        # if not consensus_only:
             # Run the workers (except the faulty ones).
             # await self._run_workers(workers_addresses, hosts_to_connections, debug)
 
@@ -432,20 +472,20 @@ class Bench:
         except Exception as e:
             return host, Exception(f'Failed to download {src} from {host} because of {e}')
 
-    async def _download_worker_logs(self, faults, committee, hosts_to_connections):
-        workers_addresses = committee.workers_addresses(faults)
-        tasks = []
+    # async def _download_worker_logs(self, faults, committee, hosts_to_connections):
+    #     workers_addresses = committee.workers_addresses(faults)
+    #     tasks = []
 
-        print('Downloading workers logs...')
-        for i, addresses in enumerate(workers_addresses):
-            for j, address in addresses:
-                host = Committee.ip(address)
-                src = PathMaker.worker_log_file(i, int(j))
-                dest = PathMaker.worker_log_file(i, int(j))
-                connection = hosts_to_connections[host]
-                tasks.append(self._download_log(host, connection, src, dest))
+    #     print('Downloading workers logs...')
+    #     for i, addresses in enumerate(workers_addresses):
+    #         for j, address in addresses:
+    #             host = Committee.ip(address)
+    #             src = PathMaker.worker_log_file(i, int(j))
+    #             dest = PathMaker.worker_log_file(i, int(j))
+    #             connection = hosts_to_connections[host]
+    #             tasks.append(self._download_log(host, connection, src, dest))
             
-        await self._gather_and_parse(tasks, 'Download Worker Logs')
+    #     await self._gather_and_parse(tasks, 'Download Worker Logs')
 
     async def _download_primary_logs(self, faults, committee, hosts_to_connections):
         primary_addresses = committee.primary_addresses(faults)
@@ -498,10 +538,10 @@ class Bench:
         node_parameters, 
         debug=False, 
         consensus_only=False, 
-        update=True
+        update=True,
     ):
         hosts_and_connections = await self._try_connect_all(hosts)
-        hosts_to_connections = { host: connection for host, connection in hosts_and_connections }
+        self.hosts_to_connections = { host: connection for host, connection in hosts_and_connections }
 
         try:
             (committee, names) = self._generate_config(hosts, node_parameters, bench_parameters)
@@ -518,7 +558,7 @@ class Bench:
         tasks = []
         for id, name in enumerate(names):
             ip = committee.ips(name)[0] # TODO: No longer support remote workers.
-            connection = hosts_to_connections[ip]
+            connection = self.hosts_to_connections[ip]
             tasks.append(self._configure_one(ip, id, connection, update))
 
         await self._gather_and_parse(tasks, 'Configure')
@@ -543,13 +583,13 @@ class Bench:
                     Print.heading(f'Run {i + 1}/{bench_parameters.runs}')
                     try:
                         await self._run_single(
-                            rate,  burst, committee_copy, bench_parameters, hosts_to_connections, debug, consensus_only
+                            rate, burst, committee_copy, bench_parameters, self.hosts_to_connections, debug, consensus_only
                         )
 
                         faults = bench_parameters.faults
                         await self._download_logs(consensus_only, committee=committee)
                         Print.info('Parsing logs and computing performance...')
-                        logger = LogParser.process(PathMaker.logs_path(), burst)
+                        logger = LogParser.process(PathMaker.logs_path(), burst, consensus_only=consensus_only)
                         logger.print(PathMaker.result_file(
                             faults,
                             n,
@@ -558,11 +598,11 @@ class Bench:
                             rate,
                             bench_parameters.tx_size,
                         ))
+                
                     except (subprocess.SubprocessError, ParseError) as e:
-                        self._kill(hosts_to_connections=hosts_to_connections)
+                        self._kill(hosts_to_connections=self.hosts_to_connections)
                         Print.error(BenchError('Benchmark failed', e))
-                        continue
-        
+                        continue        
 
     def run(self, bench_parameters_dict, node_parameters_dict, debug=False, consensus_only=False, update=True):
         assert isinstance(debug, bool)

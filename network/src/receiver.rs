@@ -7,9 +7,9 @@ use futures::stream::StreamExt as _;
 use log::{debug, info, warn};
 use std::error::Error;
 use std::net::SocketAddr;
+use std::time::Instant;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
-use std::time::Instant;
 
 /// Convenient alias for the writer end of the TCP channel.
 pub type Writer = SplitSink<Framed<TcpStream, LengthDelimitedCodec>, Bytes>;
@@ -36,7 +36,7 @@ impl<Handler: MessageHandler> Receiver<Handler> {
     /// Spawn a new network receiver handling connections from any incoming peer.
     pub fn spawn(address: SocketAddr, handler: Handler) {
         tokio::spawn(async move {
-            Self {address, handler}.run().await;
+            Self { address, handler }.run().await;
         });
     }
 
@@ -67,7 +67,7 @@ impl<Handler: MessageHandler> Receiver<Handler> {
             let start_time = Instant::now();
             let transport = Framed::new(socket, LengthDelimitedCodec::new());
             let (mut writer, mut reader) = transport.split();
-    
+
             while let Some(frame) = reader.next().await {
                 match frame.map_err(|e| NetworkError::FailedToReceiveMessage(peer, e)) {
                     Ok(message) => {
@@ -82,7 +82,7 @@ impl<Handler: MessageHandler> Receiver<Handler> {
                     }
                 }
             }
-    
+
             warn!(
                 "Client closed connection without sending data. Peer: {}, Duration: {:?}",
                 peer,
@@ -91,5 +91,3 @@ impl<Handler: MessageHandler> Receiver<Handler> {
         });
     }
 }
-
-

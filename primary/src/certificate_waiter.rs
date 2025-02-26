@@ -1,6 +1,7 @@
 // Copyright(C) Facebook, Inc. and its affiliates.
 use crate::error::{DagError, DagResult};
 use crate::messages::Certificate;
+use crate::primary::HeaderType;
 use futures::future::try_join_all;
 use futures::stream::futures_unordered::FuturesUnordered;
 use futures::stream::StreamExt as _;
@@ -61,15 +62,35 @@ impl CertificateWaiter {
                 Some(certificate) = self.rx_synchronizer.recv() => {
                     // Add the certificate to the waiter pool. The waiter will return it to us
                     // when all its parents are in the store.
-                    let wait_for = certificate
-                        .header
-                        .parents
+
+                    let key = certificate.header_id.to_vec();
+
+                    if let Some(res) = self.store.read(key.clone()).await.unwrap() {
+                        let header_msg = bincode::deserialize(&res).unwrap();
+
+                        let parents: Vec<_>;
+                        match header_msg {
+                            HeaderType::Header(header) => {
+                                parents = header.parents;
+                            }
+                            HeaderType::HeaderInfo(header_info) => {
+                                parents = header_info.parents;
+                            }
+                        }
+
+                        let wait_for = parents
                         .iter()
                         .cloned()
                         .map(|x| (x.to_vec(), self.store.clone()))
                         .collect();
-                    let fut = Self::waiter(wait_for, certificate);
-                    waiting.push(fut);
+
+                        let fut = Self::waiter(wait_for, certificate);
+                        waiting.push(fut);
+                    }else{
+                        let wait_for = vec![(key, self.store.clone())];
+                        let fut = Self::waiter(wait_for, certificate);
+                        waiting.push(fut);
+                    }
                 }
                 Some(result) = waiting.next() => match result {
                     Ok(certificate) => {

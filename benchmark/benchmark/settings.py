@@ -23,7 +23,7 @@ class Settings:
         if not ok:
             raise SettingsError('Invalid settings types')
 
-        self.instance_key_name = key_name
+        self.key_name = key_name
         self.key_path = key_path
 
         self.base_port = base_port
@@ -33,7 +33,7 @@ class Settings:
         self.branch = branch
 
         self.instance_type = instance_type
-        self.aws_regions = regions
+        self.zones = regions
 
     @classmethod
     def load(cls, filename):
@@ -56,5 +56,3 @@ class Settings:
 
         except KeyError as e:
             raise SettingsError(f'Malformed settings: missing key {e}')
-        
-        

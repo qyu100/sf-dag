@@ -1,7 +1,6 @@
-boto3==1.16.0
+google-cloud==0.34.0
 fabric==3.0.0
 matplotlib==3.3.4
-asyncssh==2.14.2
-numpy==1.26.4
-urllib3==1.26.18
-cryptography==42.0.8
+google-cloud-compute==1.18.0
+decorator==5.1.1
+google-api-python-client==2.122.0

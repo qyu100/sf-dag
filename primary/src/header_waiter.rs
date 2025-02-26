@@ -163,20 +163,18 @@ impl HeaderWaiter {
 
                         // }
 
-                        WaiterMessage::SyncParents(missing, header_msg) => {
+                        WaiterMessage::SyncParents(missing, header_type) => {
                             let id : Digest;
                             let round : Round;
                             let author : PublicKey;
-                            match header_msg.clone() {
+                            match header_type.clone() {
                                 HeaderType::Header(header) => {
                                     id = header.id.clone();
                                     round = header.round;
-                                    author = header.author;
                                 }
                                 HeaderType::HeaderInfo(header_info) => {
                                     id = header_info.id.clone();
                                     round = header_info.round;
-                                    author = header_info.author;
                                 }
                             }
                             debug!("Synching the parents of {}", id);
@@ -196,7 +194,7 @@ impl HeaderWaiter {
                                 .collect();
                             let (tx_cancel, rx_cancel) = channel(1);
                             self.pending.insert(id, (round, tx_cancel));
-                            let fut = Self::waiter(wait_for, header_msg, rx_cancel);
+                            let fut = Self::waiter(wait_for, header_type, rx_cancel);
                             waiting.push(fut);
 
                             // Ensure we didn't already sent a sync request for these parents.
@@ -214,28 +212,27 @@ impl HeaderWaiter {
                                 });
                             }
                             if !requires_sync.is_empty() {
-                            //     let address = self.committee
-                            //         .primary(&author)
-                            //         .expect("Author of valid header not in the committee")
-                            //         .primary_to_primary;
-                            //     let message = PrimaryMessage::CertificatesRequest(requires_sync, self.name);
-                            //     let bytes = bincode::serialize(&message).expect("Failed to serialize cert request");
-                            //     self.network.send(address, Bytes::from(bytes)).await;
+                                // let address = self.committee
+                                //     .primary(&author)
+                                //     .expect("Author of valid header not in the committee")
+                                //     .primary_to_primary;
+                                // let message = PrimaryMessage::CertificatesRequest(requires_sync, self.name);
+                                // let bytes = bincode::serialize(&message).expect("Failed to serialize cert request");
+                                // self.network.send(address, Bytes::from(bytes)).await;
                             }
                         }
                     }
                 },
 
                 Some(result) = waiting.next() => match result {
-                    Ok(Some(header_msg)) => {
+                    Ok(Some(header_type)) => {
                         let id : Digest;
                         let parents : Vec<_>;
-                        match header_msg.clone() {
+                        match header_type.clone() {
                             HeaderType::Header(header) => {
                                 id = header.id;
                                 parents = header.parents.clone();
                                 let _ = self.pending.remove(&id);
-
                                 for x in &parents {
                                     let _ = self.parent_requests.remove(&x);
                                 }
@@ -245,7 +242,6 @@ impl HeaderWaiter {
                                 id = header_info.id;
                                 parents = header_info.parents.clone();
                                 let _ = self.pending.remove(&id);
-
                                 for x in &parents {
                                     let _ = self.parent_requests.remove(&x);
                                 }

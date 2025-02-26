@@ -1,3 +1,5 @@
+use ed25519_dalek::{Digest as _, Sha512};
+use std::convert::TryInto as _;
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::mpsc::Sender;
 use tokio::time::{sleep, Duration, Instant};

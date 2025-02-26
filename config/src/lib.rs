@@ -1,4 +1,5 @@
 // Copyright(C) Facebook, Inc. and its affiliates.
+use blsttc::{PublicKeyShareG2, SecretKeyShare};
 use crypto::{generate_production_keypair, PublicKey, SecretKey};
 use log::info;
 use serde::de::DeserializeOwned;
@@ -60,6 +61,8 @@ pub type WorkerId = u32;
 
 #[derive(Deserialize, Clone)]
 pub struct Parameters {
+    // consensus only flag
+    pub consensus_only: bool,
     /// The preferred header size. The primary creates a new header when it has enough parents and
     /// enough batches' digests to reach `header_size`. Denominated in bytes.
     pub header_size: usize,
@@ -80,12 +83,12 @@ pub struct Parameters {
     /// The delay after which the workers seal a batch of transactions, even if `max_batch_size`
     /// is not reached. Denominated in ms.
     pub max_batch_delay: u64,
-    pub f_num: u32,
 }
 
 impl Default for Parameters {
     fn default() -> Self {
         Self {
+            consensus_only: false,
             header_size: 1_000,
             max_header_delay: 100,
             gc_depth: 50,
@@ -94,7 +97,6 @@ impl Default for Parameters {
             batch_size: 500_000,
             tx_size: 512,
             max_batch_delay: 100,
-            f_num: 3,
         }
     }
 }
@@ -103,6 +105,9 @@ impl Import for Parameters {}
 
 impl Parameters {
     pub fn log(&self) {
+        if self.consensus_only {
+            info!("Running consensus in isolation");
+        }
         info!("Header size set to {} B", self.header_size);
         info!("Max header delay set to {} ms", self.max_header_delay);
         info!("Garbage collection depth set to {} rounds", self.gc_depth);
@@ -110,7 +115,7 @@ impl Parameters {
         info!("Sync retry nodes set to {} nodes", self.sync_retry_nodes);
         info!("Batch size set to {} B", self.batch_size);
         info!("Max batch delay set to {} ms", self.max_batch_delay);
-        info!("F set to {} B", self.f_num);
+        info!("Transaction size set to {} B", self.tx_size);
     }
 }
 
@@ -134,6 +139,7 @@ pub struct WorkerAddresses {
 
 #[derive(Clone, Deserialize)]
 pub struct Authority {
+    pub bls_pubkey_g2: PublicKeyShareG2,
     /// The voting power of this authority.
     pub stake: Stake,
     /// The network addresses of the primary.
@@ -143,20 +149,26 @@ pub struct Authority {
 }
 
 #[derive(Clone, Deserialize)]
+pub struct Comm {
+    pub authorities: BTreeMap<PublicKey, Authority>,
+}
+impl Import for Comm {}
+
+#[derive(Clone, Deserialize)]
 pub struct Committee {
     pub authorities: BTreeMap<PublicKey, Authority>,
-    pub f_num: u32,
+    pub sorted_keys: Vec<PublicKey>,
 }
 
 impl Import for Committee {}
 
 impl Committee {
-    pub fn new(authorities: BTreeMap<PublicKey, Authority>, f_num: u32) -> Committee {
+    pub fn new(authorities: BTreeMap<PublicKey, Authority>) -> Committee {
         let mut keys: Vec<_> = authorities.keys().cloned().collect();
         keys.sort();
         let committee = Self {
             authorities,
-            f_num,
+            sorted_keys: keys,
         };
         committee
     }
@@ -185,9 +197,7 @@ impl Committee {
         // If N = 3f + 1 + k (0 <= k < 3)
         // then (2 N + 3) / 3 = 2f + 1 + (2k + 2)/3 = 2f + 1 + k = N - f
         let total_votes: Stake = self.authorities.values().map(|x| x.stake).sum();
-        let x = (total_votes + self.f_num - 1) as f64 / 2.0;
-        let ceil_result = x.ceil() as u32;
-        ceil_result
+        2 * total_votes / 3 + 1
     }
 
     /// Returns the stake required to reach availability (f+1).
@@ -198,19 +208,29 @@ impl Committee {
         (total_votes + 2) / 3
     }
 
-    pub fn optimistic_threshold(&self) -> Stake {
-        let total_votes: Stake = self.authorities.values().map(|x| x.stake).sum();
-        let x = (total_votes + 2 * self.f_num - 2) as f64 / 2.0;
-        let ceil_result = x.ceil() as u32;
-        ceil_result
-    }
-
     /// Returns a leader node in a round-robin fashion.
     /// This does not have to be changed because it works for odd and even numbers.
     pub fn leader(&self, seed: usize) -> PublicKey {
         let mut keys: Vec<_> = self.authorities.keys().cloned().collect();
         keys.sort();
         keys[seed % self.size()]
+    }
+
+    pub fn sub_leaders(&self, seed: usize, num_leaders: usize) -> Vec<PublicKey> {
+        let mut keys: Vec<_> = self.authorities.keys().cloned().collect();
+        keys.sort();
+
+        // Find the index of the seed in the sorted keys vector
+        let seed_index = seed % self.size();
+
+        // Collect the subsequent num_leader-1 pubKeys in the sorted array from the seed
+        let mut sub_leaders = Vec::with_capacity(num_leaders - 1);
+        for i in 1..num_leaders {
+            let index = (seed_index + i) % self.size(); // Wrap around if needed
+            sub_leaders.push(keys[index].clone());
+        }
+
+        sub_leaders
     }
 
     /// Returns the primary addresses of the target primary.
@@ -277,6 +297,23 @@ impl Committee {
             })
             .collect()
     }
+
+    pub fn get_public_keys(&self) -> Vec<PublicKey> {
+        self.authorities
+            .iter()
+            .map(|(name, _)| (name.clone()))
+            .collect()
+    }
+    pub fn get_bls_public_keys(&self) -> Vec<PublicKeyShareG2> {
+        self.authorities
+            .iter()
+            .map(|(_, x)| x.bls_pubkey_g2)
+            .collect()
+    }
+
+    pub fn get_bls_public_g2(&self, name: &PublicKey) -> PublicKeyShareG2 {
+        self.authorities.get(name).map(|x| x.bls_pubkey_g2).unwrap()
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -300,5 +337,33 @@ impl KeyPair {
 impl Default for KeyPair {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+//bls
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct BlsKeyPair {
+    /// The node's public key (and identifier).
+    pub nameg2: PublicKeyShareG2,
+    /// The node's secret key.
+    pub secret: SecretKeyShare,
+}
+
+impl Import for BlsKeyPair {}
+impl Export for BlsKeyPair {}
+
+impl BlsKeyPair {
+    pub fn new(nodes: usize, threshold: usize, path: String) {
+        crypto::create_bls_key_pairs(nodes, threshold, path);
+    }
+}
+
+impl Default for BlsKeyPair {
+    fn default() -> BlsKeyPair {
+        Self {
+            nameg2: PublicKeyShareG2::default(),
+            secret: SecretKeyShare::default(),
+        }
     }
 }

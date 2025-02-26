@@ -1,12 +1,15 @@
 // Copyright(C) Facebook, Inc. and its affiliates.
 use anyhow::{Context, Result};
 use clap::{crate_name, crate_version, App, AppSettings, ArgMatches, SubCommand};
+use config::BlsKeyPair;
+use config::Comm;
 use config::Export as _;
 use config::Import as _;
-use config::{Committee, KeyPair, Parameters, WorkerId};
+use config::{Committee, KeyPair, Parameters};
 use consensus::Consensus;
+use crypto::combine_keys;
 use env_logger::Env;
-use primary::{Header, Certificate, Primary, HeaderInfo};
+use primary::{Certificate, Primary};
 use store::Store;
 use tokio::sync::mpsc::{channel, Receiver};
 
@@ -25,9 +28,17 @@ async fn main() -> Result<()> {
                 .args_from_usage("--filename=<FILE> 'The file where to print the new key pair'"),
         )
         .subcommand(
+            SubCommand::with_name("generate_bls_keys")
+                .about("Print a fresh bls key pair to file")
+                .arg_from_usage("--nodes=<INT> 'total number of nodes in network'")
+                .arg_from_usage("--threshold=<INT>  'threshold number of keys require to verify'")
+                .arg_from_usage("--path=<String>  'Path for storing blskeys'"),
+        )
+        .subcommand(
             SubCommand::with_name("run")
                 .about("Run a node")
-                .args_from_usage("--keys=<FILE> 'The file containing the node keys'")
+                .args_from_usage("--edkeys=<FILE> 'The file containing the node keys'")
+                .args_from_usage("--blskeys=<FILE> 'The file containing the node keys'")
                 .args_from_usage("--committee=<FILE> 'The file containing committee information'")
                 .args_from_usage("--parameters=[FILE] 'The file containing the node parameters'")
                 .args_from_usage("--store=<PATH> 'The path where to create the data store'")
@@ -58,6 +69,23 @@ async fn main() -> Result<()> {
         ("generate_keys", Some(sub_matches)) => KeyPair::new()
             .export(sub_matches.value_of("filename").unwrap())
             .context("Failed to generate key pair")?,
+        ("generate_bls_keys", Some(sub_matches)) => BlsKeyPair::new(
+            sub_matches
+                .value_of("nodes")
+                .unwrap()
+                .parse::<usize>()
+                .unwrap(),
+            sub_matches
+                .value_of("threshold")
+                .unwrap()
+                .parse::<usize>()
+                .unwrap(),
+            sub_matches
+                .value_of("path")
+                .unwrap()
+                .parse::<String>()
+                .unwrap(),
+        ),
         ("run", Some(sub_matches)) => run(sub_matches).await?,
         _ => unreachable!(),
     }
@@ -66,15 +94,25 @@ async fn main() -> Result<()> {
 
 // Runs either a worker or a primary.
 async fn run(matches: &ArgMatches<'_>) -> Result<()> {
-    let key_file = matches.value_of("keys").unwrap();
+    let ed_key_file = matches.value_of("edkeys").unwrap();
+    let bls_key_file = matches.value_of("blskeys").unwrap();
     let committee_file = matches.value_of("committee").unwrap();
     let parameters_file = matches.value_of("parameters");
     let store_path = matches.value_of("store").unwrap();
 
     // Read the committee and node's keypair from file.
-    let keypair = KeyPair::import(key_file).context("Failed to load the node's keypair")?;
-    let comm =
-        Committee::import(committee_file).context("Failed to load the committee information")?;
+    let ed_keypair = KeyPair::import(ed_key_file).context("Failed to load the node's keypair")?;
+    let bls_keypair =
+        BlsKeyPair::import(bls_key_file).context("Failed to load the node's keypair")?;
+
+    let comm = Comm::import(committee_file).context("Failed to load the committee information")?;
+
+    let committee = Committee::new(comm.authorities);
+
+    let mut sorted_keys = committee.get_bls_public_keys();
+    sorted_keys.sort();
+
+    let combined_pubkey = combine_keys(&sorted_keys);
 
     // Load default parameters if none are specified.
     let parameters = match parameters_file {
@@ -84,7 +122,6 @@ async fn run(matches: &ArgMatches<'_>) -> Result<()> {
         None => Parameters::default(),
     };
 
-    let committee = Committee::new(comm.authorities, parameters.f_num);
     // Make the data store.
     let store = Store::new(store_path).context("Failed to create a store")?;
 
@@ -98,36 +135,27 @@ async fn run(matches: &ArgMatches<'_>) -> Result<()> {
             let (tx_new_certificates, rx_new_certificates) = channel(CHANNEL_CAPACITY);
             let (tx_feedback, rx_feedback) = channel(CHANNEL_CAPACITY);
             let (tx_consensus_header, rx_consensus_header) = channel(CHANNEL_CAPACITY);
-            let (tx_consensus_header_msg, rx_consensus_header_msg) = channel(CHANNEL_CAPACITY);
             Primary::spawn(
-                keypair,
+                ed_keypair,
+                bls_keypair,
                 committee.clone(),
+                sorted_keys,
+                combined_pubkey,
                 parameters.clone(),
                 store,
                 /* tx_consensus */ tx_new_certificates,
                 /* rx_consensus */ rx_feedback,
                 tx_consensus_header,
-                tx_consensus_header_msg,
             );
             Consensus::spawn(
                 committee,
                 parameters.gc_depth,
                 /* rx_primary */ rx_new_certificates,
-                rx_consensus_header_msg,
+                rx_consensus_header,
                 /* tx_primary */ tx_feedback,
                 tx_output,
             );
         }
-
-        // // Spawn a single worker.
-        // ("worker", Some(sub_matches)) => {
-        //     let id = sub_matches
-        //         .value_of("id")
-        //         .unwrap()
-        //         .parse::<WorkerId>()
-        //         .context("The worker id must be a positive integer")?;
-        //     Worker::spawn(keypair.name, id, committee, parameters, store);
-        // }
         _ => unreachable!(),
     }
 
@@ -139,8 +167,8 @@ async fn run(matches: &ArgMatches<'_>) -> Result<()> {
 }
 
 /// Receives an ordered list of certificates and apply any application-specific logic.
-async fn analyze(mut rx_output: Receiver<HeaderInfo>) {
-    while let Some(_header) = rx_output.recv().await {
+async fn analyze(mut rx_output: Receiver<Certificate>) {
+    while let Some(_certificate) = rx_output.recv().await {
         // NOTE: Here goes the application logic.
     }
 }

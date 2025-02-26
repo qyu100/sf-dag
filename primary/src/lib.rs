@@ -2,8 +2,10 @@
 #[macro_use]
 mod error;
 mod aggregators;
+mod batch_maker;
 mod certificate_waiter;
 mod core;
+mod garbage_collector;
 mod header_waiter;
 mod helper;
 mod messages;
@@ -12,11 +14,12 @@ mod primary;
 mod proposer;
 mod synchronizer;
 mod worker;
-mod batch_maker;
-mod garbage_collector;
-// #[cfg(test)]
-// #[path = "tests/common.rs"]
-// mod common;
+
+#[cfg(test)]
+#[path = "tests/common.rs"]
+mod common;
 
 pub use crate::messages::{Certificate, Header, HeaderInfo};
-pub use crate::primary::{HeaderType, Primary, WorkerPrimaryMessage, PrimaryWorkerMessage, Round, HeaderMessage};
+pub use crate::primary::{
+    ConsensusMessage, HeaderMessage, Primary, PrimaryWorkerMessage, Round, WorkerPrimaryMessage,
+};

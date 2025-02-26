@@ -10,30 +10,30 @@ from benchmark.remote import Bench, BenchError
 
 
 @task
-def local(ctx, debug=True):
+def local(ctx, debug=False, consensus_only=False, header_size=512):
     ''' Run benchmarks on localhost '''
     bench_params = {
         'faults': 0,
-        'nodes': 4,
+        'nodes': 10,
         'workers': 1,
-        'rate': 20_000,
-        'tx_size': 256,
-        'duration': 10,
-        "burst" : 3
+        'rate': 100_000,
+        'tx_size': 512,
+        'duration': 20,
+        "burst" : 50
     }
     node_params = {
-        'header_size': 4096_000,  # bytes
+        'consensus_only': consensus_only,
+        'header_size': header_size,  # bytes
         'max_header_delay': 1_000,  # ms
         'gc_depth': 50,  # rounds
         'sync_retry_delay': 10_000,  # ms
         'sync_retry_nodes': 3,  # number of nodes
-        'batch_size': 2_000,  # bytes
-        'tx_size': bench_params['tx_size'],  # bytes
+        'batch_size': header_size,  # bytescd
+        'tx_size': bench_params['tx_size'],
         'max_batch_delay': 200,  # ms
-        'f_num': 3
     }
     try:
-        ret = LocalBench(bench_params, node_params).run(debug)
+        ret = LocalBench(bench_params, node_params).run(debug, consensus_only)
         print(ret.result())
     except BenchError as e:
         Print.error(e)
@@ -47,19 +47,21 @@ def create(ctx, nodes=2):
     except BenchError as e:
         Print.error(e)
 
+
 @task
 def destroy(ctx):
     ''' Destroy the testbed '''
     try:
-        InstanceManager.make().terminate_instances()
+        InstanceManager.make().delete_instances()
     except BenchError as e:
         Print.error(e)
 
+
 @task
-def start(ctx, max=1):
+def start(ctx):
     ''' Start at most `max` machines per data center '''
     try:
-        InstanceManager.make().start_instances(max)
+        InstanceManager.make().start_instances()
     except BenchError as e:
         Print.error(e)
 
@@ -92,38 +94,38 @@ def install(ctx):
 
 
 @task
-def remote(ctx, burst = 50, debug=False):
+def remote(ctx, burst = 50, debug=False, consensus_only=False, header_size=512):
     ''' Run benchmarks on GCP '''
     bench_params = {
         'faults': 0,
-        'nodes': 4,
+        'nodes': 100,
         'workers': 1,
         'collocate': True,
         'rate': [100000],
         'tx_size': 512,
-        'duration': 30,
+        'duration': 60,
         'runs': 1,
         'burst' : [burst],
-        'f_num': 3
-    } 
+    }
 
     nodes = bench_params['nodes']
-    rate =  1000 * nodes
+    rate =  1000 * nodes * 20
     bench_params['rate'] = [rate]
 
     node_params = {
-        'header_size': 512000,  # bytes
+        'consensus_only': consensus_only,
+        'header_size': header_size,  # bytes
         'max_header_delay': 5_000,  # ms
         'gc_depth': 50,  # rounds
         'sync_retry_delay': 10_000,  # ms
         'sync_retry_nodes': 3,  # number of nodes
-        'batch_size': 512_000,
+        'batch_size': header_size,
         'tx_size': bench_params['tx_size'],  # bytes
         'max_batch_delay': 200,  # ms
-        'leaders_per_round': 3
+        'leaders_per_round': 67
     }
     try:
-        Bench(ctx).run(bench_params, node_params, debug)
+        Bench(ctx).run(bench_params, node_params, debug, consensus_only)
     except BenchError as e:
         Print.error(e)
 

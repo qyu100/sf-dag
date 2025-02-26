@@ -1,19 +1,23 @@
 // Copyright(C) Facebook, Inc. and its affiliates.
+use crate::certificate_waiter::CertificateWaiter;
 use crate::core::Core;
 use crate::error::DagError;
 use crate::garbage_collector::GarbageCollector;
 use crate::header_waiter::HeaderWaiter;
 use crate::helper::Helper;
-use crate::worker::Worker;
-use crate::messages::{Certificate, EchoHeader, EchoNoVoteMsg, ReadyNoVoteMsg, 
-    Header, HeaderInfo, HeaderInfoWithParents, HeaderWithParents, 
-    NoVoteMsg, ReadyHeader, Timeout, Vote};
+use crate::messages::{
+    Certificate, Header, HeaderInfo, HeaderInfoWithCertificate, HeaderWithCertificate, NoVoteMsg,
+    Timeout, Vote,
+};
+// use crate::payload_receiver::PayloadReceiver;
 use crate::proposer::Proposer;
 use crate::synchronizer::Synchronizer;
+use crate::worker::Worker;
 use async_trait::async_trait;
+use blsttc::PublicKeyShareG2;
 use bytes::Bytes;
-use config::{Committee, KeyPair, Parameters, WorkerId};
-use crypto::{Digest, PublicKey};
+use config::{BlsKeyPair, Committee, KeyPair, Parameters, WorkerId};
+use crypto::{BlsSignatureService, Digest, PublicKey, SignatureService};
 use futures::sink::SinkExt as _;
 use log::info;
 use network::{MessageHandler, Receiver as NetworkReceiver, Writer};
@@ -37,28 +41,27 @@ pub enum PrimaryMessage {
     NoVoteMsg(NoVoteMsg),
     Vote(Vote),
     Certificate(Certificate),
+    VerifiedCertificate(Certificate),
     CertificatesRequest(Vec<Digest>, /* requestor */ PublicKey),
-    Echo(EchoHeader),
-    Ready(ReadyHeader),
-    EchoNoVoteMsg(EchoNoVoteMsg),
-    ReadyNoVoteMsg(ReadyNoVoteMsg),
+    PayloadRequest(Digest, PublicKey),
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum HeaderMessage {
-    HeaderWithParents(HeaderWithParents),
-    HeaderInfoWithParents(HeaderInfoWithParents),
+    HeaderWithCertificate(HeaderWithCertificate),
+    HeaderInfoWithCertificate(HeaderInfoWithCertificate),
     Header(Header),
     HeaderInfo(HeaderInfo),
 }
-
-
+pub enum ConsensusMessage {
+    HeaderInfo(HeaderInfo),
+    Certificate(Certificate),
+}
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum HeaderType {
     Header(Header),
     HeaderInfo(HeaderInfo),
-} 
-
+}
 
 /// The messages sent by the primary to its workers.
 #[derive(Debug, Serialize, Deserialize)]
@@ -83,13 +86,15 @@ pub struct Primary;
 impl Primary {
     pub fn spawn(
         keypair: KeyPair,
+        bls_keypair: BlsKeyPair,
         committee: Committee,
+        sorted_keys: Vec<PublicKeyShareG2>,
+        combined_key: PublicKeyShareG2,
         parameters: Parameters,
         store: Store,
         tx_consensus: Sender<Certificate>,
-        rx_consensus: Receiver<HeaderInfo>,
-        tx_consensus_header: Sender<Header>,
-        tx_consensus_header_msg: Sender<HeaderType>,
+        rx_consensus: Receiver<Certificate>,
+        tx_consensus_header_msg: Sender<ConsensusMessage>,
     ) {
         // let (tx_others_digests, rx_others_digests) = channel(CHANNEL_CAPACITY);
         let (tx_our_digests, rx_our_digests) = channel(CHANNEL_CAPACITY);
@@ -105,14 +110,15 @@ impl Primary {
         let (tx_certificates_loopback, rx_certificates_loopback) = channel(CHANNEL_CAPACITY);
         let (tx_primary_messages, rx_primary_messages) = channel(CHANNEL_CAPACITY);
         let (tx_cert_requests, rx_cert_requests) = channel(CHANNEL_CAPACITY);
-        let (tx_timeout_core, rx_timeout_proposer) = channel(CHANNEL_CAPACITY);
 
         // Write the parameters to the logs.
         parameters.log();
 
         // Parse the public and secret key of this authority.
         let name = keypair.name;
+        let _name_bls = bls_keypair.nameg2;
         let secret = keypair.secret;
+        let bls_secret = bls_keypair.secret;
 
         // Atomic variable use to synchronizer all tasks with the latest consensus round. This is only
         // used for cleanup. The only tasks that write into this variable is `GarbageCollector`.
@@ -128,7 +134,7 @@ impl Primary {
             address,
             /* handler */
             PrimaryReceiverHandler {
-                tx_primary_messages,
+                tx_primary_messages: tx_primary_messages.clone(),
                 tx_cert_requests,
             },
         );
@@ -155,32 +161,41 @@ impl Primary {
         //     "Primary {} listening to workers messages on {}",
         //     name, address
         // );
-        Worker::spawn(
-            name,
-            0,
-            committee.clone(),
-            parameters.clone(),
-            tx_our_digests,
-        );
 
-        // The `Synchronizer` provides auxiliary methods helping to `Core` to sync.
+        if !parameters.consensus_only {
+            Worker::spawn(
+                name,
+                0,
+                committee.clone(),
+                parameters.clone(),
+                tx_our_digests,
+            );
+        }
+
+        //The `Synchronizer` provides auxiliary methods helping to `Core` to sync.
         let synchronizer = Synchronizer::new(
             name,
             &committee,
             store.clone(),
             /* tx_header_waiter */ tx_sync_headers,
             /* tx_certificate_waiter */ tx_sync_certificates,
-            parameters.gc_depth,
         );
 
+        // The `SignatureService` is used to require signatures on specific digests.
+        let signature_service = SignatureService::new(secret);
+        let bls_signature_service = BlsSignatureService::new(bls_secret);
+        // let sorted_keys = Arc::new(sorted_keys);
         // The `Core` receives and handles headers, votes, and certificates from the other primaries.
         Core::spawn(
             name,
-            committee.clone(),
+            Arc::new(committee.clone()),
             store.clone(),
             synchronizer,
+            signature_service.clone(),
+            bls_signature_service,
             consensus_round.clone(),
             parameters.gc_depth,
+            tx_primary_messages,
             /* rx_primaries */ rx_primary_messages,
             /* rx_header_waiter */ rx_headers_loopback,
             /* rx_certificate_waiter */ rx_certificates_loopback,
@@ -188,11 +203,12 @@ impl Primary {
             rx_timeout,
             rx_no_vote_msg,
             tx_consensus,
-            /* tx_proposer */ tx_parents,
-            tx_timeout_core,
+            /* tx_proposer */ tx_parents.clone(),
             tx_timeout_cert,
             tx_no_vote_cert,
             tx_consensus_header_msg,
+            sorted_keys.clone(),
+            combined_key.clone(),
         );
 
         // Keeps track of the latest consensus round and allows other tasks to clean up their their internal state
@@ -216,27 +232,27 @@ impl Primary {
             /* tx_core */ tx_headers_loopback,
         );
 
-        // // The `CertificateWaiter` waits to receive all the ancestors of a certificate before looping it back to the
-        // // `Core` for further processing.
-        // CertificateWaiter::spawn(
-        //     store.clone(),
-        //     /* rx_synchronizer */ rx_sync_certificates,
-        //     /* tx_core */ tx_certificates_loopback,
-        // );
+        // The `CertificateWaiter` waits to receive all the ancestors of a certificate before looping it back to the
+        // `Core` for further processing.
+        CertificateWaiter::spawn(
+            store.clone(),
+            /* rx_synchronizer */ rx_sync_certificates,
+            /* tx_core */ tx_certificates_loopback,
+        );
 
         // When the `Core` collects enough parent certificates, the `Proposer` generates a new header with new batch
         // digests from our workers and it back to the `Core`.
         Proposer::spawn(
             name,
             committee.clone(),
+            signature_service,
             parameters.header_size,
-            parameters.batch_size,
             parameters.tx_size,
             parameters.max_header_delay,
+            parameters.consensus_only,
             /* rx_core */ rx_parents,
             /* rx_workers */ rx_our_digests,
             /* tx_core */ tx_headers,
-            rx_timeout_proposer,
             /* tx_core_timeout */ tx_timeout,
             rx_timeout_cert,
             tx_no_vote_msg,
@@ -274,13 +290,11 @@ impl MessageHandler for PrimaryReceiverHandler {
 
         // Deserialize and parse the message.
         match bincode::deserialize(&serialized).map_err(DagError::SerializationError)? {
-            PrimaryMessage::CertificatesRequest(missing, requestor) => 
-            self.tx_cert_requests
+            PrimaryMessage::CertificatesRequest(missing, requestor) => self
+                .tx_cert_requests
                 .send((missing, requestor))
                 .await
                 .expect("Failed to send primary message"),
-
-            
             request => self
                 .tx_primary_messages
                 .send(request)
