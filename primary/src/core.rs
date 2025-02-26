@@ -348,7 +348,6 @@ impl Core {
             .get(&(round, digest))
             .map(|ready_aggregator| ready_aggregator.check_threshold(self.committee.quorum_threshold()))
             .unwrap_or(false){
-            // Optimistic threshold reached, send to proposer
             debug!("Processing missing header for digest: {:?}", digest);
             if !has_leader {
                 if let Some(timeout_agg) = self.timeout_aggregators.get(&(round - 1)) {
@@ -422,35 +421,7 @@ impl Core {
             .or_insert_with(ThresholdAggregator::new);
 
         let weight = aggregator.append(author, &self.committee)?;
-        if weight >= self.committee.optimistic_threshold() {
-            // Optimistic threshold reached, send to proposer
-            if let Some((header_info, has_leader)) = self.processing_header_infos.get(&digest) {
-                if !has_leader {
-                    if let Some(timeout_agg) = self.timeout_aggregators.get(&(round - 1)) {
-                        if !timeout_agg.check_threshold(self.committee.quorum_threshold()) {
-                            self.timeout_suspended
-                                .entry(round - 1)
-                                .or_insert_with(Vec::new)
-                                .push(header_info.clone());
-                            debug!("Processing of {} suspended: missing timeout quorum", digest);
-                            return Ok(());
-                        }
-                        if header_info.author == self.committee.leader(round as usize) {
-                            self.no_vote_suspended
-                                .entry(round - 1)
-                                .or_insert_with(Vec::new)
-                                .push(header_info.clone());
-                            if !self.no_vote_cert_sent.get(&(header_info.round - 1)).unwrap_or(&false) == true {
-                                debug!("Processing of {} suspended: missing no_vote quorum", digest);
-                                return Ok(());          
-                            }
-                        }
-                    debug!("Timeout has reached quorum for round {:?}", round - 1);
-                    }
-                }
-                self.send_consensus_header(round, digest, header_info.clone()).await?;
-            }
-        } else if weight >= self.committee.quorum_threshold() {
+        if weight >= self.committee.quorum_threshold() {
             // 2f+1 reached, send ready message
             if !self.ready_header_sent.get(&(round, digest)).unwrap_or(&false) {
                 let addresses = self.committee.others_primaries(&self.name)
@@ -608,7 +579,6 @@ impl Core {
 
         if let Some(ready_no_vote_aggregator) = self.ready_no_vote_aggregators.get(&(round, digest)) {
             if ready_no_vote_aggregator.check_threshold(self.committee.quorum_threshold()) {
-                // Optimistic threshold reached, send to proposer
                 debug!("Processing missing no_vote for digest: {:?}", digest);
                 if self.no_vote_cert_sent.contains_key(&round) {
                     return Ok(());
@@ -670,29 +640,6 @@ impl Core {
             .or_insert_with(ThresholdAggregator::new);
 
         let weight = aggregator.append(author, &self.committee)?;
-
-        if weight >= self.committee.optimistic_threshold() {
-            if let Some(no_vote_msg) = self.processing_no_vote_msgs.get(&digest) {
-                if !self.no_vote_cert_sent.contains_key(&round) {
-                    let no_vote_cert = NoVoteCert {
-                        round,
-                        no_votes: aggregator.authors().into_iter().cloned().collect(),
-                    };
-                    self.tx_no_vote_cert
-                        .send((no_vote_cert, no_vote_msg.round))
-                        .await
-                        .expect("Failed to send no vote cert");
-                    self.no_vote_cert_sent.insert(round, true);
-                    // process has_leader no_vote suspended vertex.
-                    if let Some(header_infos) = self.no_vote_suspended.remove(&round) {
-                        for header_info in header_infos {
-                            let digest = header_info.id;
-                            self.send_consensus_header(round, digest, header_info.clone()).await?;
-                        }
-                    }
-                }
-            }
-        }
 
         if weight < self.committee.quorum_threshold() || *self.ready_no_vote_sent.get(&(round, digest)).unwrap_or(&false) {
             return Ok(());
