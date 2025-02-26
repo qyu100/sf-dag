@@ -159,7 +159,7 @@ impl Proposer {
             self.header_size / self.tx_size
         };
 
-        let mut payload ;
+        let mut payload;
         if self.consensus_only {
             payload = vec![vec![0u8; self.tx_size]; (self.header_size / self.tx_size)];
         } else {
