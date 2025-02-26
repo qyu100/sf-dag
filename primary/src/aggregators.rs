@@ -6,6 +6,34 @@ use crypto::PublicKey;
 use log::info;
 use std::collections::HashSet;
 
+pub struct ThresholdAggregator {
+    weight: Stake,
+    used: HashSet<PublicKey>,
+}
+
+impl ThresholdAggregator {
+    pub fn new() -> Self {
+        Self {
+            weight: 0,
+            used: HashSet::new(),
+        }
+    }
+
+    pub fn append(&mut self, author: PublicKey, committee: &Committee) -> DagResult<Stake> {
+        ensure!(self.used.insert(author), DagError::AuthorityReuse(author));
+        self.weight += committee.stake(&author);
+        Ok(self.weight)
+    }
+
+    pub fn check_threshold(&self, threshold: Stake) -> bool {
+        self.weight >= threshold
+    }
+
+    pub fn authors(&self) -> &HashSet<PublicKey> {
+        &self.used
+    }
+}
+
 // Aggregates votes for a particular header into a certificate.
 pub struct VotesAggregator {
     weight: Stake,

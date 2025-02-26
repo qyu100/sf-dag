@@ -1,5 +1,5 @@
 // Copyright(C) Facebook, Inc. and its affiliates.
-use crate::aggregators::{CertificatesAggregator, HeadersAggregator, VotesAggregator};
+use crate::aggregators::{CertificatesAggregator, HeadersAggregator, VotesAggregator, ThresholdAggregator};
 use crate::error::{DagError, DagResult};
 use crate::messages::{Certificate, Header, Vote, ReadyHeader, EchoHeader, HeaderInfo, HeaderWithParents, HeaderInfoWithParents};
 use crate::primary::{PrimaryMessage, Round, HeaderMessage, HeaderType};
@@ -74,6 +74,8 @@ pub struct Core {
     ready_headers: HashMap<(Round, Digest), HashSet<PublicKey>>,
     ready_header_sent: HashMap<(Round, Digest), bool>,
     consensus_header_sent: HashMap<(Round, Digest), bool>,
+    echo_header_aggregators: HashMap<(Round, Digest), ThresholdAggregator>,
+    ready_header_aggregators: HashMap<(Round, Digest), ThresholdAggregator>,
 }
 
 impl Core {
@@ -125,6 +127,8 @@ impl Core {
                 ready_headers: HashMap::new(),
                 ready_header_sent: HashMap::new(),
                 consensus_header_sent: HashMap::new(),
+                echo_header_aggregators: HashMap::new(),
+                ready_header_aggregators: HashMap::new(),
             }
             .run()
             .await;
@@ -187,7 +191,8 @@ impl Core {
                 header_info = h_info.clone();
             }
         }
-
+        let round = header_info.round;
+        let digest = header_info.id;
         self.processing_header_infos
             .entry(header_info.id)
             .or_insert(header_info.clone());
@@ -223,7 +228,34 @@ impl Core {
                 DagError::HeaderRequiresQuorum(header_info.id.clone())
             );
         }
+        if self.ready_header_aggregators
+            .get(&(round, digest))
+            .map(|ready_aggregator| ready_aggregator.check_threshold(self.committee.quorum_threshold()))
+            .unwrap_or(false){
+            debug!("Processing missing header for digest: {:?}", digest);
+            if !self.consensus_header_sent.contains_key(&(round, digest)) {
+                // info!("Sending header {:?} to consensus at round {:?}", header_info.id, header_info.round);
+                self.tx_consensus_header_msg
+                    .send(HeaderType::HeaderInfo(header_info.clone()))
+                    .await
+                    .expect("Failed to send header_info to consensus");
+                self.consensus_header_sent.insert((round, digest), true);
+            }
+            // Check if we have enough headers to enter a new dag round and propose a header.
+            if let Some(parents) = self
+                .header_aggregators
+                .entry(header_info.round)
+                .or_insert_with(|| Box::new(HeadersAggregator::new()))
+                .append(header_info.clone(), &self.committee)? {
+                // Send it to the `Proposer`.
+                self.tx_proposer
+                    .send((parents, header_info.round))
+                    .await
+                    .expect("Failed to send header_info to proposer");
+            } 
+        }
         // Store the header.
+        let round = header_info.round;
         let hid = header_info.id;
         let header_type = HeaderType::HeaderInfo(header_info.clone());
         let bytes = bincode::serialize(&header_type).expect("Failed to serialize header");
@@ -247,14 +279,10 @@ impl Core {
             .or_insert_with(Vec::new)
             .extend(handlers);
 
-        // Initialize the HashMap if it doesn't exist
-        self.echo_headers
-            .entry((header_info.clone().round, header_info.clone().id))
-            .or_insert_with(HashSet::new)
-            .insert(self.name.clone());
-
-        // Log the broadcast for debugging purposes
-        // debug!("Broadcasted EchoHeader with hash {:?}", header_info.clone().round);
+        let aggregator = self.echo_header_aggregators
+            .entry((round, hid))
+            .or_insert_with(ThresholdAggregator::new);
+        aggregator.append(self.name, &self.committee)?;
 
         Ok(())
     }
@@ -264,48 +292,41 @@ impl Core {
         // debug!("Processing {:?}", echo_header);
 
         let round = echo_header.round;
-        let digest = echo_header.id.clone();
-        let author = echo_header.author.clone();
+        let digest = echo_header.id;
+        let author = echo_header.author;
 
-        self.echo_headers
-            .entry((round, digest.clone()))
-            .or_insert_with(HashSet::new)
-            .insert(author.clone());
+        let aggregator = self.echo_header_aggregators
+            .entry((round, digest))
+            .or_insert_with(ThresholdAggregator::new);
 
-        // info!("Initialized echo_headers: {:?}", self.echo_headers);
+        let weight = aggregator.append(author, &self.committee)?;
 
         // Check if we have received 2f+1 EchoHeaders for this round and digest
-        if let Some(echo_key) = self.echo_headers.get(&(round, digest.clone())) {
-            let weight: Stake = echo_key.iter().map(|author| self.committee.stake(author)).sum();
-            if weight >= self.committee.quorum_threshold() {
-                if !self.ready_header_sent.contains_key(&(echo_header.round, echo_header.id.clone())) {
-                    // Send <Ready, H(m)> to primaries.
-                    let addresses = self
-                        .committee
-                        .others_primaries(&self.name)
-                        .iter()
-                        .map(|(_, info)| info.primary_to_primary)
-                        .collect();
-                    
-                    let ready_header = ReadyHeader::new(&echo_header, &self.name).await;
-                    let bytes = bincode::serialize(&PrimaryMessage::Ready(ready_header))
-                        .expect("Failed to serialize ReadyHeader");
-                    let handlers = self.network.broadcast(addresses, Bytes::from(bytes)).await;
+        if weight >= self.committee.quorum_threshold() {
+            if !self.ready_header_sent.contains_key(&(round, digest)) {
+                // Send <Ready, H(m)> to primaries.
+                let addresses = self
+                    .committee
+                    .others_primaries(&self.name)
+                    .iter()
+                    .map(|(_, info)| info.primary_to_primary)
+                    .collect();
                 
-                    self.cancel_handlers
-                        .entry(echo_header.round)
-                        .or_insert_with(Vec::new)
-                        .extend(handlers);
+                let ready_header = ReadyHeader::new(&echo_header, &self.name).await;
+                let bytes = bincode::serialize(&PrimaryMessage::Ready(ready_header))
+                    .expect("Failed to serialize ReadyHeader");
+                let handlers = self.network.broadcast(addresses, Bytes::from(bytes)).await;
+            
+                self.cancel_handlers
+                    .entry(echo_header.round)
+                    .or_insert_with(Vec::new)
+                    .extend(handlers);
 
-                    self.ready_headers
-                        .entry((round, echo_header.id.clone()))
-                        .or_insert_with(HashSet::new)
-                        .insert(self.name); 
-
-                    self.ready_header_sent.insert((echo_header.round.clone(), echo_header.id.clone()), true);
-                    // info!("Broadcasted ReadyHeader with hash {:?}", echo_header.round);
-                };
-            }
+                let ready_aggregator = self.ready_header_aggregators
+                    .entry((round, digest))
+                    .or_insert_with(ThresholdAggregator::new);
+                ready_aggregator.append(self.name, &self.committee)?;
+            };
         };
 
         Ok(())
@@ -317,82 +338,74 @@ impl Core {
         // debug!("Processing {:?}", ready_header);
 
         let round = ready_header.round;
-        let digest = ready_header.id.clone();
-        let author = ready_header.author.clone();
+        let digest = ready_header.id;
+        let author = ready_header.author;
     
-        // Initialize the HashMap if it doesn't exist
-        self.ready_headers
-            .entry((round, digest.clone()))
-            .or_insert_with(HashSet::new)
-            .insert(author.clone());    
+        let aggregator = self.ready_header_aggregators
+            .entry((round, digest))
+            .or_insert_with(ThresholdAggregator::new);
+        let weight = aggregator.append(author, &self.committee)?;
         
-        if let Some(ready_key) = self.ready_headers.get(&(round, digest.clone())) {
-            let mut weight: Stake = ready_key.iter().map(|author| self.committee.stake(author)).sum();
-            // info!("weight: {:?}", weight);
-                // Check if we have received f+1 <Ready, H(m)> for this round and digest, send <Ready, H(m)>
-            if weight >= self.committee.validity_threshold() 
-                && weight < self.committee.quorum_threshold() {
-                if !self.ready_header_sent.contains_key(&(ready_header.round, ready_header.id.clone())) {
-                    // Send <Ready, H(m)> to primaries.
-                    let addresses = self
-                        .committee
-                        .others_primaries(&self.name)
-                        .iter()
-                        .map(|(_, info)| info.primary_to_primary)
-                        .collect();
-                    
-                    let new_ready_header = ReadyHeader::new_ready_header(&ready_header, &self.name).await;
-                    let bytes = bincode::serialize(&PrimaryMessage::Ready(new_ready_header.clone()))
-                        .expect("Failed to serialize ReadyHeader");
-                    let handlers = self.network.broadcast(addresses, Bytes::from(bytes)).await;
+        if weight >= self.committee.validity_threshold() 
+            && weight < self.committee.quorum_threshold() {
+            if !self.ready_header_sent.contains_key(&(ready_header.round, digest)) {
+                // Send <Ready, H(m)> to primaries.
+                let addresses = self
+                    .committee
+                    .others_primaries(&self.name)
+                    .iter()
+                    .map(|(_, info)| info.primary_to_primary)
+                    .collect();
                 
-                    self.cancel_handlers
-                        .entry(ready_header.clone().round)
-                        .or_insert_with(Vec::new)
-                        .extend(handlers);
-                    
-                    self.ready_headers
-                        .entry((round, ready_header.id))
-                        .or_insert_with(HashSet::new)
-                        .insert(self.name); 
+                let new_ready_header = ReadyHeader::new_ready_header(&ready_header, &self.name).await;
+                let bytes = bincode::serialize(&PrimaryMessage::Ready(new_ready_header.clone()))
+                    .expect("Failed to serialize ReadyHeader");
+                let handlers = self.network.broadcast(addresses, Bytes::from(bytes)).await;
+            
+                self.cancel_handlers
+                    .entry(round)
+                    .or_insert_with(Vec::new)
+                    .extend(handlers);
+                
+                self.ready_headers
+                    .entry((round, digest))
+                    .or_insert_with(HashSet::new)
+                    .insert(self.name); 
 
-                    self.ready_header_sent.insert((ready_header.round.clone(), ready_header.id.clone()), true);
-                    weight += self.committee.stake(&self.name);
-                    // info!("sent ready header!");
-                }
+                self.ready_header_sent.insert((round, digest), true);
+                // info!("sent ready header!");
+            }
+        }
+
+        // Check if we have received 2f+1 <Ready, H(m)> 
+        if weight >= self.committee.quorum_threshold() {  
+            if !self.processing_header_infos.contains_key(&digest) {
+                debug!("Processing of {} suspended: missing header message", digest);
+                return Ok(());
             }
 
-            // Check if we have received 2f+1 <Ready, H(m)> 
-            if weight >= self.committee.quorum_threshold() {  
-                loop {
-                    if self.processing_header_infos.get(&ready_header.id).is_some() {
-                        break;
-                    }
+            if let Some(header_info) = self.processing_header_infos.get(&digest) {
+                // Send header to consensus
+                if !self.consensus_header_sent.contains_key(&(round, digest)) {
+                    // info!("Sending header {:?} to consensus at round {:?}", header_info.id, header_info.round);
+                    self.tx_consensus_header_msg
+                        .send(HeaderType::HeaderInfo(header_info.clone()))
+                        .await
+                        .expect("Failed to send header_info to consensus");
+                    self.consensus_header_sent.insert((round, digest), true);
                 }
-
-                if let Some(header_info) = self.processing_header_infos.get(&ready_header.id) {
-                    // Send header to consensus
-                    if !self.consensus_header_sent.contains_key(&(header_info.round, header_info.id.clone())) {
-                        // info!("Sending header {:?} to consensus at round {:?}", header_info.id, header_info.round);
-                        self.tx_consensus_header_msg
-                            .send(HeaderType::HeaderInfo(header_info.clone()))
-                            .await
-                            .expect("Failed to send header_info to consensus");
-                        self.consensus_header_sent.insert((header_info.round.clone(), header_info.id.clone()), true);
-                    }
-                    // Check if we have enough headers to enter a new dag round and propose a header.
-                    if let Some(parents) = self
-                        .header_aggregators
-                        .entry(header_info.round)
-                        .or_insert_with(|| Box::new(HeadersAggregator::new()))
-                        .append(header_info.clone(), &self.committee)? {
-                        // Send it to the `Proposer`.
-                        self.tx_proposer
-                            .send((parents, header_info.round))
-                            .await
-                            .expect("Failed to send header_info to proposer");
-                    } 
-                }
+                // Check if we have enough headers to enter a new dag round and propose a header.
+                if let Some(parents) = self
+                    .header_aggregators
+                    .entry(header_info.round)
+                    .or_insert_with(|| Box::new(HeadersAggregator::new()))
+                    .append(header_info.clone(), &self.committee)? {
+                    // Send it to the `Proposer`.
+                    self.tx_proposer
+                        .send((parents, header_info.round))
+                        .await
+                        .expect("Failed to send header_info to proposer");
+                } 
             }
         }
         Ok(())
@@ -445,7 +458,7 @@ impl Core {
     fn sanitize_echo_header(&mut self, echo_header: &EchoHeader) -> DagResult<()> {
         ensure!(
             self.gc_round <= echo_header.round,
-            DagError::TooOld(echo_header.id.clone(), echo_header.round)
+            DagError::TooOld(echo_header.id, echo_header.round)
         );
 
         // TODO [issue #3]: Prevent bad nodes from sending junk headers with high round numbers.
@@ -456,7 +469,7 @@ impl Core {
     fn sanitize_ready_header(&mut self, ready_header: &ReadyHeader) -> DagResult<()> {
         ensure!(
             self.gc_round <= ready_header.round,
-            DagError::TooOld(ready_header.id.clone(), ready_header.round)
+            DagError::TooOld(ready_header.id, ready_header.round)
         );
 
         // TODO [issue #3]: Prevent bad nodes from sending junk headers with high round numbers.
@@ -548,6 +561,8 @@ impl Core {
                 self.certificates_aggregators.retain(|k, _| k >= &gc_round);
                 self.cancel_handlers.retain(|k, _| k >= &gc_round);
                 self.gc_round = gc_round;
+                self.echo_header_aggregators.retain(|(r, _), _| r >= &gc_round);
+                self.ready_header_aggregators.retain(|(r, _), _| r >= &gc_round);
             }
         }
     }

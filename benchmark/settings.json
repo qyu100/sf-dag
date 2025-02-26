@@ -1,22 +1,16 @@
 {
     "key": {
-        "name": "aws",
-        "path": "/Users/asonnino/.ssh/aws"
+        "name": "sf-dag",
+        "path": "/data/yqy/.ssh/sf-dag.pem"
     },
     "port": 5000,
     "repo": {
-        "name": "narwhal",
-        "url": "https://github.com/asonnino/narwhal",
-        "branch": "bullshark"
+        "name": "sf-dag",
+        "url": "https://github.com/qyu100/sf-dag.git",
+        "branch": "sf-bullshark-timeout"
     },
     "instances": {
-        "type": "m5d.8xlarge",
-        "regions": [
-            "us-east-1",
-            "eu-north-1",
-            "ap-southeast-2",
-            "us-west-1",
-            "ap-northeast-1"
-        ]
+        "machine_type": "m5.xlarge",
+        "zones": ["us-east-2","us-west-1","eu-west-3","eu-west-2","ap-southest-1"]
     }
 }
