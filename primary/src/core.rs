@@ -482,29 +482,6 @@ impl Core {
                 debug!("Assembled {:?}", certificate);
                 // self.processed_headers.insert(certificate.header_id.clone());
 
-                // Broadcast the certificate.
-                // let addresses = self
-                //     .committee
-                //     .others_primaries(&self.name)
-                //     .iter()
-                //     .map(|(_, x)| x.primary_to_primary)
-                //     .collect();
-                // let bytes = bincode::serialize(&PrimaryMessage::Certificate(certificate.clone()))
-                //     .expect("Failed to serialize our own certificate");
-                // let handlers = self.network.broadcast(addresses, Bytes::from(bytes)).await;
-                // self.cancel_handlers
-                //     .entry(certificate.round())
-                //     .or_insert_with(Vec::new)
-                //     .extend(handlers);
-
-                certificate
-                    .verify(&self.committee, &self.sorted_keys, &self.combined_pubkey)
-                    .map_err(DagError::from)
-                    .unwrap();
-                debug!(
-                    "Certificate verified for header {:?} round {:?}",
-                    certificate.header_id, certificate.round
-                );
                 let _ = self.process_certificate(certificate).await;
             }
         }
@@ -647,9 +624,9 @@ impl Core {
                 DagError::UnexpectedVote(vote.id.clone())
             );
         }
-        Ok(())
         // Verify the vote.
-        // vote.verify(&self.committee).map_err(DagError::from)
+        vote.verify(&self.committee).map_err(DagError::from)
+        // Ok(())
     }
 
     fn sanitize_certificate(
@@ -661,26 +638,6 @@ impl Core {
             self.gc_round <= certificate.round(),
             DagError::TooOld(certificate.digest(), certificate.round())
         );
-
-        // if !self.processed_headers.contains(&certificate.header_id) {
-        //     // Verify the certificate (and the embedded header).
-        //     let committee = Arc::clone(&self.committee);
-        //     let sorted_keys = Arc::clone(&self.sorted_keys);
-        //     let tx_primary = tx_primary.clone();
-        //     let combined_key = Arc::clone(&self.combined_pubkey);
-
-        //     tokio::task::spawn_blocking(move || {
-        //         certificate
-        //             .verify(&committee, &sorted_keys, &combined_key)
-        //             .map_err(DagError::from)
-        //             .unwrap();
-        //         info!(
-        //             "ExtCertificate verified for header {:?} round {:?}",
-        //             certificate.header_id, certificate.round
-        //         );
-        //         let _ = tx_primary.blocking_send(PrimaryMessage::VerifiedCertificate(certificate));
-        //     });
-        // }
 
         Ok(())
     }
@@ -723,9 +680,6 @@ impl Core {
                         PrimaryMessage::Certificate(certificate) => {
                             let res = self.sanitize_certificate(&certificate, &sender_channel);
                             res
-                        },
-                        PrimaryMessage::VerifiedCertificate(certificate) => {
-                                self.process_certificate(certificate).await
                         },
                         _ => panic!("Unexpected core message")
                     }

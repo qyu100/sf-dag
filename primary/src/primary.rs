@@ -41,7 +41,6 @@ pub enum PrimaryMessage {
     NoVoteMsg(NoVoteMsg),
     Vote(Vote),
     Certificate(Certificate),
-    VerifiedCertificate(Certificate),
     CertificatesRequest(Vec<Digest>, /* requestor */ PublicKey),
     PayloadRequest(Digest, PublicKey),
 }
