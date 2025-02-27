@@ -19,10 +19,10 @@ def local(ctx, debug=True):
         'rate': 20_000,
         'tx_size': 256,
         'duration': 10,
-        "burst" : 3
+        "burst" : 10
     }
     node_params = {
-        'header_size': 4096_000,  # bytes
+        'header_size': 512_000,  # bytes
         'max_header_delay': 1_000,  # ms
         'gc_depth': 50,  # rounds
         'sync_retry_delay': 10_000,  # ms
@@ -92,24 +92,20 @@ def install(ctx):
 
 
 @task
-def remote(ctx, burst = 50, debug=False):
+def remote(ctx, burst = 40, debug=False):
     ''' Run benchmarks on GCP '''
     bench_params = {
         'faults': 0,
-        'nodes': 4,
+        'nodes': 10,
         'workers': 1,
         'collocate': True,
-        'rate': [100000],
+        'rate': [2000],
         'tx_size': 512,
         'duration': 30,
         'runs': 1,
         'burst' : [burst],
         'f_num': 3
-    } 
-
-    nodes = bench_params['nodes']
-    rate =  1000 * nodes
-    bench_params['rate'] = [rate]
+    }
 
     node_params = {
         'header_size': 512000,  # bytes
@@ -117,10 +113,10 @@ def remote(ctx, burst = 50, debug=False):
         'gc_depth': 50,  # rounds
         'sync_retry_delay': 10_000,  # ms
         'sync_retry_nodes': 3,  # number of nodes
-        'batch_size': 512_000,
+        'batch_size': 512,
         'tx_size': bench_params['tx_size'],  # bytes
-        'max_batch_delay': 200,  # ms
-        'leaders_per_round': 3
+        'max_batch_delay': 10,  # ms
+        'f_num': 3
     }
     try:
         Bench(ctx).run(bench_params, node_params, debug)
