@@ -155,13 +155,15 @@ impl Primary {
         //     "Primary {} listening to workers messages on {}",
         //     name, address
         // );
-        Worker::spawn(
-            name,
-            0,
-            committee.clone(),
-            parameters.clone(),
-            tx_our_digests,
-        );
+        if !parameters.consensus_only {
+            Worker::spawn(
+                name,
+                0,
+                committee.clone(),
+                parameters.clone(),
+                tx_our_digests,
+            );
+        }
 
         // The `Synchronizer` provides auxiliary methods helping to `Core` to sync.
         let synchronizer = Synchronizer::new(
@@ -241,6 +243,7 @@ impl Primary {
             rx_timeout_cert,
             tx_no_vote_msg,
             rx_no_vote_cert,
+            parameters.consensus_only,
         );
 
         // The `Helper` is dedicated to reply to certificates requests from other primaries.

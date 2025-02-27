@@ -37,6 +37,7 @@ class LocalBench:
 
     def run(self, debug=False, consensus_only=False):
         assert isinstance(debug, bool)
+        assert isinstance(consensus_only, bool)
         Print.heading('Starting local benchmark')
 
         # Kill any previous testbed.
@@ -123,7 +124,7 @@ class LocalBench:
 
             # Parse logs and return the parser.
             Print.info('Parsing logs...')
-            return LogParser.process(PathMaker.logs_path(), self.bench_parameters.burst)
+            return LogParser.process(PathMaker.logs_path(), self.bench_parameters.burst, consensus_only=consensus_only)
 
         except (subprocess.SubprocessError, ParseError) as e:
             self._kill_nodes()

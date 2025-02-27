@@ -10,7 +10,7 @@ from benchmark.remote import Bench, BenchError
 
 
 @task
-def local(ctx, debug=True):
+def local(ctx, debug=True, consensus_only=False):
     ''' Run benchmarks on localhost '''
     bench_params = {
         'faults': 0,
@@ -22,6 +22,7 @@ def local(ctx, debug=True):
         "burst" : 10
     }
     node_params = {
+        'consensus_only': consensus_only,
         'header_size': 512_000,  # bytes
         'max_header_delay': 1_000,  # ms
         'gc_depth': 50,  # rounds
@@ -33,7 +34,7 @@ def local(ctx, debug=True):
         'f_num': 3
     }
     try:
-        ret = LocalBench(bench_params, node_params).run(debug)
+        ret = LocalBench(bench_params, node_params).run(debug, consensus_only)
         print(ret.result())
     except BenchError as e:
         Print.error(e)
@@ -92,7 +93,7 @@ def install(ctx):
 
 
 @task
-def remote(ctx, burst = 40, debug=False):
+def remote(ctx, burst = 40, debug=False, consensus_only=True):
     ''' Run benchmarks on GCP '''
     bench_params = {
         'faults': 0,
@@ -108,6 +109,7 @@ def remote(ctx, burst = 40, debug=False):
     }
 
     node_params = {
+        'consensus_only': consensus_only,
         'header_size': 512000,  # bytes
         'max_header_delay': 5_000,  # ms
         'gc_depth': 50,  # rounds
@@ -119,7 +121,7 @@ def remote(ctx, burst = 40, debug=False):
         'f_num': 3
     }
     try:
-        Bench(ctx).run(bench_params, node_params, debug)
+        Bench(ctx).run(bench_params, node_params, debug, consensus_only)
     except BenchError as e:
         Print.error(e)
 
