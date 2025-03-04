@@ -1,4 +1,3 @@
-use crate::batch_maker::{Batch, BatchMaker, Transaction};
 use async_trait::async_trait;
 use bytes::Bytes;
 use config::{Committee, Parameters, WorkerId};
@@ -7,25 +6,17 @@ use log::info;
 use network::{MessageHandler, Receiver, Writer};
 use serde::{Deserialize, Serialize};
 use std::error::Error;
-use tokio::sync::mpsc::{channel, Sender};
-
-// #[cfg(test)]
-// #[path = "tests/worker_tests.rs"]
-// pub mod worker_tests;
+use std::sync::Arc;
+use tokio::sync::mpsc::{channel, Sender, Receiver as TokioReceiver};
+use tokio::sync::Mutex;
+use tokio::time::{sleep, Duration, Instant};
 
 /// The default channel capacity for each channel of the worker.
 pub const CHANNEL_CAPACITY: usize = 1_000;
 
-/// The primary round number.
-// TODO: Move to the primary.
 pub type Round = u64;
-
-/// The message exchanged between workers.
-#[derive(Debug, Serialize, Deserialize)]
-pub enum WorkerMessage {
-    Batch(Batch),
-    BatchRequest(Vec<Digest>, /* origin */ PublicKey),
-}
+pub type Transaction = Vec<u8>;
+pub type Batch = Vec<Transaction>;
 
 pub struct Worker {
     /// The public key of this authority.
@@ -36,7 +27,9 @@ pub struct Worker {
     committee: Committee,
     /// The configuration parameters.
     parameters: Parameters,
-    tx_txns: Sender<Vec<Transaction>>,
+    batch_size: usize,
+    max_batch_delay: u64,
+    batch_handler: BatchHandler,
 }
 
 impl Worker {
@@ -45,22 +38,35 @@ impl Worker {
         id: WorkerId,
         committee: Committee,
         parameters: Parameters,
-        tx_txns: Sender<Vec<Transaction>>,
-    ) {
-        // Define a worker instance.
+        batch_size: usize,
+        max_batch_delay: u64,
+    ) -> Worker {
+        let (tx_reset, mut rx_reset) = channel::<()>(1);
+        let batch_state = Arc::new(Mutex::new(BatchState {
+            current_batch: Batch::with_capacity(batch_size * 2),
+            current_batch_size: 0,
+            batch_buffer: Vec::new(),
+        }));
+
+        let batch_handler = BatchHandler {
+            state: batch_state.clone(),
+            batch_size,
+            max_batch_delay,
+            tx_reset: tx_reset.clone(),
+        };
+
         let worker = Self {
             name,
             id,
             committee,
             parameters,
-            tx_txns,
+            batch_size,
+            max_batch_delay,
+            batch_handler, 
         };
 
-        // Spawn all worker tasks.
-        // let (tx_primary, rx_primary) = channel(CHANNEL_CAPACITY);
-        worker.handle_clients_transactions();
+        worker.run(batch_state, tx_reset, rx_reset);
 
-        // NOTE: This log entry is used to compute performance.
         info!(
             "Worker {} successfully booted on {}",
             id,
@@ -71,58 +77,114 @@ impl Worker {
                 .transactions
                 .ip()
         );
+        worker
     }
 
-    /// Spawn all tasks responsible to handle clients transactions.
-    fn handle_clients_transactions(&self) {
-        let (tx_batch_maker, rx_batch_maker) = channel(CHANNEL_CAPACITY);
-
-        // We first receive clients' transactions from the network.
+    fn run(&self, batch_state: Arc<Mutex<BatchState>>, tx_reset: Sender<()>, mut rx_reset: TokioReceiver<()>) {
         let mut address = self
             .committee
             .worker(&self.name, &self.id)
             .expect("Our public key or worker id is not in the committee")
             .transactions;
         address.set_ip("0.0.0.0".parse().unwrap());
-        Receiver::spawn(
-            address,
-            /* handler */ TxReceiverHandler { tx_batch_maker },
-        );
-
-        // The transactions are sent to the `BatchMaker` that assembles them into batches. It then broadcasts
-        // (in a reliable manner) the batches to all other workers that share the same `id` as us. Finally, it
-        // gathers the 'cancel handlers' of the messages and send them to the `QuorumWaiter`.
-        BatchMaker::spawn(
-            self.parameters.batch_size,
-            self.parameters.max_batch_delay,
-            /* rx_transaction */ rx_batch_maker,
-            self.tx_txns.clone(),
-        );
+        Receiver::spawn(address, self.batch_handler.clone());
 
         info!(
             "Worker {} listening to client transactions on {}",
             self.id, address
         );
+
+        tokio::spawn({
+            let state = batch_state;
+            let max_batch_delay = self.max_batch_delay;
+            async move {
+                loop {
+                    let timer = sleep(Duration::from_millis(max_batch_delay));
+                    tokio::pin!(timer);
+                    tokio::select! {
+                        () = &mut timer => {
+                            let mut state = state.lock().await;
+                            if !state.current_batch.is_empty() {
+                                state.seal().await;
+                            }
+                        },
+                        Some(()) = rx_reset.recv() => { }
+                    }
+                    tokio::task::yield_now().await;
+                }
+            }
+        });
+    }
+
+    pub fn get_batch_handler(&self) -> BatchHandler {
+        self.batch_handler.clone()
+    }
+}
+
+#[derive(Clone)]
+pub struct BatchState {
+    current_batch: Batch,
+    current_batch_size: usize,
+    batch_buffer: Vec<Batch>,
+}
+
+impl BatchState {
+    async fn seal(&mut self) {
+        let batch: Vec<Transaction> = self.current_batch.drain(..).collect();
+        self.current_batch_size = 0;
+        self.batch_buffer.push(batch);
     }
 }
 
 /// Defines how the network receiver handles incoming transactions.
 #[derive(Clone)]
-struct TxReceiverHandler {
-    tx_batch_maker: Sender<Transaction>,
+pub struct BatchHandler {
+    state: Arc<Mutex<BatchState>>,
+    batch_size: usize,
+    max_batch_delay: u64,
+    tx_reset: Sender<()>,
 }
 
 #[async_trait]
-impl MessageHandler for TxReceiverHandler {
+impl MessageHandler for BatchHandler {
     async fn dispatch(&self, _writer: &mut Writer, message: Bytes) -> Result<(), Box<dyn Error>> {
-        // Send the transaction to the batch maker.
-        self.tx_batch_maker
-            .send(message.to_vec())
-            .await
-            .expect("Failed to send transaction");
-
-        // Give the change to schedule other tasks.
+        let transaction = message.to_vec();
+        {
+            let mut state = self.state.lock().await;
+            state.current_batch_size += transaction.len();
+            state.current_batch.push(transaction);
+            if state.current_batch_size >= self.batch_size {
+                state.seal().await;
+                self.tx_reset
+                    .send(())
+                    .await
+                    .expect("Failed to send reset signal");
+            }
+        }
         tokio::task::yield_now().await;
         Ok(())
+    }
+}
+
+impl BatchHandler {
+    pub async fn get_txns(&self, limit: u64) -> Vec<Transaction> {
+        let mut state = self.state.lock().await;
+        let mut payload = Vec::new();
+        let limit = limit as usize; 
+        while let Some(batch) = state.batch_buffer.first_mut() {
+            let take_count = (limit - payload.len()).min(batch.len());
+            if take_count == 0 {
+                break;
+            }
+            let extracted: Vec<Transaction> = batch.drain(..take_count).collect();
+            payload.extend(extracted);
+            if batch.is_empty() {
+                state.batch_buffer.remove(0);
+            }
+            if payload.len() >= limit {
+                break;
+            }
+        }
+        payload
     }
 }

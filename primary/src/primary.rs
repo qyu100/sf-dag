@@ -4,7 +4,7 @@ use crate::error::DagError;
 use crate::garbage_collector::GarbageCollector;
 use crate::header_waiter::HeaderWaiter;
 use crate::helper::Helper;
-use crate::worker::Worker;
+use crate::worker::{Worker, BatchHandler, BatchState, Batch};
 use crate::messages::{Certificate, EchoHeader, EchoNoVoteMsg, ReadyNoVoteMsg, 
     Header, HeaderInfo, HeaderInfoWithParents, HeaderWithParents, 
     NoVoteMsg, ReadyHeader, Timeout, Vote};
@@ -23,6 +23,7 @@ use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use store::Store;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
+use tokio::sync::Mutex;
 
 /// The default channel capacity for each channel of the primary.
 pub const CHANNEL_CAPACITY: usize = 1_000;
@@ -92,7 +93,7 @@ impl Primary {
         tx_consensus_header_msg: Sender<HeaderType>,
     ) {
         // let (tx_others_digests, rx_others_digests) = channel(CHANNEL_CAPACITY);
-        let (tx_our_digests, rx_our_digests) = channel(CHANNEL_CAPACITY);
+        // let (tx_our_digests, rx_our_digests) = channel(CHANNEL_CAPACITY);
         let (tx_parents, rx_parents) = channel(CHANNEL_CAPACITY);
         let (tx_headers, rx_headers) = channel(CHANNEL_CAPACITY);
         let (tx_timeout, rx_timeout) = channel(CHANNEL_CAPACITY);
@@ -155,15 +156,16 @@ impl Primary {
         //     "Primary {} listening to workers messages on {}",
         //     name, address
         // );
-        if !parameters.consensus_only {
-            Worker::spawn(
-                name,
-                0,
-                committee.clone(),
-                parameters.clone(),
-                tx_our_digests,
-            );
-        }
+
+        let worker = Worker::spawn(
+            name,
+            0,
+            committee.clone(),
+            parameters.clone(),
+            parameters.batch_size,
+            parameters.max_batch_delay,
+        );
+        
 
         // The `Synchronizer` provides auxiliary methods helping to `Core` to sync.
         let synchronizer = Synchronizer::new(
@@ -228,6 +230,26 @@ impl Primary {
 
         // When the `Core` collects enough parent certificates, the `Proposer` generates a new header with new batch
         // digests from our workers and it back to the `Core`.
+        // let (tx_reset, mut rx_reset) = channel::<()>(1);
+        // let batch_state 
+        //     = Arc::new(Mutex::new(BatchState::new(parameters.batch_size)));
+        // let batch_handler = BatchHandler::new(
+        //     batch_state.clone(),
+        //     parameters.batch_size,
+        //     parameters.max_batch_delay,
+        //     tx_reset.clone(),
+        // );
+        
+        // let worker = Worker::new(
+        //     name,
+        //     0,
+        //     committee.clone(),
+        //     parameters.clone(),
+        //     parameters.batch_size,
+        //     parameters.max_batch_delay,
+        //     batch_handler,
+        // );
+        
         Proposer::spawn(
             name,
             committee.clone(),
@@ -236,7 +258,7 @@ impl Primary {
             parameters.tx_size,
             parameters.max_header_delay,
             /* rx_core */ rx_parents,
-            /* rx_workers */ rx_our_digests,
+            // /* rx_workers */ rx_our_digests,
             /* tx_core */ tx_headers,
             rx_timeout_proposer,
             /* tx_core_timeout */ tx_timeout,
@@ -244,6 +266,7 @@ impl Primary {
             tx_no_vote_msg,
             rx_no_vote_cert,
             parameters.consensus_only,
+            worker,
         );
 
         // The `Helper` is dedicated to reply to certificates requests from other primaries.
@@ -294,33 +317,33 @@ impl MessageHandler for PrimaryReceiverHandler {
     }
 }
 
-/// Defines how the network receiver handles incoming workers messages.
-#[derive(Clone)]
-struct WorkerReceiverHandler {
-    tx_our_digests: Sender<(Digest, WorkerId)>,
-    tx_others_digests: Sender<(Digest, WorkerId)>,
-}
+// /// Defines how the network receiver handles incoming workers messages.
+// #[derive(Clone)]
+// struct WorkerReceiverHandler {
+//     tx_our_digests: Sender<(Digest, WorkerId)>,
+//     tx_others_digests: Sender<(Digest, WorkerId)>,
+// }
 
-#[async_trait]
-impl MessageHandler for WorkerReceiverHandler {
-    async fn dispatch(
-        &self,
-        _writer: &mut Writer,
-        serialized: Bytes,
-    ) -> Result<(), Box<dyn Error>> {
-        // Deserialize and parse the message.
-        match bincode::deserialize(&serialized).map_err(DagError::SerializationError)? {
-            WorkerPrimaryMessage::OurBatch(digest, worker_id) => self
-                .tx_our_digests
-                .send((digest, worker_id))
-                .await
-                .expect("Failed to send workers' digests"),
-            WorkerPrimaryMessage::OthersBatch(digest, worker_id) => self
-                .tx_others_digests
-                .send((digest, worker_id))
-                .await
-                .expect("Failed to send workers' digests"),
-        }
-        Ok(())
-    }
-}
+// #[async_trait]
+// impl MessageHandler for WorkerReceiverHandler {
+//     async fn dispatch(
+//         &self,
+//         _writer: &mut Writer,
+//         serialized: Bytes,
+//     ) -> Result<(), Box<dyn Error>> {
+//         // Deserialize and parse the message.
+//         match bincode::deserialize(&serialized).map_err(DagError::SerializationError)? {
+//             WorkerPrimaryMessage::OurBatch(digest, worker_id) => self
+//                 .tx_our_digests
+//                 .send((digest, worker_id))
+//                 .await
+//                 .expect("Failed to send workers' digests"),
+//             WorkerPrimaryMessage::OthersBatch(digest, worker_id) => self
+//                 .tx_others_digests
+//                 .send((digest, worker_id))
+//                 .await
+//                 .expect("Failed to send workers' digests"),
+//         }
+//         Ok(())
+//     }
+// }

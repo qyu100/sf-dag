@@ -1,6 +1,7 @@
 // Copyright(C) Facebook, Inc. and its affiliates.
 use crate::messages::{Certificate, Header, HeaderInfo, HeaderWithParents, NoVoteCert, NoVoteMsg, Timeout, TimeoutCert};
 use crate::primary::Round;
+use crate::worker::Worker;
 use config::Committee;
 use crypto::Hash as _;
 use crypto::{Digest, PublicKey};
@@ -34,7 +35,7 @@ pub struct Proposer {
     /// Receives the parents to include in the next header (along with their round number).
     rx_core: Receiver<(Vec<HeaderInfo>, Round)>,
     /// Receives the batch digest from our workers.
-    rx_workers: Receiver<Vec<Transaction>>,
+    // rx_workers: Receiver<Vec<Transaction>>,
     /// Sends newly created headers to the `Core`.
     tx_core: Sender<HeaderWithParents>,
     rx_core_timeout: Receiver<Timeout>,
@@ -64,6 +65,7 @@ pub struct Proposer {
     timeout_sent: HashMap<Round, bool>,
     no_vote_sent: HashMap<Round, bool>,
     consensus_only: bool,
+    worker: Worker,
 }
 
 impl Proposer {
@@ -76,7 +78,7 @@ impl Proposer {
         tx_size: usize,
         max_header_delay: u64,
         rx_core: Receiver<(Vec<HeaderInfo>, Round)>,
-        rx_workers: Receiver<Vec<Transaction>>,
+        // rx_workers: Receiver<Vec<Transaction>>,
         tx_core: Sender<HeaderWithParents>,
         rx_core_timeout: Receiver<Timeout>,
         tx_core_timeout: Sender<Timeout>,
@@ -84,6 +86,7 @@ impl Proposer {
         tx_core_no_vote_msg: Sender<NoVoteMsg>,
         rx_no_vote_cert: Receiver<(NoVoteCert, Round)>,
         consensus_only: bool,
+        worker: Worker,
     ) {
         let genesis = HeaderInfo::genesis(&committee);
         tokio::spawn(async move {
@@ -95,7 +98,7 @@ impl Proposer {
                 tx_size,
                 max_header_delay,
                 rx_core,
-                rx_workers,
+                // rx_workers,
                 tx_core,
                 rx_core_timeout,
                 tx_core_timeout,
@@ -112,6 +115,7 @@ impl Proposer {
                 timeout_sent: HashMap::new(),
                 no_vote_sent: HashMap::new(),
                 consensus_only,
+                worker,
             }
             .run()
             .await;
@@ -143,17 +147,14 @@ impl Proposer {
 
     async fn make_header(&mut self) {
         // Make a new header.
-        let limit = if self.txns.len() * self.tx_size <= self.header_size {
-            self.txns.len()
-        } else {
-            self.header_size / self.tx_size
-        };
-
+        let limit = self.header_size / self.tx_size;
+        
         let mut payload;
         if self.consensus_only {
-            payload = vec![vec![0u8; self.tx_size]; (self.header_size / self.tx_size)];
+            payload = vec![vec![0u8; self.tx_size]; self.header_size / self.tx_size];
         } else {
-            payload = self.txns.drain(..limit).collect();
+            let batch_handler = self.worker.get_batch_handler();
+            payload = batch_handler.get_txns(limit as u64).await; 
         }
 
         let parents: Vec<HeaderInfo> = self.last_parents.drain(..).collect();
@@ -295,10 +296,10 @@ impl Proposer {
                     // (2) Also implement the wait for leader idea what is was there before
                     advance = self.update_leader();
                 }
-                Some(txns) = self.rx_workers.recv() => {
-                    self.payload_size += txns.iter().map(|txn| txn.len()).sum::<usize>();
-                    self.txns.extend(txns);
-                }
+                // Some(txns) = self.rx_workers.recv() => {
+                //     self.payload_size += txns.iter().map(|txn| txn.len()).sum::<usize>();
+                //     self.txns.extend(txns);
+                // }
                 Some((timeout_cert, round)) = self.rx_timeout_cert.recv() => {
                     match round.cmp(&self.last_timeout_cert.round) {
                         Ordering::Greater => {
