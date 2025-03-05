@@ -4,7 +4,7 @@ use crate::error::DagError;
 use crate::garbage_collector::GarbageCollector;
 use crate::header_waiter::HeaderWaiter;
 use crate::helper::Helper;
-use crate::worker::{Worker, BatchHandler, BatchState, Batch};
+use crate::worker::Worker;
 use crate::messages::{Certificate, EchoHeader, EchoNoVoteMsg, ReadyNoVoteMsg, 
     Header, HeaderInfo, HeaderInfoWithParents, HeaderWithParents, 
     NoVoteMsg, ReadyHeader, Timeout, Vote};
@@ -162,8 +162,6 @@ impl Primary {
             0,
             committee.clone(),
             parameters.clone(),
-            parameters.batch_size,
-            parameters.max_batch_delay,
         );
         
 
@@ -220,36 +218,6 @@ impl Primary {
             /* tx_core */ tx_headers_loopback,
         );
 
-        // // The `CertificateWaiter` waits to receive all the ancestors of a certificate before looping it back to the
-        // // `Core` for further processing.
-        // CertificateWaiter::spawn(
-        //     store.clone(),
-        //     /* rx_synchronizer */ rx_sync_certificates,
-        //     /* tx_core */ tx_certificates_loopback,
-        // );
-
-        // When the `Core` collects enough parent certificates, the `Proposer` generates a new header with new batch
-        // digests from our workers and it back to the `Core`.
-        // let (tx_reset, mut rx_reset) = channel::<()>(1);
-        // let batch_state 
-        //     = Arc::new(Mutex::new(BatchState::new(parameters.batch_size)));
-        // let batch_handler = BatchHandler::new(
-        //     batch_state.clone(),
-        //     parameters.batch_size,
-        //     parameters.max_batch_delay,
-        //     tx_reset.clone(),
-        // );
-        
-        // let worker = Worker::new(
-        //     name,
-        //     0,
-        //     committee.clone(),
-        //     parameters.clone(),
-        //     parameters.batch_size,
-        //     parameters.max_batch_delay,
-        //     batch_handler,
-        // );
-        
         Proposer::spawn(
             name,
             committee.clone(),
@@ -266,7 +234,7 @@ impl Primary {
             tx_no_vote_msg,
             rx_no_vote_cert,
             parameters.consensus_only,
-            worker,
+            worker.clone(),
         );
 
         // The `Helper` is dedicated to reply to certificates requests from other primaries.

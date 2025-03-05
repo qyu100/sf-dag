@@ -153,10 +153,8 @@ impl Proposer {
         if self.consensus_only {
             payload = vec![vec![0u8; self.tx_size]; self.header_size / self.tx_size];
         } else {
-            let batch_handler = self.worker.get_batch_handler();
-            payload = batch_handler.get_txns(limit as u64).await; 
+            payload = self.worker.get_txns(limit as u64).await;
         }
-
         let parents: Vec<HeaderInfo> = self.last_parents.drain(..).collect();
         let header = Header::new(
             self.name,

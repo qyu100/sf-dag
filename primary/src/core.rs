@@ -329,7 +329,6 @@ impl Core {
                     DagError::MalformedHeader(header_info.id.clone())
                 );
                 stake += self.committee.stake(&parent_header_info.author);
-
                 if leader == parent_header_info.author {
                     has_leader = true; 
                 }            
@@ -368,7 +367,7 @@ impl Core {
                             return Ok(());          
                         }
                     }
-                debug!("Timeout has reached quorum for round {:?}", round - 1);
+                debug!("Timeout has reached quorum for round {:?} at header", round - 1);
                 }
             }
             self.send_consensus_header(round, digest, header_info.clone()).await?;  
@@ -442,7 +441,7 @@ impl Core {
                                 return Ok(());          
                             }
                         }
-                    debug!("Timeout has reached quorum for round {:?}", round - 1);
+                    debug!("Timeout has reached quorum for round {:?} at echoheader", round - 1);
                     }
                 }
                 self.send_consensus_header(round, digest, header_info.clone()).await?;
@@ -522,7 +521,7 @@ impl Core {
                                 return Ok(());          
                             }
                         }
-                    debug!("Timeout has reached quorum for round {:?}", round - 1);
+                    debug!("Timeout has reached quorum for round {:?} at readyheader", round - 1);
                     }
                 }
                 self.send_consensus_header(round, digest, header_info.clone()).await?;
