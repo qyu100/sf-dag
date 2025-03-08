@@ -154,8 +154,6 @@ impl Proposer {
             payload = vec![vec![0u8; self.tx_size]; self.header_size / self.tx_size];
         } else {
             payload = self.worker.get_txns(limit as u64).await;
-            self.payload_size = payload.len();
-            info!("My payload size {:?}", self.payload_size);
         }
         let parents: Vec<HeaderInfo> = self.last_parents.drain(..).collect();
         let header = Header::new(
