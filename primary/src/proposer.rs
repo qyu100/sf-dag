@@ -154,6 +154,8 @@ impl Proposer {
             payload = vec![vec![0u8; self.tx_size]; self.header_size / self.tx_size];
         } else {
             payload = self.worker.get_txns(limit as u64).await;
+            self.payload_size = payload.len();
+            info!("My payload size {:?}", self.payload_size);
         }
         let parents: Vec<HeaderInfo> = self.last_parents.drain(..).collect();
         let header = Header::new(
@@ -235,7 +237,7 @@ impl Proposer {
             let timeout_cert_gathered = self.last_timeout_cert.round == self.round;
             let is_next_leader = self.committee.leader((self.round + 1) as usize) == self.name;
             let no_vote_cert_gathered = self.last_no_vote_cert.round == self.round;
-            let enough_digests = self.payload_size >= self.header_size;
+            let enough_digests = self.payload_size > 0;
             let timer_expired = timer.is_elapsed();
             
             if timer_expired && !self.timeout_sent.contains_key(&self.round) {
@@ -252,7 +254,7 @@ impl Proposer {
             if ((timer_expired
                 && timeout_cert_gathered
                 && (!is_next_leader || no_vote_cert_gathered))
-                || ((enough_digests || self.consensus_only) && advance))
+                || (advance))
                 && enough_parents
             {   
                 // Advance to the next round.
