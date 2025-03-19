@@ -377,15 +377,16 @@ class Bench:
         # hosts = committee.ips()
         await self._kill(hosts_to_connections=hosts_to_connections, delete_logs=True)
 
+         # Run the primaries (except the faulty ones).
+        primaries = self._run_primaries(committee, hosts_to_connections, bench_parameters.faults, debug)
+        await primaries
+
         if not consensus_only:
             # Run the clients (they will wait for the nodes to be ready).
             # Filter all faulty nodes from the client addresses (or they will wait
             # for the faulty nodes to be online).
             workers_addresses = await self._run_clients(
                 rate, burst, committee, bench_parameters, hosts_to_connections)
-
-        # Run the primaries (except the faulty ones).
-        await self._run_primaries(committee, hosts_to_connections, bench_parameters.faults, debug)
 
         # if not consensus_only:
             # Run the workers (except the faulty ones).
