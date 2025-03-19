@@ -17,7 +17,7 @@ def local(ctx, debug=True, consensus_only=False):
         'nodes': 4,
         'workers': 1,
         'rate': 20_000,
-        'tx_size': 256,
+        'tx_size': 512,
         'duration': 10,
         "burst" : 10
     }
@@ -52,7 +52,7 @@ def create(ctx, nodes=2):
 def destroy(ctx):
     ''' Destroy the testbed '''
     try:
-        InstanceManager.make().terminate_instances()
+        InstanceManager.make().delete_instances()
     except BenchError as e:
         Print.error(e)
 
@@ -93,24 +93,24 @@ def install(ctx):
 
 
 @task
-def remote(ctx, burst = 40, debug=False, consensus_only=True):
+def remote(ctx, burst = 40, debug=False, consensus_only=False):
     ''' Run benchmarks on GCP '''
     bench_params = {
         'faults': 0,
         'nodes': 10,
         'workers': 1,
         'collocate': True,
-        'rate': [2000],
+        'rate': [20_000],
         'tx_size': 512,
         'duration': 30,
         'runs': 1,
         'burst' : [burst],
-        'f_num': 3
+        'f_num': 1
     }
 
     node_params = {
         'consensus_only': consensus_only,
-        'header_size': 512000,  # bytes
+        'header_size': 512_000,  # bytes
         'max_header_delay': 5_000,  # ms
         'gc_depth': 50,  # rounds
         'sync_retry_delay': 10_000,  # ms

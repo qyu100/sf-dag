@@ -69,6 +69,7 @@ class Committee:
 
         json['f_num'] = f_num
         for i, (name, hosts) in enumerate(addresses.items()):
+            port = base_port
             host = hosts.pop(0)
             consensus_addr = {
                 'consensus_to_consensus': f'{host}:{port}',

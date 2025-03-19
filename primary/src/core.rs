@@ -304,7 +304,7 @@ impl Core {
         
         if round != 1 {
             let parents = self.synchronizer.get_parents(&HeaderType::HeaderInfo(header_info.clone())).await?;
-            
+
             if parents.is_empty() {
                 debug!("Processing of {} suspended: missing parent(s)", header_info.id);
                 return Ok(());
