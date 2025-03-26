@@ -2,13 +2,17 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use config::{Committee, Parameters, WorkerId};
 use crypto::{Digest, PublicKey};
-use log::info;
+use log::{info, debug};
 use network::{MessageHandler, Receiver, Writer};
 use serde::{Deserialize, Serialize};
 use std::error::Error;
-use std::sync::Arc;
-use tokio::sync::Mutex;
-use tokio::time::{sleep, Duration, Instant};
+use tokio::sync::mpsc::{self, Sender};
+
+#[derive(Debug)]
+enum WorkerMessage {
+    NewTransaction(Transaction),              
+    GetTransactions(u64, Sender<Vec<Transaction>>), 
+}
 
 pub const CHANNEL_CAPACITY: usize = 1_000;
 
@@ -21,7 +25,7 @@ pub struct Worker {
     id: WorkerId,
     committee: Committee,
     parameters: Parameters,
-    txn_buffer: Arc<Mutex<Vec<Transaction>>>,
+    sender: Sender<WorkerMessage>,
 }
 
 impl Worker {
@@ -31,12 +35,31 @@ impl Worker {
         committee: Committee,
         parameters: Parameters,
     ) -> Self {
+        let (sender, mut receiver) = mpsc::channel::<WorkerMessage>(CHANNEL_CAPACITY);
+
+        tokio::spawn(async move {
+            let mut buffer = Vec::new();
+            while let Some(message) = receiver.recv().await {
+                match message {
+                    WorkerMessage::NewTransaction(txn) => {
+                        buffer.push(txn);
+                    }
+                    WorkerMessage::GetTransactions(limit, response_sender) => {
+                        let limit = limit as usize;
+                        let take_count = limit.min(buffer.len());
+                        let payload: Vec<Transaction> = buffer.drain(..take_count).collect();
+                        let _ = response_sender.send(payload).await;
+                    }
+                }
+            }
+        });
+
         let worker = Self {
             name,
             id,
             committee,
             parameters,
-            txn_buffer: Arc::new(Mutex::new(Vec::new())),
+            sender,
         };
 
         let worker_clone = worker.clone();
@@ -44,10 +67,11 @@ impl Worker {
             worker_clone.run().await;
         });
 
-        info!(
+        debug!(
             "Worker {} successfully booted on {}",
             id,
-            worker.committee
+            worker
+                .committee
                 .worker(&worker.name, &worker.id)
                 .expect("Our public key or worker id is not in the committee")
                 .transactions
@@ -73,15 +97,12 @@ impl Worker {
     }
 
     pub async fn get_txns(&self, limit: u64) -> Vec<Transaction> {
-        let limit = limit as usize;
-        let mut buffer = self.txn_buffer.lock().await;
-        // info!("txn_buffer length: {}", buffer.len());
-        
-        let take_count = limit.min(buffer.len());
-        let payload: Vec<Transaction> = buffer.drain(..take_count).collect();
-        
-        // info!("Returning {} transactions", payload.len());
-        payload
+        let (response_sender, mut response_receiver) = mpsc::channel(1);
+        let _ = self
+            .sender
+            .send(WorkerMessage::GetTransactions(limit, response_sender))
+            .await;
+        response_receiver.recv().await.unwrap_or_default()
     }
 }
 
@@ -89,10 +110,10 @@ impl Worker {
 impl MessageHandler for Worker {
     async fn dispatch(&self, _writer: &mut Writer, message: Bytes) -> Result<(), Box<dyn Error>> {
         let transaction = message.to_vec();
-        // info!("Received transaction of length: {}", transaction.len());
-        let mut buffer = self.txn_buffer.lock().await;
-        buffer.push(transaction);
-        tokio::task::yield_now().await;
+        self.sender
+            .send(WorkerMessage::NewTransaction(transaction))
+            .await
+            .map_err(|e| Box::<dyn Error>::from(format!("Failed to send transaction: {}", e)))?;
         Ok(())
     }
 }

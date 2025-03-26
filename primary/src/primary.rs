@@ -284,34 +284,3 @@ impl MessageHandler for PrimaryReceiverHandler {
         Ok(())
     }
 }
-
-// /// Defines how the network receiver handles incoming workers messages.
-// #[derive(Clone)]
-// struct WorkerReceiverHandler {
-//     tx_our_digests: Sender<(Digest, WorkerId)>,
-//     tx_others_digests: Sender<(Digest, WorkerId)>,
-// }
-
-// #[async_trait]
-// impl MessageHandler for WorkerReceiverHandler {
-//     async fn dispatch(
-//         &self,
-//         _writer: &mut Writer,
-//         serialized: Bytes,
-//     ) -> Result<(), Box<dyn Error>> {
-//         // Deserialize and parse the message.
-//         match bincode::deserialize(&serialized).map_err(DagError::SerializationError)? {
-//             WorkerPrimaryMessage::OurBatch(digest, worker_id) => self
-//                 .tx_our_digests
-//                 .send((digest, worker_id))
-//                 .await
-//                 .expect("Failed to send workers' digests"),
-//             WorkerPrimaryMessage::OthersBatch(digest, worker_id) => self
-//                 .tx_others_digests
-//                 .send((digest, worker_id))
-//                 .await
-//                 .expect("Failed to send workers' digests"),
-//         }
-//         Ok(())
-//     }
-// }
