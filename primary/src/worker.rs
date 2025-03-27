@@ -81,12 +81,6 @@ impl Worker {
             .expect("Our public key or worker id is not in the committee")
             .transactions
             .ip();
-        info!(
-            "Worker {}: Successfully booted on {} took {:?}",
-            id,
-            address,
-            start.elapsed()
-        );
         worker
     }
 
@@ -113,11 +107,6 @@ impl Worker {
             .sender
             .send(WorkerMessage::GetTransactions(limit, response_sender))
             .await;
-        info!(
-            "Worker {}: Sent GetTransactions request took {:?}",
-            self.id,
-            send_start.elapsed()
-        );
         let recv_start = Instant::now();
         // response_receiver.recv().await.unwrap_or_default()
         let result = response_receiver.recv().await.unwrap_or_default();
