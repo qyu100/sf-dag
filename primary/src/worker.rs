@@ -46,12 +46,6 @@ impl Worker {
                 match message {
                     WorkerMessage::NewTransaction(txn) => {
                         buffer.push(txn);
-                        info!(
-                            "Worker {}: New transaction added, buffer size={}, took {:?}",
-                            id,
-                            buffer.len(),
-                            msg_start.elapsed()
-                        );
                     }
                     WorkerMessage::GetTransactions(limit, response_sender) => {
                         let limit = limit as usize;
@@ -87,7 +81,7 @@ impl Worker {
             .expect("Our public key or worker id is not in the committee")
             .transactions
             .ip();
-        debug!(
+        info!(
             "Worker {}: Successfully booted on {} took {:?}",
             id,
             address,
@@ -108,19 +102,6 @@ impl Worker {
 
         let receiver_start = Instant::now();
         Receiver::spawn(address, self.clone());
-
-        info!(
-            "Worker {}: Receiver spawned took {:?}",
-            self.id,
-            receiver_start.elapsed()
-        );
-
-        info!(
-            "Worker {}: Listening to client transactions on {}, total run setup took {:?}",
-            self.id,
-            address,
-            start.elapsed()
-        );
     }
 
     pub async fn get_txns(&self, limit: u64) -> Vec<Transaction> {
@@ -132,7 +113,7 @@ impl Worker {
             .sender
             .send(WorkerMessage::GetTransactions(limit, response_sender))
             .await;
-        debug!(
+        info!(
             "Worker {}: Sent GetTransactions request took {:?}",
             self.id,
             send_start.elapsed()
