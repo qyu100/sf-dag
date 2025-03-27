@@ -73,13 +73,35 @@ impl Worker {
     }
 
     pub async fn get_txns(&self, limit: u64) -> Vec<Transaction> {
+        let start = Instant::now();
         let limit = limit as usize;
         let mut buffer = self.txn_buffer.lock().await;
         // info!("txn_buffer length: {}", buffer.len());
-        
+        info!(
+            "Worker {}: Acquired lock in {:?}, buffer length: {}",
+            self.id,
+            start.elapsed(),
+            buffer.len()
+        );
+
+        let drain_start = Instant::now();
         let take_count = limit.min(buffer.len());
         let payload: Vec<Transaction> = buffer.drain(..take_count).collect();
-        
+        info!(
+            "Worker {}: Drained {} transactions in {:?}",
+            self.id,
+            take_count,
+            drain_start.elapsed()
+        );
+
+        let total_time = start.elapsed();
+        info!(
+            "Worker {}: Returning {} transactions, total get_txns took {:?}",
+            self.id,
+            payload.len(),
+            total_time
+        );
+
         // info!("Returning {} transactions", payload.len());
         payload
     }
@@ -88,11 +110,20 @@ impl Worker {
 #[async_trait]
 impl MessageHandler for Worker {
     async fn dispatch(&self, _writer: &mut Writer, message: Bytes) -> Result<(), Box<dyn Error>> {
+        let start = Instant::now();
         let transaction = message.to_vec();
         // info!("Received transaction of length: {}", transaction.len());
+        let lock_start = Instant::now();
         let mut buffer = self.txn_buffer.lock().await;
+        info!(
+            "Worker {}: Acquired lock in {:?}",
+            self.id,
+            lock_start.elapsed()
+        );
         buffer.push(transaction);
         tokio::task::yield_now().await;
+        let total_time = start.elapsed();
+        info!("Worker {}: Total dispatch took {:?}", self.id, total_time);
         Ok(())
     }
 }
