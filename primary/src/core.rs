@@ -418,10 +418,9 @@ impl Core {
         let aggregator = self.echo_header_aggregators
             .entry((round, digest))
             .or_insert_with(ThresholdAggregator::new);
-
-        let weight = aggregator.append(author, &self.committee)?;
-        if weight >= self.committee.optimistic_threshold() {
-            if let Some((header_info, has_leader)) = self.processing_header_infos.get(&digest) {
+        if let Some((header_info, has_leader)) = self.processing_header_infos.get(&digest) {
+            let weight = aggregator.append(author, &self.committee)?;
+            if weight >= self.committee.optimistic_threshold() {
                 if !has_leader {
                     if let Some(timeout_agg) = self.timeout_aggregators.get(&(round - 1)) {
                         if !timeout_agg.check_threshold(self.committee.quorum_threshold()) {
@@ -445,26 +444,26 @@ impl Core {
                     debug!("Timeout has reached quorum for round {:?}", round - 1);
                     }
                 }
-                self.send_consensus_header(round, digest, header_info.clone()).await?;
+            } else if weight >= self.committee.quorum_threshold() {
+                // 2f+1 reached, send ready message
+                if !self.ready_header_sent.get(&(round, digest)).unwrap_or(&false) {
+                    let addresses = self.committee.others_primaries(&self.name)
+                        .iter()
+                        .map(|(_, info)| info.primary_to_primary)
+                        .collect();
+                    let ready_header = ReadyHeader::new(&echo_header, &self.name).await;
+                    let bytes = bincode::serialize(&PrimaryMessage::Ready(ready_header.clone()))
+                        .expect("Failed to serialize ReadyHeader");
+                    let handlers = self.network.broadcast(addresses, Bytes::from(bytes)).await;
+                    self.cancel_handlers.entry(round).or_insert_with(Vec::new).extend(handlers);
+                    self.ready_header_sent.insert((round, digest), true);
+                    let ready_aggregator = self.ready_header_aggregators
+                        .entry((round, digest))
+                        .or_insert_with(ThresholdAggregator::new);
+                    ready_aggregator.append(self.name, &self.committee)?;
+                }
             }
-        } else if weight >= self.committee.quorum_threshold() {
-            // 2f+1 reached, send ready message
-            if !self.ready_header_sent.get(&(round, digest)).unwrap_or(&false) {
-                let addresses = self.committee.others_primaries(&self.name)
-                    .iter()
-                    .map(|(_, info)| info.primary_to_primary)
-                    .collect();
-                let ready_header = ReadyHeader::new(&echo_header, &self.name).await;
-                let bytes = bincode::serialize(&PrimaryMessage::Ready(ready_header.clone()))
-                    .expect("Failed to serialize ReadyHeader");
-                let handlers = self.network.broadcast(addresses, Bytes::from(bytes)).await;
-                self.cancel_handlers.entry(round).or_insert_with(Vec::new).extend(handlers);
-                self.ready_header_sent.insert((round, digest), true);
-                let ready_aggregator = self.ready_header_aggregators
-                    .entry((round, digest))
-                    .or_insert_with(ThresholdAggregator::new);
-                ready_aggregator.append(self.name, &self.committee)?;
-            }
+            self.send_consensus_header(round, digest, header_info.clone()).await?;
         }
         Ok(())
     }
@@ -587,7 +586,6 @@ impl Core {
         if let Some(header_infos) = self.timeout_suspended.remove(&round) {
             for header_info in header_infos {
                 let digest = header_info.id;
-                self.send_consensus_header(round, digest, header_info).await?;
             }
         }
         Ok(())
