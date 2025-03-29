@@ -165,16 +165,6 @@ impl Core {
                 .await
                 .expect("Failed to send header_info to consensus");
             self.consensus_header_sent.insert(key, true);
-            if let Some(parents) = self.header_aggregators
-                .entry(round)
-                .or_insert_with(|| Box::new(HeadersAggregator::new()))
-                .append(header_info, &self.committee)?
-            {
-                self.tx_proposer
-                    .send((parents, round))
-                    .await
-                    .expect("Failed to send header_info to proposer");
-            }
         }
         Ok(())
     }
@@ -444,6 +434,16 @@ impl Core {
                     debug!("Timeout has reached quorum for round {:?}", round - 1);
                     }
                 }
+                if let Some(parents) = self.header_aggregators
+                    .entry(round)
+                    .or_insert_with(|| Box::new(HeadersAggregator::new()))
+                    .append(header_info.clone(), &self.committee)?
+                {
+                    self.tx_proposer
+                        .send((parents, round))
+                        .await
+                        .expect("Failed to send header_info to proposer");
+                }
             } else if weight >= self.committee.quorum_threshold() {
                 // 2f+1 reached, send ready message
                 if !self.ready_header_sent.get(&(round, digest)).unwrap_or(&false) {
@@ -524,7 +524,17 @@ impl Core {
                     debug!("Timeout has reached quorum for round {:?}", round - 1);
                     }
                 }
-                self.send_consensus_header(round, digest, header_info.clone()).await?;
+                // self.send_consensus_header(round, digest, header_info.clone()).await?;
+                if let Some(parents) = self.header_aggregators
+                    .entry(round)
+                    .or_insert_with(|| Box::new(HeadersAggregator::new()))
+                    .append(header_info.clone(), &self.committee)?
+                {
+                    self.tx_proposer
+                        .send((parents, round))
+                        .await
+                        .expect("Failed to send header_info to proposer");
+                }
             }
         }
         Ok(())
@@ -562,8 +572,7 @@ impl Core {
                 .await
                 .expect("Failed to send timeout");
             self.timeout_sent.insert(round, true);
-            weight = aggregator.append(self.name, &self.committee)?;
-            
+            weight = aggregator.append(self.name, &self.committee)?;   
         }
 
         if weight < quorum {
