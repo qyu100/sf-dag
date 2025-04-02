@@ -1,7 +1,11 @@
 {
     "key": {
         "name": "sf-dag",
-        "path": "/data/yqy/.ssh/sf-dag.pem"
+        "path": "/home/yqy/.ssh/sf-dag"
+    },
+    "github_deploy_key": {
+        "name": "qyu100",
+        "path": "/home/yqy/.ssh/github_deploy"
     },
     "port": 5000,
     "repo": {
@@ -10,7 +14,7 @@
         "branch": "sf-bullshark-timeout"
     },
     "instances": {
-        "machine_type": "m5.xlarge",
-        "zones": ["us-east-2","us-west-1","eu-west-3","eu-west-2","ap-southest-1"]
+        "machine_type": "e2-standard-4",
+        "zones": ["europe-west1-b","europe-north1-b","us-east1-b","us-west1-a","asia-northeast1-a"]
     }
 }

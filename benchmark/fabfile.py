@@ -10,10 +10,10 @@ from benchmark.remote import Bench, BenchError
 
 
 @task
-def local(ctx, debug=True):
+def local(ctx, debug=True, consensus_only=True):
     ''' Run benchmarks on localhost '''
     bench_params = {
-        'faults': 1,
+        'faults': 0,
         'nodes': 4,
         'workers': 1,
         'rate': 100_000,
@@ -21,18 +21,20 @@ def local(ctx, debug=True):
         'duration': 10,
         "burst": 3
     }
+    header_size = 512_000
     node_params = {
-        'header_size': 4096_000,  # bytes
+        'consensus_only': consensus_only,
+        'header_size': header_size,  # bytes
         'max_header_delay': 3_000,  # ms
         'gc_depth': 50,  # rounds
         'sync_retry_delay': 10_000,  # ms
         'sync_retry_nodes': 3,  # number of nodes
-        'batch_size': 500_000,  # bytes
-        'tx_size': 512,
+        'batch_size': header_size,  # bytes
+        'tx_size': bench_params['tx_size'],
         'max_batch_delay': 200  # ms
     }
     try:
-        ret = LocalBench(bench_params, node_params).run(debug)
+        ret = LocalBench(bench_params, node_params).run(debug, consensus_only)
         print(ret.result())
     except BenchError as e:
         Print.error(e)
@@ -93,29 +95,30 @@ def install(ctx):
 
 
 @task
-def remote(ctx, debug=False):
-    ''' Run benchmarks on AWS '''
+def remote(ctx, debug=False, consensus_only=True):
+    ''' Run benchmarks on GCP '''
     bench_params = {
         'faults': 0,
         'nodes': 10,
         'workers': 1,
         'collocate': True,
-        'rate': [100000],
+        'rate': 20_000,
         'tx_size': 512,
-        'duration': 60,
+        'duration': 300,
         'runs': 1,
     }
     node_params = {
-        'header_size': 512_000,  # bytes
+        'consensus_only': consensus_only,
+        'header_size': 50,  # bytes
         'max_header_delay': 5_000,  # ms
         'gc_depth': 50,  # rounds
         'sync_retry_delay': 10_000,  # ms
         'sync_retry_nodes': 3,  # number of nodes
-        'batch_size': 512_000,  # bytes
+        'batch_size': 500_000,  # bytes
         'max_batch_delay': 200  # ms
     }
     try:
-        Bench(ctx).run(bench_params, node_params, debug)
+        Bench(ctx).run(bench_params, node_params, debug, consensus_only)
     except BenchError as e:
         Print.error(e)
 
