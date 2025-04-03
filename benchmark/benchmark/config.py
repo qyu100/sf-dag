@@ -171,6 +171,7 @@ class NodeParameters:
             inputs += [json['gc_depth']]
             inputs += [json['sync_retry_delay']]
             inputs += [json['sync_retry_nodes']]
+            inputs += [json['tx_size']]
             inputs += [json['batch_size']]
             inputs += [json['max_batch_delay']]
         except KeyError as e:

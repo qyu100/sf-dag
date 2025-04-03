@@ -41,7 +41,7 @@ def local(ctx, debug=True, consensus_only=True):
 
 
 @task
-def create(ctx, nodes=10):
+def create(ctx, nodes=2):
     ''' Create a testbed'''
     try:
         InstanceManager.make().create_instances(nodes)
@@ -104,18 +104,20 @@ def remote(ctx, debug=False, consensus_only=True):
         'collocate': True,
         'rate': 20_000,
         'tx_size': 512,
-        'duration': 300,
+        'duration': 30,
         'runs': 1,
+        'burst': [3]
     }
     node_params = {
         'consensus_only': consensus_only,
-        'header_size': 50,  # bytes
+        'header_size': 512_000,  # bytes
         'max_header_delay': 5_000,  # ms
         'gc_depth': 50,  # rounds
         'sync_retry_delay': 10_000,  # ms
         'sync_retry_nodes': 3,  # number of nodes
-        'batch_size': 500_000,  # bytes
-        'max_batch_delay': 200  # ms
+        'batch_size': 512,  # bytes
+        'tx_size': bench_params['tx_size'],
+        'max_batch_delay': 10  # ms
     }
     try:
         Bench(ctx).run(bench_params, node_params, debug, consensus_only)

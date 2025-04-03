@@ -220,8 +220,8 @@ class Bench:
         # Run the clients (they will wait for the nodes to be ready).
         # Filter all faulty nodes from the client addresses (or they will wait
         # for the faulty nodes to be online).
-        Print.info('Booting clients...')
         if not consensus_only:
+            Print.info('Booting clients...')
             workers_addresses = committee.workers_addresses(faults)
             rate_share = ceil(rate / committee.workers())
             for i, addresses in enumerate(workers_addresses):
@@ -252,20 +252,20 @@ class Bench:
             self._background_run(host, cmd, log_file)
 
         # Run the workers (except the faulty ones).
-        Print.info('Booting workers...')
-        for i, addresses in enumerate(workers_addresses):
-            for (id, address) in addresses:
-                host = Committee.ip(address)
-                cmd = CommandMaker.run_worker(
-                    PathMaker.key_file(i),
-                    PathMaker.committee_file(),
-                    PathMaker.db_path(i, id),
-                    PathMaker.parameters_file(),
-                    id,  # The worker's id.
-                    debug=debug
-                )
-                log_file = PathMaker.worker_log_file(i, id)
-                self._background_run(host, cmd, log_file)
+        # Print.info('Booting workers...')
+        # for i, addresses in enumerate(workers_addresses):
+        #     for (id, address) in addresses:
+        #         host = Committee.ip(address)
+        #         cmd = CommandMaker.run_worker(
+        #             PathMaker.key_file(i),
+        #             PathMaker.committee_file(),
+        #             PathMaker.db_path(i, id),
+        #             PathMaker.parameters_file(),
+        #             id,  # The worker's id.
+        #             debug=debug
+        #         )
+        #         log_file = PathMaker.worker_log_file(i, id)
+        #         self._background_run(host, cmd, log_file)
 
         # Wait for all transactions to be processed.
         duration = bench_parameters.duration
@@ -279,21 +279,21 @@ class Bench:
         subprocess.run([cmd], shell=True, stderr=subprocess.DEVNULL)
 
         # Download log files.
-        workers_addresses = committee.workers_addresses(faults)
-        progress = progress_bar(workers_addresses, prefix='Downloading workers logs:')
-        for i, addresses in enumerate(progress):
-            for id, address in addresses:
-                host = Committee.ip(address)
-                c = Connection(host, user='ubuntu', connect_kwargs=self.connect)
-                if not consensus_only:
+        if not consensus_only:
+            workers_addresses = committee.workers_addresses(faults)
+            progress = progress_bar(workers_addresses, prefix='Downloading workers logs:')
+            for i, addresses in enumerate(progress):
+                for id, address in addresses:
+                    host = Committee.ip(address)
+                    c = Connection(host, user='ubuntu', connect_kwargs=self.connect)
                     c.get(
                         PathMaker.client_log_file(i, id), 
                         local=PathMaker.client_log_file(i, id)
                     )
-                c.get(
-                    PathMaker.worker_log_file(i, id), 
-                    local=PathMaker.worker_log_file(i, id)
-                )
+                # c.get(
+                #     PathMaker.worker_log_file(i, id), 
+                #     local=PathMaker.worker_log_file(i, id)
+                # )
 
         primary_addresses = committee.primary_addresses(faults)
         progress = progress_bar(primary_addresses, prefix='Downloading primaries logs:')
