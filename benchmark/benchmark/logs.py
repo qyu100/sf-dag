@@ -170,7 +170,6 @@ class LogParser:
         tx_size = self.configs[0]['transaction_size']
         txns = bytes / tx_size
         d = end-start
-        print(bytes, tx_size, txns, d)
         return txns/d
     
     def _end_to_end_throughput(self, commits):

@@ -29,7 +29,6 @@ class FabricError(Exception):
 class ExecutionError(Exception):
     pass
 
-
 class Bench:
     def __init__(self, ctx):
         self.manager = InstanceManager.make()
@@ -354,7 +353,7 @@ class Bench:
                     Print.heading(f'Run {i+1}/{bench_parameters.runs}')
                     try:
                         self._run_single(
-                            rate, burst, committee_copy, bench_parameters, debug
+                            rate, burst, committee_copy, bench_parameters, debug, consensus_only=consensus_only
                         )
 
                         faults = bench_parameters.faults
