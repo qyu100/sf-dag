@@ -132,13 +132,15 @@ impl Primary {
             .worker_to_primary;
         address.set_ip("0.0.0.0".parse().unwrap());
 
-        Worker::spawn(
-            name,
-            0,
-            committee.clone(),
-            parameters.clone(),
-            tx_our_digests,
-        );
+        if !parameters.consensus_only {
+            Worker::spawn(
+                name,
+                0,
+                committee.clone(),
+                parameters.clone(),
+                tx_our_digests,
+            );
+        }
 
         // The `Synchronizer` provides auxiliary methods helping to `Core` to sync.
         let synchronizer = Synchronizer::new(
@@ -207,6 +209,7 @@ impl Primary {
             /* rx_core */ rx_parents,
             /* rx_workers */ rx_our_digests,
             /* tx_core */ tx_headers,
+            parameters.consensus_only,
         );
 
         // The `Helper` is dedicated to reply to certificates requests from other primaries.

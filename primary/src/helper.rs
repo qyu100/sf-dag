@@ -56,15 +56,19 @@ impl Helper {
             for digest in digests {
                 match self.store.read(digest.to_vec()).await {
                     Ok(Some(data)) => {
-                        // TODO: Remove this deserialization-serialization in the critical path.
-                        let header_msg = bincode::deserialize(&data).unwrap();
-
-                        if let HeaderMessage::HeaderInfo(header_info) = header_msg {
-                            let bytes = bincode::serialize(&PrimaryMessage::HeaderMsg(
-                                HeaderMessage::HeaderInfo(header_info),
-                            ))
-                            .expect("Failed to serialize our own certificate");
-                            self.network.send(address, Bytes::from(bytes)).await;  
+                        match bincode::deserialize(&data) {
+                            Ok(header_msg) => {
+                                if let HeaderMessage::HeaderInfo(header_info) = header_msg {
+                                    let bytes = bincode::serialize(&PrimaryMessage::HeaderMsg(
+                                        HeaderMessage::HeaderInfo(header_info),
+                                    ))
+                                    .expect("Failed to serialize our own certificate");
+                                    self.network.send(address, Bytes::from(bytes)).await;
+                                }
+                            }
+                            Err(e) => {
+                                warn!("Failed to deserialize store data for digest {:?}: {}", digest, e);
+                            }
                         }
                     }
                     Ok(None) => (),

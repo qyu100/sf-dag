@@ -174,8 +174,6 @@ impl Core {
 
     #[async_recursion]
     async fn process_header(&mut self, header_msg: &HeaderMessage) -> DagResult<()> {
-        debug!("Processing {:?}", header_msg);
-
         let header_info: HeaderInfo;
         match header_msg {
             HeaderMessage::HeaderWithParents(header_with_parents) => {
@@ -221,7 +219,6 @@ impl Core {
                     DagError::MalformedHeader(header_info.id.clone())
                 );
                 stake += self.committee.stake(&parent_header_info.author);
-
             }
             ensure!(
                 stake >= self.committee.quorum_threshold(),
@@ -241,18 +238,6 @@ impl Core {
                     .expect("Failed to send header_info to consensus");
                 self.consensus_header_sent.insert((round, digest), true);
             }
-            // Check if we have enough headers to enter a new dag round and propose a header.
-            if let Some(parents) = self
-                .header_aggregators
-                .entry(header_info.round)
-                .or_insert_with(|| Box::new(HeadersAggregator::new()))
-                .append(header_info.clone(), &self.committee)? {
-                // Send it to the `Proposer`.
-                self.tx_proposer
-                    .send((parents, header_info.round))
-                    .await
-                    .expect("Failed to send header_info to proposer");
-            } 
         }
         // Store the header.
         let round = header_info.round;
@@ -298,12 +283,11 @@ impl Core {
         let aggregator = self.echo_header_aggregators
             .entry((round, digest))
             .or_insert_with(ThresholdAggregator::new);
-
         let weight = aggregator.append(author, &self.committee)?;
-
+        // debug!("weight: {:?}", weight);
         // Check if we have received 2f+1 EchoHeaders for this round and digest
         if weight >= self.committee.quorum_threshold() {
-            if !self.ready_header_sent.contains_key(&(round, digest)) {
+            if !self.ready_header_sent.get(&(round, digest)).unwrap_or(&false) {
                 // Send <Ready, H(m)> to primaries.
                 let addresses = self
                     .committee
@@ -322,6 +306,7 @@ impl Core {
                     .or_insert_with(Vec::new)
                     .extend(handlers);
 
+                self.ready_header_sent.insert((round, digest), true);
                 let ready_aggregator = self.ready_header_aggregators
                     .entry((round, digest))
                     .or_insert_with(ThresholdAggregator::new);
@@ -348,7 +333,7 @@ impl Core {
         
         if weight >= self.committee.validity_threshold() 
             && weight < self.committee.quorum_threshold() {
-            if !self.ready_header_sent.contains_key(&(ready_header.round, digest)) {
+            if !self.ready_header_sent.get(&(round, digest)).unwrap_or(&false) {
                 // Send <Ready, H(m)> to primaries.
                 let addresses = self
                     .committee
@@ -358,19 +343,9 @@ impl Core {
                     .collect();
                 
                 let new_ready_header = ReadyHeader::new_ready_header(&ready_header, &self.name).await;
-                let bytes = bincode::serialize(&PrimaryMessage::Ready(new_ready_header.clone()))
+                let bytes = bincode::serialize(&PrimaryMessage::Ready(new_ready_header))
                     .expect("Failed to serialize ReadyHeader");
                 let handlers = self.network.broadcast(addresses, Bytes::from(bytes)).await;
-            
-                self.cancel_handlers
-                    .entry(round)
-                    .or_insert_with(Vec::new)
-                    .extend(handlers);
-                
-                self.ready_headers
-                    .entry((round, digest))
-                    .or_insert_with(HashSet::new)
-                    .insert(self.name); 
 
                 self.ready_header_sent.insert((round, digest), true);
                 // info!("sent ready header!");
@@ -397,12 +372,12 @@ impl Core {
                 // Check if we have enough headers to enter a new dag round and propose a header.
                 if let Some(parents) = self
                     .header_aggregators
-                    .entry(header_info.round)
+                    .entry(round)
                     .or_insert_with(|| Box::new(HeadersAggregator::new()))
                     .append(header_info.clone(), &self.committee)? {
                     // Send it to the `Proposer`.
                     self.tx_proposer
-                        .send((parents, header_info.round))
+                        .send((parents, round))
                         .await
                         .expect("Failed to send header_info to proposer");
                 } 

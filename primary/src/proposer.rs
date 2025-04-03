@@ -48,6 +48,7 @@ pub struct Proposer {
     digests: Vec<(Digest, WorkerId)>,
     /// Keeps track of the size (in bytes) of batches' digests that we received so far.
     payload_size: usize,
+    consensus_only: bool,
 }
 
 impl Proposer {
@@ -61,6 +62,7 @@ impl Proposer {
         rx_core: Receiver<(Vec<HeaderInfo>, Round)>,
         rx_workers: Receiver<Vec<Transaction>>,
         tx_core: Sender<HeaderWithParents>,
+        consensus_only: bool,
     ) {
         let genesis = HeaderInfo::genesis(&committee);
         tokio::spawn(async move {
@@ -79,6 +81,7 @@ impl Proposer {
                 txns: Vec::new(),
                 digests: Vec::with_capacity(2 * header_size),
                 payload_size: 0,
+                consensus_only,
             }
             .run()
             .await;
@@ -93,43 +96,49 @@ impl Proposer {
             self.header_size / self.tx_size
         };
 
+        let mut payload;
+        if self.consensus_only {
+            payload = vec![vec![0u8; self.tx_size]; (self.header_size / self.tx_size)];
+        } else {
+            payload = self.txns.drain(..limit).collect();
+        }
+
         let parents: Vec<HeaderInfo> = self.last_parents.drain(..).collect();
         let header = Header::new(
             self.name,
             self.round,
-            self.txns.drain(..limit).collect(),
+            payload,
             parents.iter().map(|x| x.id).collect(),
         )
         .await;
 
+        info!("Created {:?}", header.id);
+
         #[cfg(feature = "benchmark")]
         {
-            info!("Created {:?} for round {:?}", header.id, header.round);
             info!(
                 "Header {:?} contains {} B",
                 header.id,
                 header.payload.len() * self.tx_size
             );
-            // info!("self.txns.len(): {:?}", self.txns.len());
-            // info!("self.header_size: {:?}", self.header_size);
-            // info!("payload_len: {:?}", header.payload.len());
-            let tx_ids: Vec<_> = header
-                .payload
-                .clone()
-                .iter()
-                .filter(|tx| tx[0] == 0u8 && tx.len() > 8)
-                .filter_map(|tx| tx[1..9].try_into().ok())
-                .collect();
-            for id in tx_ids {
-                info!(
-                    "Header {:?} contains sample tx {}",
-                    header.id,
-                    u64::from_be_bytes(id)
-                );
+            if !self.consensus_only {
+                let tx_ids: Vec<_> = header
+                    .payload
+                    .clone()
+                    .iter()
+                    .filter(|tx| tx[0] == 0u8 && tx.len() > 8)
+                    .filter_map(|tx| tx[1..9].try_into().ok())
+                    .collect();
+                for id in tx_ids {
+                    info!(
+                        "Header {:?} contains sample tx {}",
+                        header.id,
+                        u64::from_be_bytes(id)
+                    );
+                }
             }
             // NOTE: This log entry is used to compute performance.
         }
-
 
         // Send the new header to the `Core` that will broadcast and process it.
         let header_with_parents = HeaderWithParents{header, parents};
@@ -205,7 +214,7 @@ impl Proposer {
             let enough_parents = !self.last_parents.is_empty();
             let enough_digests = self.payload_size >= self.header_size;
             let timer_expired = timer.is_elapsed();
-            if (timer_expired || (enough_digests && advance)) && enough_parents {
+            if (timer_expired || ((enough_digests || self.consensus_only) && advance)) && enough_parents {
                 if timer_expired {
                     warn!("Timer expired for round {}", self.round);
                 }
