@@ -238,8 +238,6 @@ impl Core {
             }
         }
 
-        // info!("recv header {:?}", header_info.id);
-
         // Indicate that we are processing this header.
         self.processing_header_infos
             .entry(header_info.id)
