@@ -54,8 +54,6 @@ pub struct Core {
     rx_proposer: Receiver<HeaderWithCertificate>,
     /// Receives our newly created timeouts from the `Proposer`.
     rx_timeout: Receiver<Timeout>,
-    /// Receives our newly created no vote msgs from the `Proposer`.
-    rx_no_vote_msg: Receiver<NoVoteMsg>,
     /// Output all certificates to the consensus layer.
     tx_consensus: Sender<Certificate>,
     /// Send valid a quorum of certificates' ids to the `Proposer` (along with their round).
@@ -104,7 +102,6 @@ impl Core {
         rx_certificate_waiter: Receiver<Certificate>,
         rx_proposer: Receiver<HeaderWithCertificate>,
         rx_timeout: Receiver<Timeout>,
-        rx_no_vote_msg: Receiver<NoVoteMsg>,
         tx_consensus: Sender<Certificate>,
         tx_proposer: Sender<(Vec<Certificate>, Round)>,
         tx_timeout_cert: Sender<(TimeoutCert, Round)>,
@@ -126,7 +123,6 @@ impl Core {
                 rx_certificate_waiter,
                 rx_proposer,
                 rx_timeout,
-                rx_no_vote_msg,
                 tx_consensus,
                 tx_proposer,
                 tx_timeout_cert,
@@ -173,10 +169,6 @@ impl Core {
         debug!("Broadcasted own timeout for round {}", timeout.round);
 
         self.process_timeout(timeout).await
-    }
-
-    async fn process_own_no_vote_msg(&mut self, no_vote_msg: NoVoteMsg) -> DagResult<()> {
-        Ok(())
     }
 
     async fn process_own_header(
@@ -500,8 +492,6 @@ impl Core {
 
                 // We also receive here our timeout created by the `Proposer`.
                 Some(timeout) = self.rx_timeout.recv() => self.process_own_timeout(timeout).await,
-                // We also receive here our no vote messages created by the `Proposer`.
-                Some(no_vote_msg) = self.rx_no_vote_msg.recv() => self.process_own_no_vote_msg(no_vote_msg).await,
             };
             match result {
                 Ok(()) => (),

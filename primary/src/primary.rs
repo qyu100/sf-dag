@@ -94,7 +94,6 @@ impl Primary {
         let (tx_headers, rx_headers) = channel(CHANNEL_CAPACITY);
         let (tx_timeout, rx_timeout) = channel(CHANNEL_CAPACITY);
         let (tx_timeout_cert, rx_timeout_cert) = channel(CHANNEL_CAPACITY);
-        let (tx_no_vote_msg, rx_no_vote_msg) = channel(CHANNEL_CAPACITY);
         let (tx_no_vote_cert, rx_no_vote_cert) = channel(CHANNEL_CAPACITY);
         let (tx_sync_headers, rx_sync_headers) = channel(CHANNEL_CAPACITY);
         let (tx_sync_certificates, rx_sync_certificates) = channel(CHANNEL_CAPACITY);
@@ -189,7 +188,6 @@ impl Primary {
             /* rx_certificate_waiter */ rx_certificates_loopback,
             /* rx_proposer */ rx_headers,
             rx_timeout,
-            rx_no_vote_msg,
             tx_consensus.clone(),
             /* tx_proposer */ tx_parents.clone(),
             tx_timeout_cert,
@@ -241,7 +239,6 @@ impl Primary {
             /* tx_core */ tx_headers,
             /* tx_core_timeout */ tx_timeout,
             rx_timeout_cert,
-            tx_no_vote_msg,
             rx_no_vote_cert,
         );
 

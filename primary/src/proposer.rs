@@ -42,8 +42,6 @@ pub struct Proposer {
     tx_core_timeout: Sender<Timeout>,
     /// Receives timeout certs from the `Core`.
     rx_timeout_cert: Receiver<(TimeoutCert, Round)>,
-    /// Sends newly created no vote message to the `Core`.
-    tx_core_no_vote_msg: Sender<NoVoteMsg>,
     /// Receives no vote certs from the `Core`.
     rx_no_vote_cert: Receiver<(NoVoteCert, Round)>,
 
@@ -78,7 +76,6 @@ impl Proposer {
         tx_core: Sender<HeaderWithCertificate>,
         tx_core_timeout: Sender<Timeout>,
         rx_timeout_cert: Receiver<(TimeoutCert, Round)>,
-        tx_core_no_vote_msg: Sender<NoVoteMsg>,
         rx_no_vote_cert: Receiver<(NoVoteCert, Round)>,
     ) {
         let genesis = Certificate::genesis(&committee);
@@ -96,7 +93,6 @@ impl Proposer {
                 tx_core,
                 tx_core_timeout,
                 rx_timeout_cert,
-                tx_core_no_vote_msg,
                 rx_no_vote_cert,
                 round: 0,
                 last_parents: genesis,
