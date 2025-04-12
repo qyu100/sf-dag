@@ -10,7 +10,7 @@ from benchmark.remote import Bench, BenchError
 
 
 @task
-def local(ctx, debug=False, consensus_only=False, header_size=512):
+def local(ctx, debug=False, consensus_only=True, header_size=512):
     ''' Run benchmarks on localhost '''
     bench_params = {
         'faults': 0,
@@ -31,6 +31,7 @@ def local(ctx, debug=False, consensus_only=False, header_size=512):
         'batch_size': header_size,  # bytescd
         'tx_size': bench_params['tx_size'],
         'max_batch_delay': 200,  # ms
+        'f_num': 3
     }
     try:
         ret = LocalBench(bench_params, node_params).run(debug, consensus_only)

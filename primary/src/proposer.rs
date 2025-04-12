@@ -124,18 +124,6 @@ impl Proposer {
             .expect("Failed to send timeout");
     }
 
-    async fn make_no_vote_msg(&mut self) {
-        let no_vote_msg = NoVoteMsg::new(self.round, self.name, &mut self.signature_service).await;
-
-        debug!("Created {:?}", no_vote_msg);
-
-        // Send the new timeout to the `Core` that will broadcast and process it.
-        self.tx_core_no_vote_msg
-            .send(no_vote_msg)
-            .await
-            .expect("Failed to send no vote message");
-    }
-
     async fn make_header(&mut self) {
         // Make a new header.
         // Prepare the timeout and no vote certificates
@@ -173,9 +161,6 @@ impl Proposer {
             self.round,
             payload,
             parents.iter().map(|x| x.header_id).collect(),
-            timeout_cert,
-            no_vote_cert,
-            &mut self.signature_service,
         )
         .await;
 
@@ -266,10 +251,6 @@ impl Proposer {
                 || ((enough_digests || self.consensus_only) && advance))
                 && enough_parents
             {
-                if timer_expired && self.last_leader.is_none() && !is_next_leader {
-                    self.make_no_vote_msg().await;
-                }
-
                 // Advance to the next round.
                 self.round += 1;
                 debug!("Dag moved to round {}", self.round);

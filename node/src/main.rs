@@ -7,7 +7,6 @@ use config::Export as _;
 use config::Import as _;
 use config::{Committee, KeyPair, Parameters};
 use consensus::Consensus;
-use crypto::combine_keys;
 use env_logger::Env;
 use primary::{Certificate, Primary};
 use store::Store;
@@ -107,13 +106,6 @@ async fn run(matches: &ArgMatches<'_>) -> Result<()> {
 
     let comm = Comm::import(committee_file).context("Failed to load the committee information")?;
 
-    let committee = Committee::new(comm.authorities);
-
-    let mut sorted_keys = committee.get_bls_public_keys();
-    sorted_keys.sort();
-
-    let combined_pubkey = combine_keys(&sorted_keys);
-
     // Load default parameters if none are specified.
     let parameters = match parameters_file {
         Some(filename) => {
@@ -121,6 +113,7 @@ async fn run(matches: &ArgMatches<'_>) -> Result<()> {
         }
         None => Parameters::default(),
     };
+    let committee = Committee::new(comm.authorities, parameters.f_num);
 
     // Make the data store.
     let store = Store::new(store_path).context("Failed to create a store")?;
@@ -137,10 +130,7 @@ async fn run(matches: &ArgMatches<'_>) -> Result<()> {
             let (tx_consensus_header, rx_consensus_header) = channel(CHANNEL_CAPACITY);
             Primary::spawn(
                 ed_keypair,
-                bls_keypair,
                 committee.clone(),
-                sorted_keys,
-                combined_pubkey,
                 parameters.clone(),
                 store,
                 /* tx_consensus */ tx_new_certificates,

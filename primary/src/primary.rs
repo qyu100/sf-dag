@@ -9,15 +9,13 @@ use crate::messages::{
     Certificate, Header, HeaderInfo, HeaderInfoWithCertificate, HeaderWithCertificate, NoVoteMsg,
     Timeout, Vote,
 };
-// use crate::payload_receiver::PayloadReceiver;
 use crate::proposer::Proposer;
 use crate::synchronizer::Synchronizer;
 use crate::worker::Worker;
 use async_trait::async_trait;
-use blsttc::PublicKeyShareG2;
 use bytes::Bytes;
-use config::{BlsKeyPair, Committee, KeyPair, Parameters, WorkerId};
-use crypto::{BlsSignatureService, Digest, PublicKey, SignatureService};
+use config::{Committee, KeyPair, Parameters, WorkerId};
+use crypto::{Digest, PublicKey, SignatureService};
 use futures::sink::SinkExt as _;
 use log::info;
 use network::{MessageHandler, Receiver as NetworkReceiver, Writer};
@@ -38,9 +36,7 @@ pub type Round = u64;
 pub enum PrimaryMessage {
     HeaderMsg(HeaderMessage),
     Timeout(Timeout),
-    NoVoteMsg(NoVoteMsg),
     Vote(Vote),
-    Certificate(Certificate),
     CertificatesRequest(Vec<Digest>, /* requestor */ PublicKey),
     PayloadRequest(Digest, PublicKey),
 }
@@ -85,10 +81,7 @@ pub struct Primary;
 impl Primary {
     pub fn spawn(
         keypair: KeyPair,
-        bls_keypair: BlsKeyPair,
         committee: Committee,
-        sorted_keys: Vec<PublicKeyShareG2>,
-        combined_key: PublicKeyShareG2,
         parameters: Parameters,
         store: Store,
         tx_consensus: Sender<Certificate>,
@@ -115,9 +108,7 @@ impl Primary {
 
         // Parse the public and secret key of this authority.
         let name = keypair.name;
-        let _name_bls = bls_keypair.nameg2;
         let secret = keypair.secret;
-        let bls_secret = bls_keypair.secret;
 
         // Atomic variable use to synchronizer all tasks with the latest consensus round. This is only
         // used for cleanup. The only tasks that write into this variable is `GarbageCollector`.
@@ -178,12 +169,11 @@ impl Primary {
             store.clone(),
             /* tx_header_waiter */ tx_sync_headers,
             /* tx_certificate_waiter */ tx_sync_certificates,
+            parameters.gc_depth,
         );
 
         // The `SignatureService` is used to require signatures on specific digests.
         let signature_service = SignatureService::new(secret);
-        let bls_signature_service = BlsSignatureService::new(bls_secret);
-        // let sorted_keys = Arc::new(sorted_keys);
         // The `Core` receives and handles headers, votes, and certificates from the other primaries.
         Core::spawn(
             name,
@@ -191,7 +181,6 @@ impl Primary {
             store.clone(),
             synchronizer,
             signature_service.clone(),
-            bls_signature_service,
             consensus_round.clone(),
             parameters.gc_depth,
             tx_primary_messages,
@@ -201,13 +190,11 @@ impl Primary {
             /* rx_proposer */ rx_headers,
             rx_timeout,
             rx_no_vote_msg,
-            tx_consensus,
+            tx_consensus.clone(),
             /* tx_proposer */ tx_parents.clone(),
             tx_timeout_cert,
             tx_no_vote_cert,
             tx_consensus_header_msg,
-            sorted_keys.clone(),
-            combined_key.clone(),
         );
 
         // Keeps track of the latest consensus round and allows other tasks to clean up their their internal state
@@ -294,6 +281,7 @@ impl MessageHandler for PrimaryReceiverHandler {
                 .send((missing, requestor))
                 .await
                 .expect("Failed to send primary message"),
+
             request => self
                 .tx_primary_messages
                 .send(request)

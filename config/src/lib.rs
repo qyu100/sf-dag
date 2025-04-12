@@ -83,6 +83,7 @@ pub struct Parameters {
     /// The delay after which the workers seal a batch of transactions, even if `max_batch_size`
     /// is not reached. Denominated in ms.
     pub max_batch_delay: u64,
+    pub f_num: u32,
 }
 
 impl Default for Parameters {
@@ -97,6 +98,7 @@ impl Default for Parameters {
             batch_size: 500_000,
             tx_size: 512,
             max_batch_delay: 100,
+            f_num: 3,
         }
     }
 }
@@ -116,6 +118,7 @@ impl Parameters {
         info!("Batch size set to {} B", self.batch_size);
         info!("Max batch delay set to {} ms", self.max_batch_delay);
         info!("Transaction size set to {} B", self.tx_size);
+        info!("F  set to {} B", self.f_num);
     }
 }
 
@@ -158,17 +161,19 @@ impl Import for Comm {}
 pub struct Committee {
     pub authorities: BTreeMap<PublicKey, Authority>,
     pub sorted_keys: Vec<PublicKey>,
+    pub f_num: u32,
 }
 
 impl Import for Committee {}
 
 impl Committee {
-    pub fn new(authorities: BTreeMap<PublicKey, Authority>) -> Committee {
+    pub fn new(authorities: BTreeMap<PublicKey, Authority>, f_num: u32) -> Committee {
         let mut keys: Vec<_> = authorities.keys().cloned().collect();
         keys.sort();
         let committee = Self {
             authorities,
             sorted_keys: keys,
+            f_num,
         };
         committee
     }
@@ -198,6 +203,13 @@ impl Committee {
         // then (2 N + 3) / 3 = 2f + 1 + (2k + 2)/3 = 2f + 1 + k = N - f
         let total_votes: Stake = self.authorities.values().map(|x| x.stake).sum();
         2 * total_votes / 3 + 1
+    }
+
+    pub fn optimistic_threshold(&self) -> Stake {
+        let total_votes: Stake = self.authorities.values().map(|x| x.stake).sum();
+        let x = (total_votes + 2 * self.f_num - 2) as f64 / 2.0;
+        let ceil_result = x.ceil() as u32;
+        ceil_result
     }
 
     /// Returns the stake required to reach availability (f+1).
@@ -231,6 +243,16 @@ impl Committee {
         }
 
         sub_leaders
+    }
+
+    pub fn leader_list(&self, leaders_per_round: usize, seed: usize) -> Vec<PublicKey> {
+        let mut keys: Vec<_> = self.authorities.keys().cloned().collect();
+        keys.sort();
+        let mut leaders: Vec<PublicKey> = Vec::new();
+        for i in 0..leaders_per_round {
+            leaders.push(keys[(seed + i) % self.size()]);
+        }
+        leaders
     }
 
     /// Returns the primary addresses of the target primary.
