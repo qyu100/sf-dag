@@ -1,6 +1,6 @@
 // Copyright(C) Facebook, Inc. and its affiliates.
 use crate::error::{DagError, DagResult};
-use crate::messages::{Certificate, NoVoteCert, NoVoteMsg, Timeout, TimeoutCert, Vote};
+use crate::messages::{Certificate, NoVoteCert, NoVoteMsg, Timeout, TimeoutCert, Vote, Ready};
 use config::{Committee, Stake};
 use crypto::PublicKey;
 use crypto::Signature;
@@ -26,13 +26,48 @@ impl VotesAggregator {
         // Ensure it is the first time this authority votes.
         ensure!(self.used.insert(author), DagError::AuthorityReuse(author));
         self.weight += committee.stake(&author);
-        if self.weight >= committee.optimistic_threshold() {
+        if self.weight >= committee.quorum_threshold() {
             self.weight = 0; // Ensures quorum is only reached once.
 
             return Ok(Some(Certificate {
                 header_id: vote.id,
                 round: vote.round,
                 origin: vote.origin,
+            }));
+        }
+        Ok(None)
+    }
+}
+
+pub struct ReadyAggregator {
+    weight: Stake,
+    used: HashSet<PublicKey>,
+}
+
+impl ReadyAggregator {
+    pub fn new() -> Self {
+        Self {
+            weight: 0,
+            used: HashSet::new(),
+        }
+    }
+
+    pub fn append(
+        &mut self,
+        ready: &Ready,
+        committee: &Committee,
+    ) -> DagResult<Option<Certificate>> {
+        let author = ready.author;
+        // Ensure it is the first time this authority votes.
+        ensure!(self.used.insert(author), DagError::AuthorityReuse(author));
+        self.weight += committee.stake(&author);
+        if self.weight >= committee.quorum_threshold() {
+            self.weight = 0; // Ensures quorum is only reached once.
+
+            return Ok(Some(Certificate {
+                header_id: ready.id,
+                round: ready.round,
+                origin: ready.origin,
             }));
         }
         Ok(None)

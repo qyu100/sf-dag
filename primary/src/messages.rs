@@ -336,6 +336,62 @@ impl fmt::Debug for Vote {
     }
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Ready {
+    pub id: Digest,
+    pub round: Round,
+    pub origin: PublicKey,
+    pub author: PublicKey,
+}
+
+impl Ready {
+    pub async fn new(
+        header_id: Digest,
+        round: Round,
+        origin: &PublicKey,
+        author: &PublicKey,
+    ) -> Self {
+        Self {
+            id: header_id,
+            round,
+            origin: *origin,
+            author: *author,
+        }
+    }
+
+    pub fn verify(&self, committee: &Committee) -> DagResult<()> {
+        // Ensure the authority has voting rights.
+        ensure!(
+            committee.stake(&self.author) > 0,
+            DagError::UnknownAuthority(self.author)
+        );
+        Ok(())
+    }
+}
+
+impl Hash for Ready {
+    fn digest(&self) -> Digest {
+        let mut hasher = Sha512::new();
+        hasher.update(&self.id);
+        hasher.update(self.round.to_le_bytes());
+        hasher.update(&self.origin);
+        Digest(hasher.finalize().as_slice()[..32].try_into().unwrap())
+    }
+}
+
+impl fmt::Debug for Ready {
+    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+        write!(
+            f,
+            "{}: R{}({}, {})",
+            self.digest(),
+            self.round,
+            self.author,
+            self.id
+        )
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize, Default)]
 pub struct TimeoutCert {
     pub round: Round,
