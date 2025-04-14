@@ -392,10 +392,10 @@ impl Core {
             .extend(handlers);
 
         // Initialize the HashMap if it doesn't exist
-        // let aggregator = self.echo_header_aggregators
-        //     .entry((hr, hid))
-        //     .or_insert_with(ThresholdAggregator::new);
-        // aggregator.append(self.name, &self.committee)?;
+        let aggregator = self.echo_header_aggregators
+            .entry((hr, hid))
+            .or_insert_with(ThresholdAggregator::new);
+        aggregator.append(self.name, &self.committee)?;
         Ok(())
     }
 
@@ -408,33 +408,34 @@ impl Core {
         let aggregator = self.echo_header_aggregators
             .entry((round, digest))
             .or_insert_with(ThresholdAggregator::new);
-        if let Some((header_info, has_leader)) = self.processing_header_infos.get(&digest) {
-            let weight = aggregator.append(author, &self.committee)?;
-            if weight >= self.committee.optimistic_threshold() {
-                debug!("optimisitc_threshold for round{:?} reached for weight: {:?}", round, weight);
-                if !has_leader {
-                    if let Some(timeout_agg) = self.timeout_aggregators.get(&(round - 1)) {
-                        if !timeout_agg.check_threshold(self.committee.quorum_threshold()) {
-                            self.timeout_suspended
-                                .entry(round - 1)
-                                .or_insert_with(Vec::new)
-                                .push(header_info.clone());
-                            debug!("Processing of {} suspended: missing timeout quorum", digest);
-                            return Ok(());
-                        }
-                        if header_info.author == self.committee.leader(round as usize) {
-                            self.no_vote_suspended
-                                .entry(round - 1)
-                                .or_insert_with(Vec::new)
-                                .push(header_info.clone());
-                            if !self.no_vote_cert_sent.get(&(header_info.round - 1)).unwrap_or(&false) == true {
-                                debug!("Processing of {} suspended: missing no_vote quorum", digest);
-                                return Ok(());          
-                            }
-                        }
-                    debug!("Timeout has reached quorum for round {:?}", round - 1);
-                    }
-                }
+        // if let Some((header_info, has_leader)) = self.processing_header_infos.get(&digest) {
+        let weight = aggregator.append(author, &self.committee)?;
+        if weight >= self.committee.optimistic_threshold() {
+            debug!("optimisitc_threshold for round{:?} reached for weight: {:?}", round, weight);
+                // if !has_leader {
+                //     if let Some(timeout_agg) = self.timeout_aggregators.get(&(round - 1)) {
+                //         if !timeout_agg.check_threshold(self.committee.quorum_threshold()) {
+                //             self.timeout_suspended
+                //                 .entry(round - 1)
+                //                 .or_insert_with(Vec::new)
+                //                 .push(header_info.clone());
+                //             debug!("Processing of {} suspended: missing timeout quorum", digest);
+                //             return Ok(());
+                //         }
+                //         if header_info.author == self.committee.leader(round as usize) {
+                //             self.no_vote_suspended
+                //                 .entry(round - 1)
+                //                 .or_insert_with(Vec::new)
+                //                 .push(header_info.clone());
+                //             if !self.no_vote_cert_sent.get(&(header_info.round - 1)).unwrap_or(&false) == true {
+                //                 debug!("Processing of {} suspended: missing no_vote quorum", digest);
+                //                 return Ok(());          
+                //             }
+                //         }
+                //     debug!("Timeout has reached quorum for round {:?}", round - 1);
+                //     }
+                // }
+            if let Some((header_info, has_leader)) = self.processing_header_infos.get(&digest) {
                 if let Some(parents) = self.header_aggregators
                     .entry(round)
                     .or_insert_with(|| Box::new(HeadersAggregator::new()))
@@ -445,25 +446,27 @@ impl Core {
                         .await
                         .expect("Failed to send header_info to proposer");
                 }
-            } else if weight >= self.committee.quorum_threshold() {
-                // 2f+1 reached, send ready message
-                if !self.ready_header_sent.get(&(round, digest)).unwrap_or(&false) {
-                    let addresses = self.committee.others_primaries(&self.name)
-                        .iter()
-                        .map(|(_, info)| info.primary_to_primary)
-                        .collect();
-                    let ready_header = ReadyHeader::new(&echo_header, &self.name).await;
-                    let bytes = bincode::serialize(&PrimaryMessage::Ready(ready_header.clone()))
-                        .expect("Failed to serialize ReadyHeader");
-                    let handlers = self.network.broadcast(addresses, Bytes::from(bytes)).await;
-                    self.cancel_handlers.entry(round).or_insert_with(Vec::new).extend(handlers);
-                    self.ready_header_sent.insert((round, digest), true);
-                    let ready_aggregator = self.ready_header_aggregators
-                        .entry((round, digest))
-                        .or_insert_with(ThresholdAggregator::new);
-                    ready_aggregator.append(self.name, &self.committee)?;
-                }
             }
+        } else if weight >= self.committee.quorum_threshold() {
+            // 2f+1 reached, send ready message
+            if !self.ready_header_sent.get(&(round, digest)).unwrap_or(&false) {
+                let addresses = self.committee.others_primaries(&self.name)
+                    .iter()
+                    .map(|(_, info)| info.primary_to_primary)
+                    .collect();
+                let ready_header = ReadyHeader::new(&echo_header, &self.name).await;
+                let bytes = bincode::serialize(&PrimaryMessage::Ready(ready_header.clone()))
+                    .expect("Failed to serialize ReadyHeader");
+                let handlers = self.network.broadcast(addresses, Bytes::from(bytes)).await;
+                self.cancel_handlers.entry(round).or_insert_with(Vec::new).extend(handlers);
+                self.ready_header_sent.insert((round, digest), true);
+                let ready_aggregator = self.ready_header_aggregators
+                    .entry((round, digest))
+                    .or_insert_with(ThresholdAggregator::new);
+                ready_aggregator.append(self.name, &self.committee)?;
+            }
+        }
+        if let Some((header_info, has_leader)) = self.processing_header_infos.get(&digest) {
             self.send_consensus_header(round, digest, header_info.clone()).await?;
         }
         Ok(())
