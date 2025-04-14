@@ -392,10 +392,10 @@ impl Core {
             .extend(handlers);
 
         // Initialize the HashMap if it doesn't exist
-        let aggregator = self.echo_header_aggregators
-            .entry((hr, hid))
-            .or_insert_with(ThresholdAggregator::new);
-        aggregator.append(self.name, &self.committee)?;
+        // let aggregator = self.echo_header_aggregators
+        //     .entry((hr, hid))
+        //     .or_insert_with(ThresholdAggregator::new);
+        // aggregator.append(self.name, &self.committee)?;
         Ok(())
     }
 
@@ -411,6 +411,7 @@ impl Core {
         if let Some((header_info, has_leader)) = self.processing_header_infos.get(&digest) {
             let weight = aggregator.append(author, &self.committee)?;
             if weight >= self.committee.optimistic_threshold() {
+                debug!("optimisitc_threshold for round{:?} reached for weight: {:?}", round, weight);
                 if !has_leader {
                     if let Some(timeout_agg) = self.timeout_aggregators.get(&(round - 1)) {
                         if !timeout_agg.check_threshold(self.committee.quorum_threshold()) {
