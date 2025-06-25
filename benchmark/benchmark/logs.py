@@ -111,7 +111,6 @@ class LogParser:
             raise ParseError('Primary(s) panicked')
 
         tmp = findall(r'\[(.*Z) .* Created ([^ ]+)\n', log)
-        print(tmp)
         tmp = [(d, self._to_posix(t)) for t, d in tmp]
         proposals = self._merge_results([tmp])
 
