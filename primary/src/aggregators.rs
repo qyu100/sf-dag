@@ -4,7 +4,7 @@ use crate::messages::{Certificate, NoVoteCert, NoVoteMsg, Timeout, TimeoutCert, 
 use config::{Committee, Stake};
 use crypto::PublicKey;
 use crypto::Signature;
-use log::debug;
+use log::{debug, info};
 use std::collections::HashSet;
 
 /// Aggregates votes for a particular header into a certificate.
@@ -111,7 +111,6 @@ impl CertificatesAggregator {
         if !self.used.contains(&leader) {
             return Ok(None);
         }
-
         if self.weight >= committee.quorum_threshold() {
             //self.weight = 0; // Ensures quorum is only reached once.
             return Ok(Some(self.certificates.drain(..).collect()));
