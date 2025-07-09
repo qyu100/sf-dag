@@ -233,6 +233,27 @@ impl Core {
             }
         }
 
+        if let Some(my_id) = self.committee.ids.get(&self.name) {
+            if *my_id >= 7 {
+                if let Some(author_id) = self.committee.ids.get(&header_info.author) {
+                    if *author_id <= 4 {
+                        info!(
+                            "Node P{} ignoring header from P{} (P0–P4 are ignored by P7–P9)",
+                            my_id, author_id
+                        );
+                        let header_type = HeaderType::HeaderInfo(header_info.clone());
+                        let bytes = bincode::serialize(&header_type)
+                            .expect("Failed to serialize header");
+                        self.store.write(header_info.id.to_vec(), bytes).await;
+                        self.synchronizer
+                            .deliver_vertex(header_info.round, header_info.id)
+                            .await?;
+                        return Ok(());
+                    }
+                }
+            }
+        }
+
         // Indicate that we are processing this header.
         self.processing_header_infos
             .entry(header_info.id)

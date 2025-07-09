@@ -162,6 +162,7 @@ pub struct Committee {
     pub authorities: BTreeMap<PublicKey, Authority>,
     pub sorted_keys: Vec<PublicKey>,
     pub f_num: u32,
+    pub ids: BTreeMap<PublicKey, usize>,
 }
 
 impl Import for Committee {}
@@ -170,10 +171,16 @@ impl Committee {
     pub fn new(authorities: BTreeMap<PublicKey, Authority>, f_num: u32) -> Committee {
         let mut keys: Vec<_> = authorities.keys().cloned().collect();
         keys.sort();
+        let ids = keys
+            .iter()
+            .enumerate()
+            .map(|(i, key)| (key.clone(), i))
+            .collect::<BTreeMap<_, _>>();
         let committee = Self {
             authorities,
             sorted_keys: keys,
             f_num,
+            ids,
         };
         committee
     }
