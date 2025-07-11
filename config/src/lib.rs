@@ -142,6 +142,7 @@ pub struct WorkerAddresses {
 
 #[derive(Clone, Deserialize)]
 pub struct Authority {
+    pub id: usize,
     pub bls_pubkey_g2: PublicKeyShareG2,
     /// The voting power of this authority.
     pub stake: Stake,
@@ -162,7 +163,6 @@ pub struct Committee {
     pub authorities: BTreeMap<PublicKey, Authority>,
     pub sorted_keys: Vec<PublicKey>,
     pub f_num: u32,
-    pub ids: BTreeMap<PublicKey, usize>,
 }
 
 impl Import for Committee {}
@@ -171,16 +171,10 @@ impl Committee {
     pub fn new(authorities: BTreeMap<PublicKey, Authority>, f_num: u32) -> Committee {
         let mut keys: Vec<_> = authorities.keys().cloned().collect();
         keys.sort();
-        let ids = keys
-            .iter()
-            .enumerate()
-            .map(|(i, key)| (key.clone(), i))
-            .collect::<BTreeMap<_, _>>();
         let committee = Self {
             authorities,
             sorted_keys: keys,
             f_num,
-            ids,
         };
         committee
     }
@@ -193,6 +187,10 @@ impl Committee {
     /// Return the stake of a specific authority.
     pub fn stake(&self, name: &PublicKey) -> Stake {
         self.authorities.get(name).map_or_else(|| 0, |x| x.stake)
+    }
+
+    pub fn id(&self, name: &PublicKey) -> Option<usize> {
+        self.authorities.get(name).map(|a| a.id)
     }
 
     /// Returns the stake of all authorities except `myself`.

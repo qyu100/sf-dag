@@ -103,6 +103,7 @@ class Committee:
 
             json['authorities'][name] = {
                 # Corresponds to the determination of faulty nodes in primary_addresses.
+                'id': i,
                 'bls_pubkey_g2': bls_pubkeys_g2[i],
                 'is_honest': i < num_authorities - faults,
                 'stake': 1,

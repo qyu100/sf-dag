@@ -233,56 +233,62 @@ impl Core {
             }
         }
 
-        if let Some(my_id) = self.committee.ids.get(&self.name) {
-            if *my_id >= 7 {
-                if let Some(author_id) = self.committee.ids.get(&header_info.author) {
-                    if *author_id <= 4 {
-                        info!(
-                            "Node P{} ignoring header from P{} (P0–P4 are ignored by P7–P9)",
-                            my_id, author_id
-                        );
-                        let header_type = HeaderType::HeaderInfo(header_info.clone());
-                        let bytes = bincode::serialize(&header_type)
-                            .expect("Failed to serialize header");
-                        self.store.write(header_info.id.to_vec(), bytes).await;
-                        self.synchronizer
-                            .deliver_vertex(header_info.round, header_info.id)
-                            .await?;
-                        return Ok(());
-                    }
-                }
-            }
-        }
-
         // Indicate that we are processing this header.
         self.processing_header_infos
             .entry(header_info.id)
             .or_insert(header_info.clone());
 
         // Check if we can vote for this header.
-        if header_info.author != self.name
-            && self
-                .last_voted
-                .entry(header_info.round)
-                .or_insert_with(HashSet::new)
-                .insert(header_info.author)
+        if self
+            .last_voted
+            .entry(header_info.round)
+            .or_insert_with(HashSet::new)
+            .insert(header_info.author)
         {
-            // Make a vote and send it to all nodes
-            let vote = Vote::new_for_header_info(&header_info, &self.name).await;
+            let mut should_vote = true;
 
-            let addresses = self
-                .committee
-                .others_primaries(&self.name)
-                .iter()
-                .map(|(_, x)| x.primary_to_primary)
-                .collect();
-            let bytes = bincode::serialize(&PrimaryMessage::Vote(vote.clone()))
-                .expect("Failed to serialize our own vote");
-            let handlers = self.network.broadcast(addresses, Bytes::from(bytes)).await;
-            self.cancel_handlers
-                .entry(header_info.round)
-                .or_insert_with(Vec::new)
-                .extend(handlers);
+            if let Some(my_id) = self.committee.id(&self.name) {
+                if my_id >= 7 {
+                    if let Some(author_id) = self.committee.id(&header_info.author) {
+                        if author_id <= 4 {
+                            should_vote = false;
+                        }
+                    }
+                }
+            }
+
+            if let Some(my_id) = self.committee.id(&self.name) {
+                if my_id <= 2 {
+                    if let Some(author_id) = self.committee.id(&header_info.author) {
+                        if author_id >= 5 {
+                            should_vote = false;
+                        }
+                    }
+                }
+            }
+
+            if should_vote {
+                // Make a vote and send it to all nodes
+                let vote = Vote::new_for_header_info(&header_info, &self.name).await;
+
+                let addresses = self
+                    .committee
+                    .others_primaries(&self.name)
+                    .iter()
+                    .map(|(_, x)| x.primary_to_primary)
+                    .collect();
+                let bytes = bincode::serialize(&PrimaryMessage::Vote(vote.clone()))
+                    .expect("Failed to serialize our own vote");
+                let handlers = self.network.broadcast(addresses, Bytes::from(bytes)).await;
+                self.cancel_handlers
+                    .entry(header_info.round)
+                    .or_insert_with(Vec::new)
+                    .extend(handlers);
+
+                self.process_vote(&vote)
+                    .await
+                    .expect("Failed to process our own vote");
+            }
         }
         // info!("sent votes {:?}", header_info.id);
 
@@ -355,23 +361,46 @@ impl Core {
         if let Some(vote_aggregator) = self.processing_vote_aggregators.get_mut(&vote.id) {
             // Add it to the votes' aggregator and try to make a new certificate.
             if let Some(certificate) = vote_aggregator.append(&vote, &self.committee)? {
-                let ready = Ready::new(vote.id, vote.round, &vote.origin, &self.name).await;
+                let mut should_vote = true;
 
-                let addresses = self
-                    .committee
-                    .others_primaries(&self.name)
-                    .iter()
-                    .map(|(_, x)| x.primary_to_primary)
-                    .collect();
-                let bytes = bincode::serialize(&PrimaryMessage::Ready(ready.clone()))
-                    .expect("Failed to serialize our own ready");
-                let handlers = self.network.broadcast(addresses, Bytes::from(bytes)).await;
-                self.cancel_handlers
-                    .entry(vote.round)
-                    .or_insert_with(Vec::new)
-                    .extend(handlers);
+                if let Some(my_id) = self.committee.id(&self.name) {
+                    if my_id >= 7 {
+                        if let Some(author_id) = self.committee.id(&vote.author) {
+                            if author_id <= 4 {
+                                should_vote = false;
+                            }
+                        }
+                    }
+                }
 
-                self.process_ready(&ready).await;
+                if let Some(my_id) = self.committee.id(&self.name) {
+                    if my_id <= 2 {
+                        if let Some(author_id) = self.committee.id(&vote.author) {
+                            if author_id >= 5 {
+                                should_vote = false;
+                            }
+                        }
+                    }
+                }
+                if should_vote {
+                    let ready = Ready::new(vote.id, vote.round, &vote.origin, &self.name).await;
+
+                    let addresses = self
+                        .committee
+                        .others_primaries(&self.name)
+                        .iter()
+                        .map(|(_, x)| x.primary_to_primary)
+                        .collect();
+                    let bytes = bincode::serialize(&PrimaryMessage::Ready(ready.clone()))
+                        .expect("Failed to serialize our own ready");
+                    let handlers = self.network.broadcast(addresses, Bytes::from(bytes)).await;
+                    self.cancel_handlers
+                        .entry(vote.round)
+                        .or_insert_with(Vec::new)
+                        .extend(handlers);
+
+                    self.process_ready(&ready).await;
+                }
             }
         }
 
