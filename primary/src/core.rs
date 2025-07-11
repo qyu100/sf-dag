@@ -213,6 +213,26 @@ impl Core {
         self.process_header_msg(&header_info_msg).await
     }
 
+    fn should_vote_for(&self, author: &PublicKey) -> bool {
+        if let Some(my_id) = self.committee.id(&self.name) {
+            if my_id >= 7 {
+                if let Some(author_id) = self.committee.id(author) {
+                    if author_id <= 4 {
+                        return false;
+                    }
+                }
+            }
+            if my_id <= 2 {
+                if let Some(author_id) = self.committee.id(author) {
+                    if author_id >= 5 {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
+    }
+
     #[async_recursion]
     async fn process_header_msg(&mut self, header_msg: &HeaderMessage) -> DagResult<()> {
         debug!("Processing {:?}", header_msg);
@@ -245,29 +265,7 @@ impl Core {
             .or_insert_with(HashSet::new)
             .insert(header_info.author)
         {
-            let mut should_vote = true;
-
-            if let Some(my_id) = self.committee.id(&self.name) {
-                if my_id >= 7 {
-                    if let Some(author_id) = self.committee.id(&header_info.author) {
-                        if author_id <= 4 {
-                            should_vote = false;
-                        }
-                    }
-                }
-            }
-
-            if let Some(my_id) = self.committee.id(&self.name) {
-                if my_id <= 2 {
-                    if let Some(author_id) = self.committee.id(&header_info.author) {
-                        if author_id >= 5 {
-                            should_vote = false;
-                        }
-                    }
-                }
-            }
-
-            if should_vote {
+            if self.should_vote_for(&header_info.author) {
                 // Make a vote and send it to all nodes
                 let vote = Vote::new_for_header_info(&header_info, &self.name).await;
 
@@ -361,28 +359,7 @@ impl Core {
         if let Some(vote_aggregator) = self.processing_vote_aggregators.get_mut(&vote.id) {
             // Add it to the votes' aggregator and try to make a new certificate.
             if let Some(certificate) = vote_aggregator.append(&vote, &self.committee)? {
-                let mut should_vote = true;
-
-                if let Some(my_id) = self.committee.id(&self.name) {
-                    if my_id >= 7 {
-                        if let Some(author_id) = self.committee.id(&vote.author) {
-                            if author_id <= 4 {
-                                should_vote = false;
-                            }
-                        }
-                    }
-                }
-
-                if let Some(my_id) = self.committee.id(&self.name) {
-                    if my_id <= 2 {
-                        if let Some(author_id) = self.committee.id(&vote.author) {
-                            if author_id >= 5 {
-                                should_vote = false;
-                            }
-                        }
-                    }
-                }
-                if should_vote {
+                if self.should_vote_for(&vote.author) {
                     let ready = Ready::new(vote.id, vote.round, &vote.origin, &self.name).await;
 
                     let addresses = self
