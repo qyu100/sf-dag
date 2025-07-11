@@ -239,12 +239,11 @@ impl Core {
             .or_insert(header_info.clone());
 
         // Check if we can vote for this header.
-        if header_info.author != self.name
-            && self
-                .last_voted
-                .entry(header_info.round)
-                .or_insert_with(HashSet::new)
-                .insert(header_info.author)
+        if self
+            .last_voted
+            .entry(header_info.round)
+            .or_insert_with(HashSet::new)
+            .insert(header_info.author)
         {
             // Make a vote and send it to all nodes
             let vote = Vote::new_for_header_info(&header_info, &self.name).await;
@@ -262,6 +261,10 @@ impl Core {
                 .entry(header_info.round)
                 .or_insert_with(Vec::new)
                 .extend(handlers);
+
+            self.process_vote(&vote)
+                .await
+                .expect("Failed to process our own vote");
         }
         // info!("sent votes {:?}", header_info.id);
 

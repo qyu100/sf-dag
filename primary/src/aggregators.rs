@@ -1,6 +1,6 @@
 // Copyright(C) Facebook, Inc. and its affiliates.
 use crate::error::{DagError, DagResult};
-use crate::messages::{Certificate, NoVoteCert, NoVoteMsg, Timeout, TimeoutCert, Vote, Ready};
+use crate::messages::{Certificate, NoVoteCert, NoVoteMsg, Ready, Timeout, TimeoutCert, Vote};
 use config::{Committee, Stake};
 use crypto::PublicKey;
 use crypto::Signature;
