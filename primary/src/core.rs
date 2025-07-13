@@ -259,6 +259,10 @@ impl Core {
                 .entry(header_info.round)
                 .or_insert_with(Vec::new)
                 .extend(handlers);
+
+            self.process_vote(&vote)
+                .await
+                .expect("Failed to process our own vote");
         }
         // info!("sent votes {:?}", header_info.id);
 
