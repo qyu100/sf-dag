@@ -359,7 +359,7 @@ impl Core {
         if let Some(vote_aggregator) = self.processing_vote_aggregators.get_mut(&vote.id) {
             // Add it to the votes' aggregator and try to make a new certificate.
             if let Some(certificate) = vote_aggregator.append(&vote, &self.committee)? {
-                if self.should_vote_for(&vote.author) {
+                if self.should_vote_for(&vote.origin) {
                     let ready = Ready::new(vote.id, vote.round, &vote.origin, &self.name).await;
 
                     let addresses = self
