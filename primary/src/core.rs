@@ -217,16 +217,7 @@ impl Core {
         if let Some(my_id) = self.committee.id(&self.name) {
             if my_id >= 7 {
                 if let Some(author_id) = self.committee.id(author) {
-                    if author_id <= 4 {
-                        return false;
-                    }
-                }
-            }
-            if my_id <= 2 {
-                if let Some(author_id) = self.committee.id(author) {
-                    if author_id >= 5 {
-                        return false;
-                    }
+                    return false;
                 }
             }
         }
