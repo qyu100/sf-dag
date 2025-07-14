@@ -216,9 +216,7 @@ impl Core {
     fn should_vote_for(&self, author: &PublicKey) -> bool {
         if let Some(my_id) = self.committee.id(&self.name) {
             if my_id >= 7 {
-                if let Some(author_id) = self.committee.id(author) {
-                    return false;
-                }
+                return false;
             }
         }
         true
