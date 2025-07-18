@@ -213,6 +213,15 @@ impl Core {
         self.process_header_msg(&header_info_msg).await
     }
 
+    fn should_vote_for(&self, author: &PublicKey) -> bool {
+        if let Some(my_id) = self.committee.id(&self.name) {
+            if my_id >= 7 {
+                return false;
+            }
+        }
+        true
+    }
+
     #[async_recursion]
     async fn process_header_msg(&mut self, header_msg: &HeaderMessage) -> DagResult<()> {
         debug!("Processing {:?}", header_msg);
@@ -239,29 +248,32 @@ impl Core {
             .or_insert(header_info.clone());
 
         // Check if we can vote for this header.
-        if header_info.author != self.name
-            && self
-                .last_voted
+        if self.last_voted
                 .entry(header_info.round)
                 .or_insert_with(HashSet::new)
                 .insert(header_info.author)
         {
-            // Make a vote and send it to all nodes
-            let vote = Vote::new_for_header_info(&header_info, &self.name).await;
+            if self.should_vote_for(&header_info.author) {
+                // Make a vote and send it to all nodes
+                let vote = Vote::new_for_header_info(&header_info, &self.name).await;
 
-            let addresses = self
-                .committee
-                .others_primaries(&self.name)
-                .iter()
-                .map(|(_, x)| x.primary_to_primary)
-                .collect();
-            let bytes = bincode::serialize(&PrimaryMessage::Vote(vote.clone()))
-                .expect("Failed to serialize our own vote");
-            let handlers = self.network.broadcast(addresses, Bytes::from(bytes)).await;
-            self.cancel_handlers
-                .entry(header_info.round)
-                .or_insert_with(Vec::new)
-                .extend(handlers);
+                let addresses = self
+                    .committee
+                    .others_primaries(&self.name)
+                    .iter()
+                    .map(|(_, x)| x.primary_to_primary)
+                    .collect();
+                let bytes = bincode::serialize(&PrimaryMessage::Vote(vote.clone()))
+                    .expect("Failed to serialize our own vote");
+                let handlers = self.network.broadcast(addresses, Bytes::from(bytes)).await;
+                self.cancel_handlers
+                    .entry(header_info.round)
+                    .or_insert_with(Vec::new)
+                    .extend(handlers);
+                self.process_vote(&vote)
+                    .await
+                    .expect("Failed to process our own vote");
+            }
         }
         // info!("sent votes {:?}", header_info.id);
 
@@ -334,23 +346,25 @@ impl Core {
         if let Some(vote_aggregator) = self.processing_vote_aggregators.get_mut(&vote.id) {
             // Add it to the votes' aggregator and try to make a new certificate.
             if let Some(certificate) = vote_aggregator.append(&vote, &self.committee)? {
-                let ready = Ready::new(vote.id, vote.round, &vote.origin, &self.name).await;
+                if self.should_vote_for(&vote.origin) {
+                    let ready = Ready::new(vote.id, vote.round, &vote.origin, &self.name).await;
 
-                let addresses = self
-                    .committee
-                    .others_primaries(&self.name)
-                    .iter()
-                    .map(|(_, x)| x.primary_to_primary)
-                    .collect();
-                let bytes = bincode::serialize(&PrimaryMessage::Ready(ready.clone()))
-                    .expect("Failed to serialize our own ready");
-                let handlers = self.network.broadcast(addresses, Bytes::from(bytes)).await;
-                self.cancel_handlers
-                    .entry(vote.round)
-                    .or_insert_with(Vec::new)
-                    .extend(handlers);
+                    let addresses = self
+                        .committee
+                        .others_primaries(&self.name)
+                        .iter()
+                        .map(|(_, x)| x.primary_to_primary)
+                        .collect();
+                    let bytes = bincode::serialize(&PrimaryMessage::Ready(ready.clone()))
+                        .expect("Failed to serialize our own ready");
+                    let handlers = self.network.broadcast(addresses, Bytes::from(bytes)).await;
+                    self.cancel_handlers
+                        .entry(vote.round)
+                        .or_insert_with(Vec::new)
+                        .extend(handlers);
 
-                self.process_ready(&ready).await;
+                    self.process_ready(&ready).await;
+                }
             }
         }
 

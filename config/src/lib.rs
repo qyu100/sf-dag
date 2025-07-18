@@ -142,6 +142,7 @@ pub struct WorkerAddresses {
 
 #[derive(Clone, Deserialize)]
 pub struct Authority {
+    pub id: usize,
     pub bls_pubkey_g2: PublicKeyShareG2,
     /// The voting power of this authority.
     pub stake: Stake,
@@ -183,6 +184,10 @@ impl Committee {
         self.authorities.len()
     }
 
+    pub fn id(&self, name: &PublicKey) -> Option<usize> {
+        self.authorities.get(name).map(|a| a.id)
+    }
+    
     /// Return the stake of a specific authority.
     pub fn stake(&self, name: &PublicKey) -> Stake {
         self.authorities.get(name).map_or_else(|| 0, |x| x.stake)
