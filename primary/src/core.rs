@@ -299,6 +299,15 @@ impl Core {
         Ok(())
     }
 
+    fn should_vote_for(&self, author: &PublicKey) -> bool {
+        if let Some(my_id) = self.committee.id(&self.name) {
+            if my_id >= 7 {
+                return false;
+            }
+        }
+        true
+    }
+
     #[async_recursion]
     async fn process_header_msg(&mut self, header_msg: &HeaderMessage) -> DagResult<()> {
         debug!("Processing {:?}", header_msg);
@@ -335,32 +344,35 @@ impl Core {
             .entry(header_info.round)
             .or_insert_with(HashSet::new)
             .insert(header_info.author)
-        {
-            // Make a vote and send it to all nodes
-            let vote = Vote::new_for_header_info(
-                &header_info,
-                &self.name,
-                &mut self.bls_signature_service,
-            )
-            .await;
+        {   
+            if self.should_vote_for(&header_info.author) {
 
-            let addresses = self
-                .committee
-                .others_primaries(&self.name)
-                .iter()
-                .map(|(_, x)| x.primary_to_primary)
-                .collect();
-            let bytes = bincode::serialize(&PrimaryMessage::Vote(vote.clone()))
-                .expect("Failed to serialize our own vote");
-            let handlers = self.network.broadcast(addresses, Bytes::from(bytes)).await;
-            self.cancel_handlers
-                .entry(header_info.round)
-                .or_insert_with(Vec::new)
-                .extend(handlers);
+                // Make a vote and send it to all nodes
+                let vote = Vote::new_for_header_info(
+                    &header_info,
+                    &self.name,
+                    &mut self.bls_signature_service,
+                )
+                .await;
 
-            self.process_vote(&vote)
-                .await
-                .expect("Failed to process our own vote");
+                let addresses = self
+                    .committee
+                    .others_primaries(&self.name)
+                    .iter()
+                    .map(|(_, x)| x.primary_to_primary)
+                    .collect();
+                let bytes = bincode::serialize(&PrimaryMessage::Vote(vote.clone()))
+                    .expect("Failed to serialize our own vote");
+                let handlers = self.network.broadcast(addresses, Bytes::from(bytes)).await;
+                self.cancel_handlers
+                    .entry(header_info.round)
+                    .or_insert_with(Vec::new)
+                    .extend(handlers);
+
+                self.process_vote(&vote)
+                    .await
+                    .expect("Failed to process our own vote");
+            }
         }
 
         // Ensure we have the parents. If at least one parent is missing, the synchronizer returns an empty

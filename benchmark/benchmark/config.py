@@ -102,6 +102,7 @@ class Committee:
                 port += 3
 
             json['authorities'][name] = {
+                'id': i,
                 # Corresponds to the determination of faulty nodes in primary_addresses.
                 'bls_pubkey_g2': bls_pubkeys_g2[i],
                 'is_honest': i < num_authorities - faults,
