@@ -226,7 +226,6 @@ impl Consensus {
                         .collect();
                     for id in ready_headers {
                         if let Some(header_info) = self.pending_headers.remove(&id) {
-                            state.parent_info.insert(header_info.id, header_info.parents.clone());
                             self.try_commit(header_info, &mut state).await;
                         }
                     }
