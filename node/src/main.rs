@@ -107,7 +107,14 @@ async fn run(matches: &ArgMatches<'_>) -> Result<()> {
 
     let comm = Comm::import(committee_file).context("Failed to load the committee information")?;
 
-    let committee = Committee::new(comm.authorities);
+    let parameters = match parameters_file {
+        Some(filename) => {
+            Parameters::import(filename).context("Failed to load the node's parameters")?
+        }
+        None => Parameters::default(),
+    };
+    
+    let committee = Committee::new(comm.authorities, parameters.f_num);
 
     let mut sorted_keys = committee.get_bls_public_keys();
     sorted_keys.sort();

@@ -24,6 +24,7 @@ pub struct Header {
     pub signature: Signature,
     pub timeout_cert: TimeoutCert,
     pub no_vote_cert: NoVoteCert,
+    pub propose_next_round: bool,
 }
 
 impl Header {
@@ -35,6 +36,7 @@ impl Header {
         timeout_cert: TimeoutCert,
         no_vote_cert: NoVoteCert,
         signature_service: &mut SignatureService,
+        propose_next_round: bool,
     ) -> Self {
         let header = Self {
             author,
@@ -45,6 +47,7 @@ impl Header {
             signature: Signature::default(),
             timeout_cert,
             no_vote_cert,
+            propose_next_round,
         };
         let id = header.digest();
         let signature = signature_service.request_signature(id.clone()).await;
@@ -157,6 +160,7 @@ pub struct HeaderInfo {
     pub parents: Vec<Digest>,
     pub id: Digest,
     pub signature: Signature,
+    pub propose_next_round: bool,
     pub timeout_cert: TimeoutCert,
     no_vote_cert: NoVoteCert,
 }
@@ -169,6 +173,7 @@ impl HeaderInfo {
             parents: header.parents.clone(),
             id: header.id,
             signature: header.signature.clone(),
+            propose_next_round: header.propose_next_round,
             timeout_cert: header.timeout_cert.clone(),
             no_vote_cert: header.no_vote_cert.clone(),
         };
@@ -200,6 +205,75 @@ impl fmt::Debug for HeaderInfo {
 impl fmt::Display for HeaderInfo {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         write!(f, "B{}({})", self.round, self.author)
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Support {
+    pub round: Round,
+    pub author: PublicKey,
+    pub signature: Signature,
+    pub vote: bool,
+    pub propose_next_round: bool,
+}
+
+impl Support {
+    pub async fn new(
+        author: PublicKey,
+        round: Round,
+        signature_service: &mut SignatureService,
+        vote: bool,
+        propose_next_round: bool,
+    ) -> Self {
+        let support= Self {
+            author,
+            round,
+            signature: Signature::default(),
+            vote,
+            propose_next_round,
+        };
+        let signature = signature_service.request_signature(support.digest()).await;
+        Self {
+            signature,
+            ..support
+        }
+    }
+
+    pub fn verify(&self, committee: &Committee) -> DagResult<()> {
+        // Ensure the authority has voting rights.
+        ensure!(
+            committee.stake(&self.author) > 0,
+            DagError::UnknownAuthority(self.author)
+        );
+
+        // Check the signature.
+        self.signature
+            .verify(&self.digest(), &self.author)
+            .map_err(DagError::from)
+    }
+}
+
+impl Hash for Support {
+    fn digest(&self) -> Digest {
+        let mut hasher = Sha512::new();
+        hasher.update(self.round.to_le_bytes());
+        hasher.update(&self.author);
+        Digest(hasher.finalize().as_slice()[..32].try_into().unwrap())
+    }
+}
+
+
+impl fmt::Debug for Support {
+    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+        write!(
+            f,
+            "{}: V{}({}, {}, {})",
+            self.digest(),
+            self.round,
+            self.author,
+            self.vote,
+            self.propose_next_round
+        )
     }
 }
 

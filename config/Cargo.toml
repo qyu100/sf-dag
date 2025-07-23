@@ -11,6 +11,6 @@ thiserror = "1.0.24"
 serde_json = "1.0.64"
 log = "0.4.14"
 blsttc = { git = "https://github.com/naitik-supraoracles/blsttc-supra-for-moonshot.git", rev = "4ca8a9d97893e2dfd74eee427400ac119e3e9dd9"}
-
+rand = "0.8"
 
 crypto = { path = "../crypto" }

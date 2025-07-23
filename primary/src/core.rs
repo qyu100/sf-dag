@@ -5,12 +5,13 @@ use crate::aggregators::{
 use crate::error::{DagError, DagResult};
 use crate::messages::{
     Certificate, HeaderInfoWithCertificate, HeaderWithCertificate, NoVoteCert, NoVoteMsg, Timeout,
-    TimeoutCert, Vote,
+    TimeoutCert, Vote, Support
 };
 use crate::primary::{HeaderType, PrimaryMessage, Round};
 use crate::synchronizer::Synchronizer;
 use crate::{ConsensusMessage, HeaderInfo, HeaderMessage};
 use async_recursion::async_recursion;
+use bincode::de;
 use blsttc::PublicKeyShareG2;
 use bytes::Bytes;
 use config::Committee;
@@ -57,6 +58,8 @@ pub struct Core {
     rx_proposer: Receiver<HeaderWithCertificate>,
     /// Receives our newly created timeouts from the `Proposer`.
     rx_timeout: Receiver<Timeout>,
+    /// Receives our newly created support messages from the `Proposer`.
+    rx_support: Receiver<Support>,
     /// Receives our newly created no vote msgs from the `Proposer`.
     rx_no_vote_msg: Receiver<NoVoteMsg>,
     /// Output all certificates to the consensus layer.
@@ -67,7 +70,7 @@ pub struct Core {
     tx_timeout_cert: Sender<(TimeoutCert, Round)>,
     /// Send a valid NoVoteCert along with the round to the `Proposer`.
     tx_no_vote_cert: Sender<(NoVoteCert, Round)>,
-    /// Send a the header that has voted for the prev leader to the `Consensus` logic.
+    /// Send a header that has voted for the prev leader to the `Consensus` logic.
     tx_consensus_header_msg: Sender<ConsensusMessage>,
     /// The last garbage collected round.
     gc_round: Round,
@@ -89,6 +92,8 @@ pub struct Core {
     timeouts_aggregators: HashMap<Round, Box<TimeoutAggregator>>,
     /// Aggregates no vote messages to use for sending no vote certificates.
     no_vote_aggregators: HashMap<Round, HashMap<PublicKey, Box<NoVoteAggregator>>>,
+    /// Keep track of how many vertices will propose in each round.
+    header_proposers: HashMap<Round, HashSet<PublicKey>>,
 
     sorted_keys: Vec<PublicKeyShareG2>,
     combined_pubkey: PublicKeyShareG2,
@@ -112,6 +117,7 @@ impl Core {
         rx_certificate_waiter: Receiver<Certificate>,
         rx_proposer: Receiver<HeaderWithCertificate>,
         rx_timeout: Receiver<Timeout>,
+        rx_support: Receiver<Support>,
         rx_no_vote_msg: Receiver<NoVoteMsg>,
         tx_consensus: Sender<Certificate>,
         tx_proposer: Sender<(Vec<Certificate>, Round)>,
@@ -137,6 +143,7 @@ impl Core {
                 rx_certificate_waiter,
                 rx_proposer,
                 rx_timeout,
+                rx_support,
                 rx_no_vote_msg,
                 tx_consensus,
                 tx_proposer,
@@ -153,6 +160,7 @@ impl Core {
                 cancel_handlers: HashMap::with_capacity(2 * gc_depth as usize),
                 timeouts_aggregators: HashMap::with_capacity(2 * gc_depth as usize),
                 no_vote_aggregators: HashMap::with_capacity(2 * gc_depth as usize),
+                header_proposers: HashMap::with_capacity(2 * gc_depth as usize),
                 sorted_keys,
                 combined_pubkey,
                 processing_vote_aggregators: HashMap::with_capacity(2 * gc_depth as usize),
@@ -187,35 +195,6 @@ impl Core {
         debug!("Broadcasted own timeout for round {}", timeout.round);
 
         self.process_timeout(timeout).await
-    }
-
-    async fn process_own_no_vote_msg(&mut self, no_vote_msg: NoVoteMsg) -> DagResult<()> {
-        // Serialize the No Vote Msg instance into bytes using bincode or a similar serialization tool.
-        let bytes = bincode::serialize(&PrimaryMessage::NoVoteMsg(no_vote_msg.clone()))
-            .expect("Failed to serialize own no vote message");
-
-        // Send No Vote Msg to the leader of the round
-        let leader_pub_key = self.committee.leader((no_vote_msg.round + 1) as usize);
-
-        let address = self
-            .committee
-            .primary(&leader_pub_key)
-            .expect("public key not found")
-            .primary_to_primary;
-        // Send the No Vote Msg to each address.
-        let handler = self.network.send(address, Bytes::from(bytes)).await;
-        self.cancel_handlers
-            .entry(no_vote_msg.round)
-            .or_insert_with(Vec::new)
-            .push(handler);
-
-        // Log the broadcast for debugging purposes.
-        debug!(
-            "Broadcasted own no vote message for round {}",
-            no_vote_msg.round
-        );
-
-        Ok(())
     }
 
     async fn process_own_header(
@@ -258,62 +237,63 @@ impl Core {
         self.process_header_msg(&header_info_msg).await
     }
 
-    async fn process_parent_certificates(
-        &mut self,
-        parent_certs: &Vec<Certificate>,
-    ) -> DagResult<()> {
-        for certificate in parent_certs {
-            // Check if we have enough certificates to enter a new dag round and propose a header.
-            if self
-                .processed_certs
-                .entry(certificate.round)
-                .or_insert_with(HashSet::new)
-                .insert(certificate.origin())
-            {
-                if let Some(parents) = self
-                    .certificates_aggregators
-                    .entry(certificate.round())
-                    .or_insert_with(|| Box::new(CertificatesAggregator::new()))
-                    .append(&certificate, &self.committee)?
-                {
-                    // Send it to the `Proposer`.
-                    self.tx_proposer
-                        .send((parents, certificate.round()))
-                        .await
-                        .expect("Failed to send certificate");
-                }
+    // async fn process_parent_certificates(
+    //     &mut self,
+    //     parent_certs: &Vec<Certificate>,
+    // ) -> DagResult<()> {
+    //     for certificate in parent_certs {
+    //         // Check if we have enough certificates to enter a new dag round and propose a header.
+    //         if self
+    //             .processed_certs
+    //             .entry(certificate.round)
+    //             .or_insert_with(HashSet::new)
+    //             .insert(certificate.origin())
+    //         {
+    //             if let Some(parents) = self
+    //                 .certificates_aggregators
+    //                 .entry(certificate.round())
+    //                 .or_insert_with(|| Box::new(CertificatesAggregator::new()))
+    //                 .append(&certificate, &self.committee)?
+    //             {
+    //                 // Send it to the `Proposer`.
+    //                 self.tx_proposer
+    //                     .send((parents, certificate.round()))
+    //                     .await
+    //                     .expect("Failed to send certificate");
+    //             }
 
-                let id = certificate.header_id;
-                if let Err(e) = self
-                    .tx_consensus_header_msg
-                    .send(ConsensusMessage::Certificate(certificate.clone()))
-                    .await
-                {
-                    warn!(
-                        "Failed to deliver certificate {} to the consensus: {}",
-                        id, e
-                    );
-                }
-            }
-        }
-        Ok(())
-    }
+    //             let id = certificate.header_id;
+    //             if let Err(e) = self
+    //                 .tx_consensus_header_msg
+    //                 .send(ConsensusMessage::Certificate(certificate.clone()))
+    //                 .await
+    //             {
+    //                 warn!(
+    //                     "Failed to deliver certificate {} to the consensus: {}",
+    //                     id, e
+    //                 );
+    //             }
+    //         }
+    //     }
+    //     Ok(())
+    // }
 
     #[async_recursion]
     async fn process_header_msg(&mut self, header_msg: &HeaderMessage) -> DagResult<()> {
         debug!("Processing {:?}", header_msg);
+
         let header_info: HeaderInfo;
         match header_msg {
-            HeaderMessage::HeaderWithCertificate(header_with_parents) => {
-                let _ = self
-                    .process_parent_certificates(&header_with_parents.parents)
-                    .await;
+            HeaderMessage::HeaderWithCertificate(header_with_parents) => {     
+                // let _ = self
+                //     .process_parent_certificates(&header_with_parents.parents)
+                //     .await;
                 header_info = HeaderInfo::create_from(&header_with_parents.header);
             }
             HeaderMessage::HeaderInfoWithCertificate(header_info_with_parents) => {
-                let _ = self
-                    .process_parent_certificates(&header_info_with_parents.parents)
-                    .await;
+                // let _ = self
+                //     .process_parent_certificates(&header_info_with_parents.parents)
+                //     .await;
                 header_info = header_info_with_parents.header_info.clone();
             }
             HeaderMessage::Header(header) => {
@@ -328,6 +308,13 @@ impl Core {
         self.processing_header_infos
             .entry(header_info.id)
             .or_insert(header_info.clone());
+
+        if header_info.propose_next_round {
+            self.header_proposers
+                .entry(header_info.round)
+                .or_insert_with(HashSet::new)
+                .insert(header_info.author);
+        }
 
         // Check if we can vote for this header.
         if self
@@ -393,6 +380,56 @@ impl Core {
     }
 
     #[async_recursion]
+    async fn process_own_support(&mut self, support: Support) -> DagResult<()> {
+        debug!("Processing own support {:?}", support);
+
+        let addresses = self
+            .committee
+            .others_primaries(&self.name)
+            .iter()
+            .map(|(_, x)| x.primary_to_primary)
+            .collect();
+        let bytes = bincode::serialize(&PrimaryMessage::Support(support.clone()))
+            .expect("Failed to serialize our own support");
+        let handlers = self.network.broadcast(addresses, Bytes::from(bytes)).await;
+        self.cancel_handlers
+            .entry(support.round)
+            .or_insert_with(Vec::new)
+            .extend(handlers);
+
+        self.process_support_msg(support).await;
+        Ok(())
+    }
+
+    #[async_recursion]
+    async fn process_support_msg(&mut self, support: Support) -> DagResult<()> {
+        debug!("Processing support at round {:?}, {:?}", support.round, support);
+
+        self.tx_consensus_header_msg
+            .send(ConsensusMessage::Support(support.clone()))
+            .await
+            .expect("failed to send Support to consensus");
+
+        // Check if we have enough certificates to enter a new dag round and propose a header.
+        if let Some(parents) = self
+            .certificates_aggregators
+            .entry(support.round)
+            .or_insert_with(|| Box::new(CertificatesAggregator::new()))
+            .append_support(&support, 
+                &self.committee, 
+            self.header_proposers.get(&(support.round-1)).map(|set| set.len()).unwrap_or(0))?
+        {   
+            // Send it to the `Proposer`.
+            self.tx_proposer
+                .send((parents, support.round))
+                .await
+                .expect("Failed to send certificate");
+        }
+
+        Ok(())
+    }
+
+    #[async_recursion]
     async fn process_timeout(&mut self, timeout: Timeout) -> DagResult<()> {
         debug!("Processing {:?}", timeout);
 
@@ -410,55 +447,6 @@ impl Core {
                 .await
                 .expect("Failed to send timeout");
         }
-        Ok(())
-    }
-
-    #[async_recursion]
-    async fn process_no_vote_msg(&mut self, no_vote_msg: NoVoteMsg) -> DagResult<()> {
-        debug!("Processing {:?}", no_vote_msg);
-
-        // Check if there's already an aggregator for this round, prepare to add if not
-        // if !self
-        //     .no_vote_aggregators
-        //     .entry(no_vote_msg.round)
-        //     .or_insert_with(|| HashMap::new())
-        //     .contains_key(&no_vote_msg.leader)
-        // {
-        //     let initial_no_vote_msg = NoVoteMsg::new(
-        //         no_vote_msg.round,
-        //         self.name.clone(),
-        //         &mut self.signature_service,
-        //     )
-        //     .await;
-
-        //     let mut aggregator = NoVoteAggregator::new();
-        //     // Add the initial message to the new aggregator
-        //     aggregator.append(initial_no_vote_msg, &self.committee)?;
-
-        //     // Insert the new aggregator into the map
-        //     self.no_vote_aggregators
-        //         .entry(no_vote_msg.round)
-        //         .or_insert_with(|| HashMap::new())
-        //         .insert(no_vote_msg.leader, Box::new(aggregator));
-        // }
-
-        // Check if we have no vote messages to create a no vote cert to propose next header(as a leader).
-        // Comment out for now
-        // if let Some(no_vote_cert) = self
-        //     .no_vote_aggregators
-        //     .entry(no_vote_msg.round)
-        //     .or_insert_with(|| HashMap::new())
-        //     .entry(no_vote_msg.leader)
-        //     .or_insert(Box::new(NoVoteAggregator::new()))
-        //     .append(no_vote_msg.clone(), &self.committee)?
-        // {
-        //     // Send it to the `Proposer`.
-        //     debug!("Aggregated no vote cert {:?}", no_vote_msg);
-        //     self.tx_no_vote_cert
-        //         .send((no_vote_cert, no_vote_msg.round))
-        //         .await
-        //         .expect("Failed to send no vote message");
-        // }
         Ok(())
     }
 
@@ -535,8 +523,10 @@ impl Core {
             .certificates_aggregators
             .entry(certificate.round())
             .or_insert_with(|| Box::new(CertificatesAggregator::new()))
-            .append(&certificate, &self.committee)?
-        {
+            .append_certificate(&certificate, 
+                &self.committee, 
+            self.header_proposers.get(&(certificate.round-1)).map(|set| set.len()).unwrap_or(0))?
+        {   
             // Send it to the `Proposer`.
             self.tx_proposer
                 .send((parents, certificate.round()))
@@ -608,6 +598,18 @@ impl Core {
         }
     }
 
+    fn sanitize_support_msg(&mut self, support: &Support) -> DagResult<()> {
+        ensure!(
+            self.gc_round <= support.round,
+            DagError::TooOld(support.digest(), support.round)
+        );
+
+        // Verify the support's signature.
+        support.verify(&self.committee)?;
+
+        Ok(())
+    }
+
     fn sanitize_timeout(&mut self, timeout: &Timeout) -> DagResult<()> {
         ensure!(
             self.gc_round <= timeout.round,
@@ -616,18 +618,6 @@ impl Core {
 
         // Verify the timeout's signature.
         timeout.verify(&self.committee)?;
-
-        Ok(())
-    }
-
-    fn sanitize_no_vote_msg(&mut self, no_vote_msg: &NoVoteMsg) -> DagResult<()> {
-        ensure!(
-            self.gc_round <= no_vote_msg.round,
-            DagError::TooOld(no_vote_msg.digest(), no_vote_msg.round)
-        );
-
-        // Verify the no vote message's signature.
-        no_vote_msg.verify(&self.committee)?;
 
         Ok(())
     }
@@ -701,18 +691,17 @@ impl Core {
                                 error => error
                             }
                         },
+                        PrimaryMessage::Support(support) => {
+                            match self.sanitize_support_msg(&support) {
+                                Ok(()) => self.process_support_msg(support).await,
+                                error => error
+                            }
+                        },
                         PrimaryMessage::Timeout(timeout) => {
                             match self.sanitize_timeout(&timeout) {
                                 Ok(()) => self.process_timeout(timeout).await,
                                 error => error
                             }
-                        },
-                        PrimaryMessage::NoVoteMsg(no_vote_msg) => {
-                            match self.sanitize_no_vote_msg(&no_vote_msg) {
-                                Ok(()) => self.process_no_vote_msg(no_vote_msg).await,
-                                error => error
-                            }
-
                         },
                         PrimaryMessage::Vote(vote) => {
                             match self.sanitize_vote(&vote) {
@@ -743,10 +732,10 @@ impl Core {
                 // We also receive here our new headers created by the `Proposer`.
                 Some(header_with_parents) = self.rx_proposer.recv() => self.process_own_header(header_with_parents ,&sender_channel).await,
 
+                Some(support) = self.rx_support.recv() => self.process_own_support(support).await,
+                
                 // We also receive here our timeout created by the `Proposer`.
                 Some(timeout) = self.rx_timeout.recv() => self.process_own_timeout(timeout).await,
-                // We also receive here our no vote messages created by the `Proposer`.
-                Some(no_vote_msg) = self.rx_no_vote_msg.recv() => self.process_own_no_vote_msg(no_vote_msg).await,
             };
             match result {
                 Ok(()) => (),
@@ -769,6 +758,7 @@ impl Core {
                 self.cancel_handlers.retain(|k, _| k >= &gc_round);
                 self.gc_round = gc_round;
                 self.processed_certs.retain(|k, _| k >= &gc_round);
+                self.header_proposers.retain(|k, _| k >= &gc_round);
             }
         }
     }

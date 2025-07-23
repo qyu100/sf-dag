@@ -131,6 +131,66 @@ impl Consensus {
                                 .insert(certificate.origin(), (certificate.header_id.clone(), certificate.clone()));
                             continue;
                         }
+                        
+                        ConsensusMessage::Support(support) => {
+                            let r = support.round - 1;
+                            let leader_round = r;
+                            if leader_round <= state.last_committed_round || leader_round == 0 {
+                                continue;
+                            }
+
+                            let (leader_digest, leader) = match self.leader(leader_round, &state.dag) {
+                                Some(x) => x,
+                                None => continue,
+                            };
+
+                            if support.vote {
+                                *self.stake_vote.entry(support.round).or_insert(0) += self.committee.stake(&support.author);
+                            }
+
+                            let current_stake = self.stake_vote.get(&support.round);
+                            let current_stake_value = *current_stake.unwrap_or(&0);
+                            
+                            // Commit if we have QT
+                            if current_stake_value >= self.committee.quorum_threshold() {
+                                // Get an ordered list of past leaders that are linked to the current leader.
+                                debug!("Leader {:?} has enough support with header at round {}", leader, leader_round);
+                                let mut sequence = Vec::new();
+                                for leader in self.order_leaders(leader, &state).iter().rev() {
+                                    // Starting from the oldest leader, flatten the sub-dag referenced by the leader.
+                                    for x in self.order_dag(leader, &state) {
+                                        // Update and clean up internal state.
+                                        state.update(&x, self.gc_depth);
+
+                                        // Add the certificate to the sequence.
+                                        sequence.push(x);
+                                    }
+                                }
+
+                                // Output the sequence in the right order.
+                                for certificate in sequence {
+                                    #[cfg(not(feature = "benchmark"))]
+                                    info!("Committed {} with header", certificate.header_id);
+                                    
+                                    if certificate.round == leader_round {
+                                        info!("Committed {:?} Leader", certificate.header_id);
+                                    }else if certificate.round == leader_round-1 {
+                                        info!("Committed {:?} NonLeader", certificate.header_id);
+                                    }else{
+                                        info!("Committed {:?} ", certificate.header_id);
+                                    }
+
+                                    self.tx_primary
+                                        .send(certificate.clone())
+                                        .await
+                                        .expect("Failed to send certificate to primary with header");
+
+                                    if let Err(e) = self.tx_output.send(certificate).await {
+                                        warn!("Failed to output certificate: {} with header", e);
+                                    }
+                                }
+                            }
+                        }
 
                         ConsensusMessage::HeaderInfo(header_info) => {
                             debug!("Processing header info {:?}", header_info);
@@ -211,8 +271,6 @@ impl Consensus {
                         .entry(round)
                         .or_insert_with(HashMap::new)
                         .insert(certificate.origin(), (certificate.header_id.clone(), certificate.clone()));
-
-
                 }
             }
         }

@@ -1,6 +1,6 @@
 // Copyright(C) Facebook, Inc. and its affiliates.
 use crate::error::{DagError, DagResult};
-use crate::messages::{Certificate, NoVoteCert, NoVoteMsg, Timeout, TimeoutCert, Vote};
+use crate::messages::{Certificate, NoVoteCert, NoVoteMsg, Timeout, TimeoutCert, Vote, Support};
 use blsttc::{PublicKeyShareG2, SignatureShareG1};
 use config::{Committee, Stake};
 use crypto::{aggregate_sign, PublicKey, Signature};
@@ -66,11 +66,13 @@ impl VotesAggregator {
     }
 }
 
-/// Aggregate certificates and check if we reach a quorum.
+/// Aggregate certificates and supports and check if we reach a quorum.
 pub struct CertificatesAggregator {
     weight: Stake,
     certificates: Vec<Certificate>,
+    supports: Vec<Support>,
     used: HashSet<PublicKey>,
+    certificate_weight: Stake,
 }
 
 impl CertificatesAggregator {
@@ -78,14 +80,17 @@ impl CertificatesAggregator {
         Self {
             weight: 0,
             certificates: Vec::new(),
+            supports: Vec::new(),
             used: HashSet::new(),
+            certificate_weight: 0,
         }
     }
 
-    pub fn append(
+    pub fn append_certificate(
         &mut self,
         certificate: &Certificate,
         committee: &Committee,
+        propose_num: usize,
     ) -> DagResult<Option<Vec<Certificate>>> {
         let origin = certificate.origin();
 
@@ -98,14 +103,51 @@ impl CertificatesAggregator {
 
         self.certificates.push(certificate.clone());
         self.weight += committee.stake(&origin);
+        self.certificate_weight += committee.stake(&origin);
 
         let leader = committee.leader(round as usize);
         if !self.used.contains(&leader) {
             return Ok(None);
         }
+        // Enter round if 1) weight >= 2f+1 - votes number
+        // and 2) weight >= max (propose_num - f, 0)
+        if self.weight >= committee.quorum_threshold()
+            && self.certificate_weight >= propose_num.saturating_sub(committee.f_num as usize) as u32
+        {
+            self.weight = 0;
+            return Ok(Some(self.certificates.drain(..).collect()));
+        }
+        Ok(None)
+    }
 
-        if self.weight >= committee.quorum_threshold() {
-            self.weight = 0; // Ensures quorum is only reached once.
+    pub fn append_support(        
+        &mut self,
+        support: &Support,
+        committee: &Committee,
+        propose_num: usize,
+    ) -> DagResult<Option<Vec<Certificate>>> {
+        let origin = support.author;
+
+        // Ensure it is the first time this authority votes.
+        if !self.used.insert(origin) {
+            return Ok(None);
+        }
+
+        let round = support.round;
+
+        self.supports.push(support.clone());
+        self.weight += committee.stake(&origin);
+
+        let leader = committee.leader(round as usize);
+        if !self.used.contains(&leader) {
+            return Ok(None);
+        }
+        // Enter round if 1) weight >= 2f+1 - votes number
+        // and 2) certificate_weight >= max (propose_num - f, 0)
+        if self.weight >= committee.quorum_threshold()
+            && self.certificate_weight >= propose_num.saturating_sub(committee.f_num as usize) as u32
+        {
+            self.weight = 0;
             return Ok(Some(self.certificates.drain(..).collect()));
         }
         Ok(None)

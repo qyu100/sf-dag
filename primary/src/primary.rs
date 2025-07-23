@@ -7,7 +7,7 @@ use crate::header_waiter::HeaderWaiter;
 use crate::helper::Helper;
 use crate::messages::{
     Certificate, Header, HeaderInfo, HeaderInfoWithCertificate, HeaderWithCertificate, NoVoteMsg,
-    Timeout, Vote,
+    Timeout, Vote, Support,
 };
 // use crate::payload_receiver::PayloadReceiver;
 use crate::proposer::Proposer;
@@ -37,8 +37,8 @@ pub type Round = u64;
 #[derive(Debug, Serialize, Deserialize)]
 pub enum PrimaryMessage {
     HeaderMsg(HeaderMessage),
+    Support(Support),
     Timeout(Timeout),
-    NoVoteMsg(NoVoteMsg),
     Vote(Vote),
     Certificate(Certificate),
     VerifiedCertificate(Certificate),
@@ -56,6 +56,7 @@ pub enum HeaderMessage {
 pub enum ConsensusMessage {
     HeaderInfo(HeaderInfo),
     Certificate(Certificate),
+    Support(Support),
 }
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum HeaderType {
@@ -110,6 +111,7 @@ impl Primary {
         let (tx_certificates_loopback, rx_certificates_loopback) = channel(CHANNEL_CAPACITY);
         let (tx_primary_messages, rx_primary_messages) = channel(CHANNEL_CAPACITY);
         let (tx_cert_requests, rx_cert_requests) = channel(CHANNEL_CAPACITY);
+        let (tx_support, rx_support) = channel(CHANNEL_CAPACITY);
 
         // Write the parameters to the logs.
         parameters.log();
@@ -201,6 +203,7 @@ impl Primary {
             /* rx_certificate_waiter */ rx_certificates_loopback,
             /* rx_proposer */ rx_headers,
             rx_timeout,
+            rx_support,
             rx_no_vote_msg,
             tx_consensus,
             /* tx_proposer */ tx_parents.clone(),
@@ -257,6 +260,8 @@ impl Primary {
             rx_timeout_cert,
             tx_no_vote_msg,
             rx_no_vote_cert,
+            parameters.propose_rate,
+            tx_support,
         );
 
         // The `Helper` is dedicated to reply to certificates requests from other primaries.
