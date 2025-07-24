@@ -88,8 +88,7 @@ pub struct Core {
     /// Aggregates timeouts to use for sending timeout certificate.
     timeouts_aggregators: HashMap<Round, Box<TimeoutAggregator>>,
     /// Aggregates no vote messages to use for sending no vote certificates.
-    no_vote_aggregators: HashMap<Round, HashMap<PublicKey, Box<NoVoteAggregator>>>,
-
+    no_vote_aggregators: HashMap<Round, Box<NoVoteAggregator>>,
     sorted_keys: Vec<PublicKeyShareG2>,
     combined_pubkey: PublicKeyShareG2,
     processing_vote_aggregators: HashMap<Digest, VotesAggregator>,
@@ -418,47 +417,35 @@ impl Core {
         debug!("Processing {:?}", no_vote_msg);
 
         // Check if there's already an aggregator for this round, prepare to add if not
-        // if !self
-        //     .no_vote_aggregators
-        //     .entry(no_vote_msg.round)
-        //     .or_insert_with(|| HashMap::new())
-        //     .contains_key(&no_vote_msg.leader)
-        // {
-        //     let initial_no_vote_msg = NoVoteMsg::new(
-        //         no_vote_msg.round,
-        //         self.name.clone(),
-        //         &mut self.signature_service,
-        //     )
-        //     .await;
+        if !self.no_vote_aggregators.contains_key(&no_vote_msg.round) {
+            let initial_no_vote_msg = NoVoteMsg::new(
+                no_vote_msg.round,
+                self.name.clone(),
+                &mut self.signature_service
+            ).await;
 
-        //     let mut aggregator = NoVoteAggregator::new();
-        //     // Add the initial message to the new aggregator
-        //     aggregator.append(initial_no_vote_msg, &self.committee)?;
+            let mut aggregator = NoVoteAggregator::new();
+            // Add the initial message to the new aggregator
+            aggregator.append(initial_no_vote_msg, &self.committee)?;
 
-        //     // Insert the new aggregator into the map
-        //     self.no_vote_aggregators
-        //         .entry(no_vote_msg.round)
-        //         .or_insert_with(|| HashMap::new())
-        //         .insert(no_vote_msg.leader, Box::new(aggregator));
-        // }
+            // Insert the new aggregator into the map
+            self.no_vote_aggregators.insert(no_vote_msg.round, Box::new(aggregator));
+        }
 
         // Check if we have no vote messages to create a no vote cert to propose next header(as a leader).
-        // Comment out for now
-        // if let Some(no_vote_cert) = self
-        //     .no_vote_aggregators
-        //     .entry(no_vote_msg.round)
-        //     .or_insert_with(|| HashMap::new())
-        //     .entry(no_vote_msg.leader)
-        //     .or_insert(Box::new(NoVoteAggregator::new()))
-        //     .append(no_vote_msg.clone(), &self.committee)?
-        // {
-        //     // Send it to the `Proposer`.
-        //     debug!("Aggregated no vote cert {:?}", no_vote_msg);
-        //     self.tx_no_vote_cert
-        //         .send((no_vote_cert, no_vote_msg.round))
-        //         .await
-        //         .expect("Failed to send no vote message");
-        // }
+        if let Some(no_vote_cert) = self
+            .no_vote_aggregators
+            .entry(no_vote_msg.round)
+            .or_insert_with(|| Box::new(NoVoteAggregator::new()))
+            .append(no_vote_msg.clone(), &self.committee)?
+        {
+            // Send it to the `Proposer`.
+            debug!("Aggregated no vote cert {:?}", no_vote_msg);
+            self.tx_no_vote_cert
+                .send((no_vote_cert, no_vote_msg.round))
+                .await
+                .expect("Failed to send no vote message");
+        }
         Ok(())
     }
 

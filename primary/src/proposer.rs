@@ -350,6 +350,9 @@ impl Proposer {
                         }
                     }
                 }
+                () = &mut timer => {
+                    // Nothing to do.
+                }
             }
         }
     }

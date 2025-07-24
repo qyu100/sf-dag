@@ -99,11 +99,6 @@ impl CertificatesAggregator {
         self.certificates.push(certificate.clone());
         self.weight += committee.stake(&origin);
 
-        let leader = committee.leader(round as usize);
-        if !self.used.contains(&leader) {
-            return Ok(None);
-        }
-
         if self.weight >= committee.quorum_threshold() {
             self.weight = 0; // Ensures quorum is only reached once.
             return Ok(Some(self.certificates.drain(..).collect()));
