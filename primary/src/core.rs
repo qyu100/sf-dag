@@ -301,12 +301,12 @@ impl Core {
             .entry(header_info.id)
             .or_insert(header_info.clone());
 
-        if header_info.propose_next_round {
-            self.header_proposers
-                .entry(header_info.round)
-                .or_insert_with(HashSet::new)
-                .insert(header_info.author);
-        }
+        // if header_info.propose_next_round {
+        //     self.header_proposers
+        //         .entry(header_info.round)
+        //         .or_insert_with(HashSet::new)
+        //         .insert(header_info.author);
+        // }
 
         // Check if we can vote for this header.
         if self

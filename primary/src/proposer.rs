@@ -147,7 +147,9 @@ impl Proposer {
             .expect("Failed to send support message");
     }
 
-    async fn make_header(&mut self, propose_next_round: bool) {
+    async fn make_header(&mut self
+        // , propose_next_round: bool
+    ) {
         // Make a new header.
         // Prepare the timeout and no vote certificates
         let timeout_cert = if self.last_timeout_cert.round == self.round - 1 {
@@ -178,7 +180,7 @@ impl Proposer {
             parents.iter().map(|x| x.header_id).collect(),
             timeout_cert,
             &mut self.signature_service,
-            propose_next_round,
+            // propose_next_round,
         )
         .await;
 
@@ -276,19 +278,20 @@ impl Proposer {
                 debug!("Dag moved to round {}", self.round);
 
                 let header_proposers = self.committee.header_proposers((self.round) as usize, self.propose_rate);
-                let propose_next_round = header_proposers.contains(&self.name);
+                // let propose_next_round = header_proposers.contains(&self.name);
                 // If propose this round or is the leader of the next round, make a new header; otherwise, send a support message.
-                if self.propose_this_round || is_next_leader {
-                    self.make_header(propose_next_round).await;
-                } else {
-                    let vote = if self.last_leader.is_none() {
-                        false
-                    } else {
-                        true
-                    };
-                    self.make_support_msg(vote, propose_next_round).await;
-                }
-                self.propose_this_round = propose_next_round;
+                // if self.propose_this_round || is_next_leader {
+                    // self.make_header(propose_next_round).await;
+                    self.make_header().await;
+                // } else {
+                //     let vote = if self.last_leader.is_none() {
+                //         false
+                //     } else {
+                //         true
+                //     };
+                //     self.make_support_msg(vote, propose_next_round).await;
+                // }
+                // self.propose_this_round = propose_next_round;
                 self.payload_size = 0;
 
                 // Reschedule the timer.
