@@ -11,7 +11,6 @@ use crate::primary::{HeaderType, PrimaryMessage, Round};
 use crate::synchronizer::Synchronizer;
 use crate::{ConsensusMessage, HeaderInfo, HeaderMessage};
 use async_recursion::async_recursion;
-use bincode::de;
 use blsttc::PublicKeyShareG2;
 use bytes::Bytes;
 use config::Committee;
@@ -242,7 +241,11 @@ impl Core {
                     .certificates_aggregators
                     .entry(certificate.round())
                     .or_insert_with(|| Box::new(CertificatesAggregator::new()))
-                    .append_certificate(&certificate, &self.committee, self.header_proposers.get(&(certificate.round-1)).map(|set| set.len()).unwrap_or(0))?
+                    .append_certificate(
+                        &certificate, 
+                        &self.committee, 
+                        // self.header_proposers.get(&(certificate.round-1)).map(|set| set.len()).unwrap_or(0)
+                    )?
                 {
                     // Send it to the `Proposer`.
                     self.tx_proposer
@@ -514,7 +517,8 @@ impl Core {
             .or_insert_with(|| Box::new(CertificatesAggregator::new()))
             .append_certificate(&certificate, 
                 &self.committee, 
-            self.header_proposers.get(&(certificate.round-1)).map(|set| set.len()).unwrap_or(0))?
+            // self.header_proposers.get(&(certificate.round-1)).map(|set| set.len()).unwrap_or(0)
+        )?
         {   
             // Send it to the `Proposer`.
             self.tx_proposer

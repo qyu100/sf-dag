@@ -90,7 +90,7 @@ impl CertificatesAggregator {
         &mut self,
         certificate: &Certificate,
         committee: &Committee,
-        propose_num: usize,
+        // propose_num: usize,
     ) -> DagResult<Option<Vec<Certificate>>> {
         let origin = certificate.origin();
 
@@ -112,7 +112,7 @@ impl CertificatesAggregator {
         // Enter round if 1) weight >= 2f+1 - votes number
         // and 2) weight >= max (propose_num - f, 0)
         if self.weight >= committee.quorum_threshold()
-            && self.certificate_weight >= propose_num.saturating_sub(committee.f_num as usize) as u32
+            // && self.certificate_weight >= propose_num.saturating_sub(committee.f_num as usize) as u32
         {
             self.weight = 0;
             return Ok(Some(self.certificates.drain(..).collect()));
