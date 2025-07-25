@@ -113,8 +113,8 @@ impl CertificatesAggregator {
         // and 2) weight >= max (propose_num - f, 0)
         if self.weight >= committee.quorum_threshold()
             // && self.certificate_weight >= propose_num.saturating_sub(committee.f_num as usize) as u32
-            && self.certificate_weight >= propose_num as u32
-        {
+            && self.certificate_weight >= 7
+        {   
             self.weight = 0;
             return Ok(Some(self.certificates.drain(..).collect()));
         }
@@ -147,7 +147,7 @@ impl CertificatesAggregator {
         // and 2) certificate_weight >= max (propose_num - f, 0)
         if self.weight >= committee.quorum_threshold()
             // && self.certificate_weight >= propose_num.saturating_sub(committee.f_num as usize) as u32
-            && self.certificate_weight >= propose_num as u32
+            && self.certificate_weight >= 7
         {
             self.weight = 0;
             return Ok(Some(self.certificates.drain(..).collect()));
