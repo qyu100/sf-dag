@@ -147,9 +147,7 @@ impl Proposer {
             .expect("Failed to send support message");
     }
 
-    async fn make_header(&mut self
-        , propose_next_round: bool
-    ) {
+    async fn make_header(&mut self, propose_next_round: bool) {
         // Make a new header.
         // Prepare the timeout and no vote certificates
         let timeout_cert = if self.last_timeout_cert.round == self.round - 1 {
@@ -282,7 +280,6 @@ impl Proposer {
                 // If propose this round or is the leader of the next round, make a new header; otherwise, send a support message.
                 if self.propose_this_round || is_next_leader {
                     self.make_header(propose_next_round).await;
-
                 } else {
                     let vote = if self.last_leader.is_none() {
                         false
