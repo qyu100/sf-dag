@@ -23,7 +23,7 @@ pub struct Header {
     pub id: Digest,
     pub signature: Signature,
     pub timeout_cert: TimeoutCert,
-    // pub propose_next_round: bool,
+    pub propose_next_round: bool,
 }
 
 impl Header {
@@ -34,7 +34,7 @@ impl Header {
         parents: Vec<Digest>,
         timeout_cert: TimeoutCert,
         signature_service: &mut SignatureService,
-        // propose_next_round: bool,
+        propose_next_round: bool,
     ) -> Self {
         let header = Self {
             author,
@@ -44,7 +44,7 @@ impl Header {
             id: Digest::default(),
             signature: Signature::default(),
             timeout_cert,
-            // propose_next_round,
+            propose_next_round,
         };
         let id = header.digest();
         let signature = signature_service.request_signature(id.clone()).await;
@@ -157,7 +157,7 @@ pub struct HeaderInfo {
     pub parents: Vec<Digest>,
     pub id: Digest,
     pub signature: Signature,
-    // pub propose_next_round: bool,
+    pub propose_next_round: bool,
     pub timeout_cert: TimeoutCert,
 }
 impl HeaderInfo {
@@ -169,7 +169,7 @@ impl HeaderInfo {
             parents: header.parents.clone(),
             id: header.id,
             signature: header.signature.clone(),
-            // propose_next_round: header.propose_next_round,
+            propose_next_round: header.propose_next_round,
             timeout_cert: header.timeout_cert.clone(),
         };
         header_info
