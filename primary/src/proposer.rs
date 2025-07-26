@@ -61,6 +61,8 @@ pub struct Proposer {
     last_timeout_cert: TimeoutCert,
     /// Holds the latest No Vote Certificate received.
     last_no_vote_cert: NoVoteCert,
+    // Rate at which the proposer creates headers
+    propose_rate: f64, 
 }
 
 impl Proposer {
@@ -80,6 +82,7 @@ impl Proposer {
         rx_timeout_cert: Receiver<(TimeoutCert, Round)>,
         tx_core_no_vote_msg: Sender<NoVoteMsg>,
         rx_no_vote_cert: Receiver<(NoVoteCert, Round)>,
+        propose_rate: f64, 
     ) {
         let genesis = Certificate::genesis(&committee);
         tokio::spawn(async move {
@@ -105,6 +108,7 @@ impl Proposer {
                 payload_size: 0,
                 last_timeout_cert: TimeoutCert::new(0),
                 last_no_vote_cert: NoVoteCert::new(0),
+                propose_rate,
             }
             .run()
             .await;
@@ -161,7 +165,12 @@ impl Proposer {
 
         let mut payload;
         if self.consensus_only {
-            payload = vec![vec![0u8; self.tx_size]; (self.header_size / self.tx_size)];
+            let header_proposers = self.committee.header_proposers((self.round + 1) as usize, self.propose_rate); // To be consistent with angelfish
+            if header_proposers.contains(&self.name) {
+                payload = vec![vec![0u8; self.tx_size]; (self.header_size / self.tx_size)];
+            } else {
+                payload = vec![];
+            }
         } else {
             payload = self.txns.drain(..limit).collect();
         }

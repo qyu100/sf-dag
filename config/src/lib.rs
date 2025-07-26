@@ -10,6 +10,8 @@ use std::io::BufWriter;
 use std::io::Write as _;
 use std::net::SocketAddr;
 use thiserror::Error;
+use rand::{SeedableRng, seq::SliceRandom};
+use rand::rngs::StdRng;
 
 #[derive(Error, Debug)]
 pub enum ConfigError {
@@ -83,6 +85,8 @@ pub struct Parameters {
     /// The delay after which the workers seal a batch of transactions, even if `max_batch_size`
     /// is not reached. Denominated in ms.
     pub max_batch_delay: u64,
+    pub propose_rate: f64, // rate of proposing a header
+    pub f_num: u32, // number of faulty nodes
 }
 
 impl Default for Parameters {
@@ -97,6 +101,8 @@ impl Default for Parameters {
             batch_size: 500_000,
             tx_size: 512,
             max_batch_delay: 100,
+            propose_rate: 0.1,
+            f_num: 3,
         }
     }
 }
@@ -116,6 +122,7 @@ impl Parameters {
         info!("Batch size set to {} B", self.batch_size);
         info!("Max batch delay set to {} ms", self.max_batch_delay);
         info!("Transaction size set to {} B", self.tx_size);
+        info!("Rate of proposing a header set to {}", self.propose_rate);
     }
 }
 
@@ -158,17 +165,19 @@ impl Import for Comm {}
 pub struct Committee {
     pub authorities: BTreeMap<PublicKey, Authority>,
     pub sorted_keys: Vec<PublicKey>,
+    pub f_num: u32,
 }
 
 impl Import for Committee {}
 
 impl Committee {
-    pub fn new(authorities: BTreeMap<PublicKey, Authority>) -> Committee {
+    pub fn new(authorities: BTreeMap<PublicKey, Authority>, f_num: u32) -> Committee {
         let mut keys: Vec<_> = authorities.keys().cloned().collect();
         keys.sort();
         let committee = Self {
             authorities,
             sorted_keys: keys,
+            f_num,
         };
         committee
     }
@@ -197,7 +206,7 @@ impl Committee {
         // If N = 3f + 1 + k (0 <= k < 3)
         // then (2 N + 3) / 3 = 2f + 1 + (2k + 2)/3 = 2f + 1 + k = N - f
         let total_votes: Stake = self.authorities.values().map(|x| x.stake).sum();
-        2 * total_votes / 3 + 1
+        2 * self.f_num + 1
     }
 
     /// Returns the stake required to reach availability (f+1).
@@ -214,6 +223,21 @@ impl Committee {
         let mut keys: Vec<_> = self.authorities.keys().cloned().collect();
         keys.sort();
         keys[seed % self.size()]
+    }
+
+    pub fn header_proposers(&self, seed: usize, propose_rate: f64) -> Vec<PublicKey> {
+        let mut keys: Vec<PublicKey> = self.authorities.keys().cloned().collect();
+        keys.sort();
+        
+        let n = keys.len();
+        let k = (propose_rate * n as f64).floor() as usize;
+
+        let mut rng = StdRng::seed_from_u64(seed as u64);
+
+        keys.shuffle(&mut rng);
+        keys.truncate(k);
+
+        keys
     }
 
     pub fn sub_leaders(&self, seed: usize, num_leaders: usize) -> Vec<PublicKey> {

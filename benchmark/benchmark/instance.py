@@ -11,7 +11,7 @@ from google.oauth2 import service_account
 
 #path to your GCP service account key json file
 GCP_KEY_PATH = '../benchmark/benchmark/key.json'
-SSH_PUB_KEY_PATH = '{path_to_ssh_public_key}'
+SSH_PUB_KEY_PATH = '/Users/qianyu/work/gcp-key.pub'
 
 os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = GCP_KEY_PATH
 compute_service = build('compute', 'v1')
@@ -27,8 +27,8 @@ class GCPError(Exception):
 class InstanceManager:
     
      #setup instance name and GCP project ID
-    INSTANCE_NAME = 'bullshark'
-    PROJECT_ID = 'supra-testnet-417213'
+    INSTANCE_NAME = 'sf-dag'
+    PROJECT_ID = 'sf-dag-454112'
 
     
     def __init__(self,settings):
@@ -106,7 +106,7 @@ class InstanceManager:
                                 "boot": True,
                                 "autoDelete": True,
                                 "initializeParams": {
-                                    "sourceImage": "projects/ubuntu-os-cloud/global/images/family/ubuntu-2004-lts"
+                                    "sourceImage": "projects/ubuntu-os-cloud/global/images/family/ubuntu-2204-lts"
                                 }
                             }
                         ],

@@ -257,6 +257,7 @@ impl Primary {
             rx_timeout_cert,
             tx_no_vote_msg,
             rx_no_vote_cert,
+            parameters.propose_rate,
         );
 
         // The `Helper` is dedicated to reply to certificates requests from other primaries.

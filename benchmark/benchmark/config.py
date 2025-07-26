@@ -215,11 +215,13 @@ class NodeParameters:
             inputs += [json['batch_size']]
             inputs += [json['max_batch_delay']]
             inputs += [json['tx_size']]
+            inputs += [json['propose_rate']]
+            inputs += [json['f_num']]
         except KeyError as e:
             raise ConfigError(f'Malformed parameters: missing key {e}')
 
-        if not all(isinstance(x, int) for x in inputs):
-            raise ConfigError('Invalid parameters type')
+        # if not all(isinstance(x, int) for x in inputs):
+        #     raise ConfigError('Invalid parameters type')
 
         self.json = json
 

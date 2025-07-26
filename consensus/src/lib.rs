@@ -175,15 +175,18 @@ impl Consensus {
 
                                 // Output the sequence in the right order.
                                 for certificate in sequence {
-                                    #[cfg(not(feature = "benchmark"))]
-                                    info!("Committed {} with header", certificate.header_id);
+                                    // #[cfg(not(feature = "benchmark"))]
+                                    // info!("Committed {} with header", certificate.header_id);
 
                                     if certificate.round == leader_round {
                                         info!("Committed {:?} Leader", certificate.header_id);
+                                        info!("committ leader round: {}", certificate.round);
                                     }else if certificate.round == leader_round-1 {
                                         info!("Committed {:?} NonLeader", certificate.header_id);
+                                        info!("committ non-leader round: {}", certificate.round);
                                     }else{
                                         info!("Committed {:?} ", certificate.header_id);
+                                        info!("committ other round: {}", certificate.round);
                                     }
 
                                     self.tx_primary
