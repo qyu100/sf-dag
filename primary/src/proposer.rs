@@ -166,7 +166,7 @@ impl Proposer {
         let mut payload;
         if self.consensus_only {
             let header_proposers = self.committee.header_proposers((self.round + 1) as usize, self.propose_rate); // To be consistent with angelfish
-            if header_proposers.contains(&self.name) {
+            if header_proposers.contains(&self.name) || self.committee.leader((self.round + 1) as usize) == self.name {
                 payload = vec![vec![0u8; self.tx_size]; (self.header_size / self.tx_size)];
             } else {
                 payload = vec![];
