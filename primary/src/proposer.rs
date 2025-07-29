@@ -129,6 +129,7 @@ impl Proposer {
         vote: bool,
         propose_next_round: bool, 
     ) {
+        self.last_parents.clear();
         let support = Support::new(
             self.name,
             self.round,
