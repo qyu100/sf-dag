@@ -6,8 +6,7 @@ use crate::garbage_collector::GarbageCollector;
 use crate::header_waiter::HeaderWaiter;
 use crate::helper::Helper;
 use crate::messages::{
-    Certificate, Header, HeaderInfo, HeaderInfoWithCertificate, HeaderWithCertificate, NoVoteMsg,
-    Timeout, Vote, Support,
+    Certificate, Header, HeaderInfo, HeaderInfoWithCertificate, HeaderWithCertificate, Timeout, Vote, Support,
 };
 // use crate::payload_receiver::PayloadReceiver;
 use crate::proposer::Proposer;
@@ -101,10 +100,9 @@ impl Primary {
         let (tx_our_digests, rx_our_digests) = channel(CHANNEL_CAPACITY);
         let (tx_parents, rx_parents) = channel(CHANNEL_CAPACITY);
         let (tx_headers, rx_headers) = channel(CHANNEL_CAPACITY);
+        let (tx_leader, rx_leader) = channel(CHANNEL_CAPACITY);
         let (tx_timeout, rx_timeout) = channel(CHANNEL_CAPACITY);
         let (tx_timeout_cert, rx_timeout_cert) = channel(CHANNEL_CAPACITY);
-        let (tx_no_vote_msg, rx_no_vote_msg) = channel(CHANNEL_CAPACITY);
-        let (tx_no_vote_cert, rx_no_vote_cert) = channel(CHANNEL_CAPACITY);
         let (tx_sync_headers, rx_sync_headers) = channel(CHANNEL_CAPACITY);
         let (tx_sync_certificates, rx_sync_certificates) = channel(CHANNEL_CAPACITY);
         let (tx_headers_loopback, rx_headers_loopback) = channel(CHANNEL_CAPACITY);
@@ -204,11 +202,10 @@ impl Primary {
             /* rx_proposer */ rx_headers,
             rx_timeout,
             rx_support,
-            rx_no_vote_msg,
             tx_consensus,
             /* tx_proposer */ tx_parents.clone(),
+            /* tx_proposer_leader */ tx_leader,
             tx_timeout_cert,
-            tx_no_vote_cert,
             tx_consensus_header_msg,
             sorted_keys.clone(),
             combined_key.clone(),
@@ -227,7 +224,7 @@ impl Primary {
             name,
             committee.clone(),
             store.clone(),
-            consensus_round,
+            consensus_round.clone(),
             parameters.gc_depth,
             parameters.sync_retry_delay,
             parameters.sync_retry_nodes,
@@ -254,14 +251,15 @@ impl Primary {
             parameters.max_header_delay,
             parameters.consensus_only,
             /* rx_core */ rx_parents,
+            /* tx_core_leader */ rx_leader,
             /* rx_workers */ rx_our_digests,
             /* tx_core */ tx_headers,
             /* tx_core_timeout */ tx_timeout,
             rx_timeout_cert,
-            tx_no_vote_msg,
-            rx_no_vote_cert,
             parameters.propose_rate,
             tx_support,
+            consensus_round,
+            parameters.gc_depth,
         );
 
         // The `Helper` is dedicated to reply to certificates requests from other primaries.

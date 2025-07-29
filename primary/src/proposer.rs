@@ -1,6 +1,6 @@
 use crate::batch_maker::Transaction;
 use crate::messages::{
-    Certificate, Header, HeaderWithCertificate, NoVoteCert, NoVoteMsg, Timeout, TimeoutCert, Support,
+    Certificate, Header, HeaderWithCertificate, Timeout, TimeoutCert, Support,
 };
 use crate::primary::Round;
 use config::Committee;
@@ -8,10 +8,15 @@ use crypto::{PublicKey, SignatureService};
 #[cfg(feature = "benchmark")]
 use log::info;
 use log::{debug, warn};
+use core::time;
 use std::cmp::Ordering;
+use std::sync::atomic::Ordering as AtomicOrdering;
+use std::sync::atomic::AtomicU64;
 use std::convert::TryInto;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::time::{sleep, Duration, Instant};
+use std::collections::HashMap;
+use std::sync::Arc;
 
 // #[cfg(test)]
 // #[path = "tests/proposer_tests.rs"]
@@ -34,6 +39,8 @@ pub struct Proposer {
 
     /// Receives the parents to include in the next header (along with their round number).
     rx_core: Receiver<(Vec<Certificate>, Round)>,
+    /// Receives the leader's certificate from the `Core`.
+    rx_core_leader: Receiver<Certificate>,
     /// Receives the batch digest from our workers.
     rx_workers: Receiver<Vec<Transaction>>,
     /// Sends newly created headers to the `Core`.
@@ -42,10 +49,6 @@ pub struct Proposer {
     tx_core_timeout: Sender<Timeout>,
     /// Receives timeout certs from the `Core`.
     rx_timeout_cert: Receiver<(TimeoutCert, Round)>,
-    /// Sends newly created no vote message to the `Core`.
-    tx_core_no_vote_msg: Sender<NoVoteMsg>,
-    /// Receives no vote certs from the `Core`.
-    rx_no_vote_cert: Receiver<(NoVoteCert, Round)>,
     /// Sends support messages to the `Core`.
     tx_core_support: Sender<Support>,
 
@@ -61,12 +64,20 @@ pub struct Proposer {
     payload_size: usize,
     /// Holds the Timeout certificate for the latest round.
     last_timeout_cert: TimeoutCert,
-    /// Holds the latest No Vote Certificate received.
-    last_no_vote_cert: NoVoteCert,
+    /// Holds the timeout certificates.
+    timeout_certs: HashMap<Round, Vec<TimeoutCert>>,
     // Rate of proposing a header
     propose_rate: f64, 
     /// Whether the proposer should propose in the this round.
     propose_this_round: bool,
+    /// The current consensus round (used for cleanup).
+    consensus_round: Arc<AtomicU64>,
+    /// The depth of the garbage collector.
+    gc_depth: Round,
+    /// The last garbage collected round.
+    gc_round: Round,
+    /// The last received leader's public key.
+    last_received_leader: Option<Certificate>,
 }
 
 impl Proposer {
@@ -80,14 +91,15 @@ impl Proposer {
         max_header_delay: u64,
         consensus_only: bool,
         rx_core: Receiver<(Vec<Certificate>, Round)>,
+        rx_core_leader: Receiver<Certificate>,
         rx_workers: Receiver<Vec<Transaction>>,
         tx_core: Sender<HeaderWithCertificate>,
         tx_core_timeout: Sender<Timeout>,
         rx_timeout_cert: Receiver<(TimeoutCert, Round)>,
-        tx_core_no_vote_msg: Sender<NoVoteMsg>,
-        rx_no_vote_cert: Receiver<(NoVoteCert, Round)>,
         propose_rate: f64,
         tx_core_support: Sender<Support>,
+        consensus_round: Arc<AtomicU64>,
+        gc_depth: Round,
     ) {
         let genesis = Certificate::genesis(&committee);
         tokio::spawn(async move {
@@ -100,12 +112,11 @@ impl Proposer {
                 max_header_delay,
                 consensus_only,
                 rx_core,
+                rx_core_leader,
                 rx_workers,
                 tx_core,
                 tx_core_timeout,
                 rx_timeout_cert,
-                tx_core_no_vote_msg,
-                rx_no_vote_cert,
                 tx_core_support,
                 round: 0,
                 last_parents: genesis,
@@ -113,9 +124,13 @@ impl Proposer {
                 txns: Vec::new(),
                 payload_size: 0,
                 last_timeout_cert: TimeoutCert::new(0),
-                last_no_vote_cert: NoVoteCert::new(0),
+                timeout_certs: HashMap::new(),
                 propose_rate,
                 propose_this_round: true,
+                consensus_round,
+                gc_depth,
+                gc_round: 0,
+                last_received_leader: None,
             }
             .run()
             .await;
@@ -135,22 +150,12 @@ impl Proposer {
             .expect("Failed to send timeout");
     }
 
-    async fn make_no_vote_msg(&mut self) {
-        let no_vote_msg = NoVoteMsg::new(self.round, self.name, &mut self.signature_service).await;
-
-        debug!("Created {:?}", no_vote_msg);
-
-        self.tx_core_no_vote_msg
-            .send(no_vote_msg)
-            .await
-            .expect("Failed to send no vote message");
-    }
-
     async fn make_support_msg(
         &mut self,
         vote: bool,
         propose_next_round: bool, 
     ) {
+        self.last_parents.clear();
         let support = Support::new(
             self.name,
             self.round,
@@ -171,19 +176,11 @@ impl Proposer {
 
     async fn make_header(&mut self, propose_next_round: bool) {
         // Make a new header.
-        // Prepare the timeout and no vote certificates
+        // Prepare the timeout certificates
         let timeout_cert = if self.last_timeout_cert.round == self.round - 1 {
             self.last_timeout_cert.clone()
         } else {
             TimeoutCert::new(0) // Assuming TimeoutCert::new creates an empty certificate
-        };
-
-        let no_vote_cert = if self.committee.leader((self.round) as usize) == self.name
-            && self.last_no_vote_cert.round == self.round - 1
-        {
-            self.last_no_vote_cert.clone()
-        } else {
-            NoVoteCert::new(0) // Assuming NoVoteCert::new creates an empty certificate
         };
 
         let limit = if self.txns.len() * self.tx_size <= self.header_size {
@@ -200,16 +197,23 @@ impl Proposer {
         }
 
         let parents: Vec<Certificate> = self.last_parents.drain(..).collect();
-        
+        let previous_leader = if self.committee.leader(self.round as usize) == self.name {
+            self.last_received_leader
+                .as_ref()
+                .map(|leader| leader.header_id.clone())
+        } else {
+            None
+        };
+
         let header = Header::new(
             self.name,
             self.round,
             payload,
             parents.iter().map(|x| x.header_id).collect(),
             timeout_cert,
-            no_vote_cert,
             &mut self.signature_service,
             propose_next_round,
+            previous_leader,
         )
         .await;
 
@@ -283,27 +287,25 @@ impl Proposer {
             let enough_parents = !self.last_parents.is_empty();
             let timeout_cert_gathered = self.last_timeout_cert.round == self.round;
             let is_next_leader = self.committee.leader((self.round + 1) as usize) == self.name;
-            let no_vote_cert_gathered = self.last_no_vote_cert.round == self.round;
             let enough_digests = self.payload_size >= self.header_size;
             let timer_expired = timer.is_elapsed();
 
-            // TODO: This has to be fixed by sending timeout only once.
             if timer_expired && !timeout_sent {
                 warn!("Timer expired for round {}", self.round);
                 self.make_timeout_msg().await;
                 timeout_sent = true;
             }
-
+            
             if ((timer_expired
                 && timeout_cert_gathered
-                && (!is_next_leader || no_vote_cert_gathered))
+                && (!is_next_leader
+                    || (self.last_received_leader.is_some() && self.last_received_leader.as_ref().unwrap().round + 1 == self.last_timeout_cert.round)))
                 || ((enough_digests || self.consensus_only) && advance))
                 && enough_parents
-            {
-                if timer_expired && self.last_leader.is_none() && !is_next_leader {
-                    self.make_no_vote_msg().await;
+            {   
+                if ((enough_digests || self.consensus_only) && advance) {
+                    debug!("enter round by leader")
                 }
-
                 // Advance to the next round.
                 self.round += 1;
                 debug!("Dag moved to round {}", self.round);
@@ -314,11 +316,7 @@ impl Proposer {
                 if self.propose_this_round || is_next_leader {
                     self.make_header(propose_next_round).await;
                 } else {
-                    let vote = if self.last_leader.is_none() {
-                        false
-                    } else {
-                        true
-                    };
+                    let vote = self.last_leader.is_some();
                     self.make_support_msg(vote, propose_next_round).await;
                 }
                 self.propose_this_round = propose_next_round;
@@ -356,6 +354,17 @@ impl Proposer {
                     // (2) Also implement the wait for leader idea what is was there before
                     advance = self.update_leader();
                 }
+                Some(leader) = self.rx_core_leader.recv() => {
+                    match self.last_received_leader.as_ref() {
+                        Some(last) if leader.round > last.round => {
+                            self.last_received_leader = Some(leader);
+                        }
+                        None => {
+                            self.last_received_leader = Some(leader);
+                        }
+                        _ => {} 
+                    }
+                }
                 Some(txns) = self.rx_workers.recv() => {
                     self.payload_size += txns.iter().map(|txn| txn.len()).sum::<usize>();
                     self.txns.extend(txns);
@@ -366,7 +375,6 @@ impl Proposer {
                             // We accept round bigger than our current round to jump ahead in case we were
                             // late (or just joined the network).
                             self.last_timeout_cert = timeout_cert.clone();
-
                             // TODO: How do we react?
                         },
                         Ordering::Less => {
@@ -378,24 +386,16 @@ impl Proposer {
                         }
                     }
                 }
-                Some((no_vote_cert, round)) = self.rx_no_vote_cert.recv() => {
-                    match round.cmp(&self.last_no_vote_cert.round) {
-                        Ordering::Greater => {
-                            // We accept round bigger than our current round to jump ahead in case we were
-                            // late (or just joined the network).
-                            self.last_no_vote_cert = no_vote_cert;
 
-                            // TODO: How do we react?
-                        },
-                        Ordering::Less => {
-                            // Ignore parents from older rounds.
-                        },
-                        Ordering::Equal => {
-                            // TODO: Here we have to create header and include the timeout certificate in the header?
-                            self.last_no_vote_cert = no_vote_cert;
-                        }
-                    }
+                () = &mut timer => {
+                    // Nothing to do.
                 }
+            }
+
+            let round = self.consensus_round.load(AtomicOrdering::Relaxed);
+            if round > self.gc_depth {
+                let gc_round = round - self.gc_depth;
+                self.timeout_certs.retain(|k, _| k >= &gc_round);
             }
         }
     }

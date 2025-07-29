@@ -1,10 +1,10 @@
 // Copyright(C) Facebook, Inc. and its affiliates.
 use crate::aggregators::{
-    CertificatesAggregator, NoVoteAggregator, TimeoutAggregator, VotesAggregator,
+    CertificatesAggregator, TimeoutAggregator, VotesAggregator,
 };
 use crate::error::{DagError, DagResult};
 use crate::messages::{
-    Certificate, HeaderInfoWithCertificate, HeaderWithCertificate, NoVoteCert, NoVoteMsg, Timeout,
+    Certificate, HeaderInfoWithCertificate, HeaderWithCertificate, Timeout,
     TimeoutCert, Vote, Support
 };
 use crate::primary::{HeaderType, PrimaryMessage, Round};
@@ -60,16 +60,14 @@ pub struct Core {
     rx_timeout: Receiver<Timeout>,
     /// Receives our newly created support messages from the `Proposer`.
     rx_support: Receiver<Support>,
-    /// Receives our newly created no vote msgs from the `Proposer`.
-    rx_no_vote_msg: Receiver<NoVoteMsg>,
     /// Output all certificates to the consensus layer.
     tx_consensus: Sender<Certificate>,
     /// Send valid a quorum of certificates' ids to the `Proposer` (along with their round).
     tx_proposer: Sender<(Vec<Certificate>, Round)>,
+    /// Send leader to the 'Proposer'.
+    tx_proposer_leader: Sender<Certificate>,
     /// Send a valid TimeoutCertificate along with the round to the `Proposer`.
     tx_timeout_cert: Sender<(TimeoutCert, Round)>,
-    /// Send a valid NoVoteCert along with the round to the `Proposer`.
-    tx_no_vote_cert: Sender<(NoVoteCert, Round)>,
     /// Send a header that has voted for the prev leader to the `Consensus` logic.
     tx_consensus_header_msg: Sender<ConsensusMessage>,
     /// The last garbage collected round.
@@ -90,8 +88,6 @@ pub struct Core {
     cancel_handlers: HashMap<Round, Vec<CancelHandler>>,
     /// Aggregates timeouts to use for sending timeout certificate.
     timeouts_aggregators: HashMap<Round, Box<TimeoutAggregator>>,
-    /// Aggregates no vote messages to use for sending no vote certificates.
-    no_vote_aggregators: HashMap<Round, HashMap<PublicKey, Box<NoVoteAggregator>>>,
     /// Keep track of how many vertices will propose in each round.
     header_proposers: HashMap<Round, HashSet<PublicKey>>,
 
@@ -118,11 +114,10 @@ impl Core {
         rx_proposer: Receiver<HeaderWithCertificate>,
         rx_timeout: Receiver<Timeout>,
         rx_support: Receiver<Support>,
-        rx_no_vote_msg: Receiver<NoVoteMsg>,
         tx_consensus: Sender<Certificate>,
         tx_proposer: Sender<(Vec<Certificate>, Round)>,
+        tx_proposer_leader: Sender<Certificate>,
         tx_timeout_cert: Sender<(TimeoutCert, Round)>,
-        tx_no_vote_cert: Sender<(NoVoteCert, Round)>,
         tx_consensus_header_msg: Sender<ConsensusMessage>,
         sorted_keys: Vec<PublicKeyShareG2>,
         combined_pubkey: PublicKeyShareG2,
@@ -144,11 +139,10 @@ impl Core {
                 rx_proposer,
                 rx_timeout,
                 rx_support,
-                rx_no_vote_msg,
                 tx_consensus,
                 tx_proposer,
+                tx_proposer_leader,
                 tx_timeout_cert,
-                tx_no_vote_cert,
                 tx_consensus_header_msg,
                 gc_round: 0,
                 last_voted: HashMap::with_capacity(2 * gc_depth as usize),
@@ -159,7 +153,6 @@ impl Core {
                 network: ReliableSender::new(),
                 cancel_handlers: HashMap::with_capacity(2 * gc_depth as usize),
                 timeouts_aggregators: HashMap::with_capacity(2 * gc_depth as usize),
-                no_vote_aggregators: HashMap::with_capacity(2 * gc_depth as usize),
                 header_proposers: HashMap::with_capacity(2 * gc_depth as usize),
                 sorted_keys,
                 combined_pubkey,
@@ -237,63 +230,64 @@ impl Core {
         self.process_header_msg(&header_info_msg).await
     }
 
-    // async fn process_parent_certificates(
-    //     &mut self,
-    //     parent_certs: &Vec<Certificate>,
-    // ) -> DagResult<()> {
-    //     for certificate in parent_certs {
-    //         // Check if we have enough certificates to enter a new dag round and propose a header.
-    //         if self
-    //             .processed_certs
-    //             .entry(certificate.round)
-    //             .or_insert_with(HashSet::new)
-    //             .insert(certificate.origin())
-    //         {
-    //             if let Some(parents) = self
-    //                 .certificates_aggregators
-    //                 .entry(certificate.round())
-    //                 .or_insert_with(|| Box::new(CertificatesAggregator::new()))
-    //                 .append(&certificate, &self.committee)?
-    //             {
-    //                 // Send it to the `Proposer`.
-    //                 self.tx_proposer
-    //                     .send((parents, certificate.round()))
-    //                     .await
-    //                     .expect("Failed to send certificate");
-    //             }
+    async fn process_parent_certificates(
+        &mut self,
+        parent_certs: &Vec<Certificate>,
+    ) -> DagResult<()> {
+        for certificate in parent_certs {
+            // Check if we have enough certificates to enter a new dag round and propose a header.
+            if self
+                .processed_certs
+                .entry(certificate.round)
+                .or_insert_with(HashSet::new)
+                .insert(certificate.origin())
+            {
+                if let Some(parents) = self
+                    .certificates_aggregators
+                    .entry(certificate.round())
+                    .or_insert_with(|| Box::new(CertificatesAggregator::new()))
+                    .append_certificate(&certificate
+                        , &self.committee
+                        ,self.header_proposers.get(&(certificate.round-1)).map(|set| set.len()).unwrap_or(0))?
+                {
+                    // Send it to the `Proposer`.
+                    self.tx_proposer
+                        .send((parents, certificate.round()))
+                        .await
+                        .expect("Failed to send certificate");
+                }
 
-    //             let id = certificate.header_id;
-    //             if let Err(e) = self
-    //                 .tx_consensus_header_msg
-    //                 .send(ConsensusMessage::Certificate(certificate.clone()))
-    //                 .await
-    //             {
-    //                 warn!(
-    //                     "Failed to deliver certificate {} to the consensus: {}",
-    //                     id, e
-    //                 );
-    //             }
-    //         }
-    //     }
-    //     Ok(())
-    // }
+                let id = certificate.header_id;
+                if let Err(e) = self
+                    .tx_consensus_header_msg
+                    .send(ConsensusMessage::Certificate(certificate.clone()))
+                    .await
+                {
+                    warn!(
+                        "Failed to deliver certificate {} to the consensus: {}",
+                        id, e
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
 
     #[async_recursion]
     async fn process_header_msg(&mut self, header_msg: &HeaderMessage) -> DagResult<()> {
-        debug!("Processing {:?}", header_msg);
-
+        
         let header_info: HeaderInfo;
         match header_msg {
             HeaderMessage::HeaderWithCertificate(header_with_parents) => {     
-                // let _ = self
-                //     .process_parent_certificates(&header_with_parents.parents)
-                //     .await;
+                let _ = self
+                    .process_parent_certificates(&header_with_parents.parents)
+                    .await;
                 header_info = HeaderInfo::create_from(&header_with_parents.header);
             }
             HeaderMessage::HeaderInfoWithCertificate(header_info_with_parents) => {
-                // let _ = self
-                //     .process_parent_certificates(&header_info_with_parents.parents)
-                //     .await;
+                let _ = self
+                    .process_parent_certificates(&header_info_with_parents.parents)
+                    .await;
                 header_info = header_info_with_parents.header_info.clone();
             }
             HeaderMessage::Header(header) => {
@@ -303,6 +297,8 @@ impl Core {
                 header_info = h_info.clone();
             }
         }
+
+        debug!("Processing header message at round {}: {:?}", header_info.round, header_info);
 
         // Indicate that we are processing this header.
         self.processing_header_infos
@@ -419,6 +415,8 @@ impl Core {
                 &self.committee, 
             self.header_proposers.get(&(support.round-1)).map(|set| set.len()).unwrap_or(0))?
         {   
+            debug!("support: sent parents for round {:?}, parents: {:?}", 
+                   support.round, parents.len());
             // Send it to the `Proposer`.
             self.tx_proposer
                 .send((parents, support.round))
@@ -468,22 +466,6 @@ impl Core {
             // Add it to the votes' aggregator and try to make a new certificate.
             if let Some(certificate) = vote_aggregator.append(&vote, &self.committee)? {
                 debug!("Assembled {:?}", certificate);
-                // self.processed_headers.insert(certificate.header_id.clone());
-
-                // Broadcast the certificate.
-                // let addresses = self
-                //     .committee
-                //     .others_primaries(&self.name)
-                //     .iter()
-                //     .map(|(_, x)| x.primary_to_primary)
-                //     .collect();
-                // let bytes = bincode::serialize(&PrimaryMessage::Certificate(certificate.clone()))
-                //     .expect("Failed to serialize our own certificate");
-                // let handlers = self.network.broadcast(addresses, Bytes::from(bytes)).await;
-                // self.cancel_handlers
-                //     .entry(certificate.round())
-                //     .or_insert_with(Vec::new)
-                //     .extend(handlers);
 
                 certificate
                     .verify(&self.committee, &self.sorted_keys, &self.combined_pubkey)
@@ -502,7 +484,6 @@ impl Core {
 
     #[async_recursion]
     async fn process_certificate(&mut self, certificate: Certificate) -> DagResult<()> {
-        debug!("Processing cert {:?}", certificate);
 
         // Ensure we have all the ancestors of this certificate yet. If we don't, the synchronizer will gather
         // them and trigger re-processing of this certificate.
@@ -518,6 +499,14 @@ impl Core {
         let bytes = bincode::serialize(&certificate).expect("Failed to serialize certificate");
         self.store.write(certificate.digest().to_vec(), bytes).await;
 
+        //Check if the certificate is a leader's certificate
+        if certificate.origin == self.committee.leader((certificate.round()) as usize) {
+            self.tx_proposer_leader
+                .send(certificate.clone())
+                .await
+                .expect("Failed to send leader certificate to proposer");
+        }
+
         // Check if we have enough certificates to enter a new dag round and propose a header.
         if let Some(parents) = self
             .certificates_aggregators
@@ -525,8 +514,8 @@ impl Core {
             .or_insert_with(|| Box::new(CertificatesAggregator::new()))
             .append_certificate(&certificate, 
                 &self.committee, 
-            self.header_proposers.get(&(certificate.round-1)).map(|set| set.len()).unwrap_or(0))?
-        {   
+            self.header_proposers.get(&(certificate.round()-1)).map(|set| set.len()).unwrap_or(0))?
+        {      
             // Send it to the `Proposer`.
             self.tx_proposer
                 .send((parents, certificate.round()))
@@ -536,18 +525,17 @@ impl Core {
 
         if self
             .processed_certs
-            .entry(certificate.round)
+            .entry(certificate.round())
             .or_insert_with(HashSet::new)
             .insert(certificate.origin())
-        {
+        {   
             // Send it to the consensus layer.
-            let id = certificate.header_id;
-            debug!("sending certificate {:?} to consensus", id);
+            // let id = certificate.header_id;
             if let Err(e) = self.tx_consensus.send(certificate).await {
-                warn!(
-                    "Failed to deliver certificate {} to the consensus: {}",
-                    id, e
-                );
+                // warn!(
+                //     "Failed to deliver certificate {} to the consensus: {}",
+                //     id, e
+                // );
             }
         }
         Ok(())

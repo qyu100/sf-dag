@@ -1,6 +1,6 @@
 // Copyright(C) Facebook, Inc. and its affiliates.
 use crate::error::{DagError, DagResult};
-use crate::messages::{Certificate, NoVoteCert, NoVoteMsg, Timeout, TimeoutCert, Vote, Support};
+use crate::messages::{Certificate, Timeout, TimeoutCert, Vote, Support};
 use blsttc::{PublicKeyShareG2, SignatureShareG1};
 use config::{Committee, Stake};
 use crypto::{aggregate_sign, PublicKey, Signature};
@@ -93,7 +93,7 @@ impl CertificatesAggregator {
         propose_num: usize,
     ) -> DagResult<Option<Vec<Certificate>>> {
         let origin = certificate.origin();
-
+        
         // Ensure it is the first time this authority votes.
         if !self.used.insert(origin) {
             return Ok(None);
@@ -105,10 +105,6 @@ impl CertificatesAggregator {
         self.weight += committee.stake(&origin);
         self.certificate_weight += committee.stake(&origin);
 
-        let leader = committee.leader(round as usize);
-        if !self.used.contains(&leader) {
-            return Ok(None);
-        }
         // Enter round if 1) weight >= 2f+1 - votes number
         // and 2) weight >= max (propose_num - f, 0)
         if self.weight >= committee.quorum_threshold()
@@ -184,49 +180,11 @@ impl TimeoutAggregator {
         self.weight += committee.stake(&author);
         if self.weight >= committee.quorum_threshold() {
             // Once quorum is reached, you might want to reset for the next round or trigger an action.
+            self.weight = 0;
             return Ok(Some(TimeoutCert {
                 round: timeout.round.clone(),
                 timeouts: self.timeouts.clone(),
             })); // Return the authorities that contributed to this quorum.
-        }
-        Ok(None)
-    }
-}
-
-/// Aggregates no-vote messages for a particular round into a certification.
-pub struct NoVoteAggregator {
-    weight: Stake,
-    no_votes: Vec<(PublicKey, Signature)>,
-    used: HashSet<PublicKey>,
-}
-
-impl NoVoteAggregator {
-    pub fn new() -> Self {
-        Self {
-            weight: 0,
-            no_votes: Vec::new(),
-            used: HashSet::new(),
-        }
-    }
-
-    pub fn append(
-        &mut self,
-        no_vote_msg: NoVoteMsg,
-        committee: &Committee,
-    ) -> DagResult<Option<NoVoteCert>> {
-        let author = no_vote_msg.author;
-
-        // Ensure it is the first time this authority sends a no-vote message.
-        ensure!(self.used.insert(author), DagError::AuthorityReuse(author));
-
-        self.no_votes.push((author, no_vote_msg.signature));
-        self.weight += committee.stake(&author);
-        if self.weight >= committee.quorum_threshold() {
-            // Once quorum is reached, you might reset for the next round or use the certification as needed.
-            return Ok(Some(NoVoteCert {
-                round: no_vote_msg.round.clone(),
-                no_votes: self.no_votes.clone(),
-            })); // Return the certification that aggregates the no-votes reaching quorum.
         }
         Ok(None)
     }

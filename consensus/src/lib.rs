@@ -26,6 +26,7 @@ struct State {
     /// must be regularly cleaned up through the function `update`.
     dag: Dag,
     parent_info: ParentInfo,
+    leader_edge: HashMap<Round, Digest>,
 }
 
 impl State {
@@ -40,6 +41,7 @@ impl State {
             last_committed: genesis.iter().map(|(x, (_, y))| (*x, y.round())).collect(),
             dag: [(0, genesis)].iter().cloned().collect(),
             parent_info: HashMap::new(),
+            leader_edge: HashMap::new(),
         }
     }
 
@@ -194,7 +196,12 @@ impl Consensus {
 
                         ConsensusMessage::HeaderInfo(header_info) => {
                             debug!("Processing header info {:?}", header_info);
-
+                            if header_info.author == self.committee.leader(header_info.round as usize) {
+                                if let Some(prev_leader) = header_info.previous_leader {
+                                    state.leader_edge.insert(header_info.round, prev_leader);
+                                }
+                            }
+                            
                             state.parent_info.insert(header_info.id, header_info.parents.clone());
                             // Try to order the dag to commit. Start from the previous round.
                             let r = header_info.round - 1;
@@ -240,10 +247,13 @@ impl Consensus {
 
                                     if certificate.round == leader_round {
                                         info!("Committed {:?} Leader", certificate.header_id);
+                                        debug!("committed leader round {:?}", certificate.round);
                                     }else if certificate.round == leader_round-1 {
                                         info!("Committed {:?} NonLeader", certificate.header_id);
+                                        debug!("committed non-leader leader round {:?}", certificate.round);
                                     }else{
                                         info!("Committed {:?} ", certificate.header_id);
+                                        debug!("committed other leader round {:?}", certificate.round);
                                     }
 
                                     self.tx_primary
@@ -273,6 +283,9 @@ impl Consensus {
                         .insert(certificate.origin(), (certificate.header_id.clone(), certificate.clone()));
                 }
             }
+            // Garbage collection.
+            let gc_round = state.last_committed_round.saturating_sub(self.gc_depth);
+            state.leader_edge.retain(|&r, _| r >= gc_round); 
         }
     }
 
@@ -306,16 +319,33 @@ impl Consensus {
             };
 
             // Check whether there is a path between the last two leaders.
-            if self.linked(leader, prev_leader, &state) {
-                to_commit.push(prev_leader.clone());
-                leader = prev_leader;
+            if leader.round == prev_leader.round + 1 {
+                if self.linked_strong_edge(leader, prev_leader, &state) {
+                    to_commit.push(prev_leader.clone());
+                    leader = prev_leader;
+                }
+            } else {
+                if self.linked_leader_edge(leader, prev_leader, &state) {
+                    to_commit.push(prev_leader.clone());
+                    leader = prev_leader;
+                }
             }
         }
         to_commit
     }
 
-    /// Checks if there is a path between two leaders.
-    fn linked(&self, leader: &Certificate, prev_leader: &Certificate, state: &State) -> bool {
+    /// Checks if there is a leader edge between two leaders.
+    fn linked_leader_edge(&self, leader: &Certificate, prev_leader: &Certificate, state: &State) -> bool {
+        if let Some(prev_leader_digest) = state.leader_edge.get(&leader.round()) {
+            if prev_leader_digest == &prev_leader.header_id {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Checks if there is a strong edge between two leaders.
+    fn linked_strong_edge(&self, leader: &Certificate, prev_leader: &Certificate, state: &State) -> bool {
         let mut parents = vec![leader];
         for r in (prev_leader.round()..leader.round()).rev() {
             parents = state
