@@ -134,7 +134,6 @@ impl Consensus {
 
                         ConsensusMessage::HeaderInfo(header_info) => {
                             debug!("Processing header info {:?}", header_info);
-
                             state.parent_info.insert(header_info.id, header_info.parents.clone());
                             // Try to order the dag to commit. Start from the previous round.
                             let r = header_info.round - 1;

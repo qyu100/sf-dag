@@ -10,15 +10,15 @@ from benchmark.remote import Bench, BenchError
 
 
 @task
-def local(ctx, debug=False, consensus_only=False, header_size=512):
+def local(ctx, debug=True, consensus_only=True, header_size=512):
     ''' Run benchmarks on localhost '''
     bench_params = {
-        'faults': 0,
-        'nodes': 10,
+        'faults': 16,
+        'nodes': 50,
         'workers': 1,
         'rate': 100_000,
         'tx_size': 512,
-        'duration': 20,
+        'duration': 60,
         "burst" : 50
     }
     node_params = {
@@ -30,7 +30,9 @@ def local(ctx, debug=False, consensus_only=False, header_size=512):
         'sync_retry_nodes': 3,  # number of nodes
         'batch_size': header_size,  # bytescd
         'tx_size': bench_params['tx_size'],
-        'max_batch_delay': 200,  # ms
+        'max_batch_delay': 20,  # ms
+        'propose_rate': 1,
+        'f_num': 16
     }
     try:
         ret = LocalBench(bench_params, node_params).run(debug, consensus_only)
@@ -106,6 +108,7 @@ def remote(ctx, burst = 50, debug=False, consensus_only=False, header_size=512):
         'duration': 60,
         'runs': 1,
         'burst' : [burst],
+        'f_num': 16
     }
 
     nodes = bench_params['nodes']
@@ -122,7 +125,9 @@ def remote(ctx, burst = 50, debug=False, consensus_only=False, header_size=512):
         'batch_size': header_size,
         'tx_size': bench_params['tx_size'],  # bytes
         'max_batch_delay': 200,  # ms
-        'leaders_per_round': 67
+        'leaders_per_round': 67,
+        'propose_rate': 0.5,
+        'f_num': 16
     }
     try:
         Bench(ctx).run(bench_params, node_params, debug, consensus_only)
