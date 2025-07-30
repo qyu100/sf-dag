@@ -6,8 +6,7 @@ use crate::primary::Round;
 use config::Committee;
 use crypto::{PublicKey, SignatureService};
 #[cfg(feature = "benchmark")]
-use log::info;
-use log::{debug, warn};
+use log::{debug, warn, info};
 use std::cmp::Ordering;
 use std::convert::TryInto;
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -281,7 +280,7 @@ impl Proposer {
 
                 // Advance to the next round.
                 self.round += 1;
-                debug!("Dag moved to round {}", self.round);
+                info!("Dag moved to round {}", self.round);
 
                 // Make a new header.
                 self.make_header().await;
