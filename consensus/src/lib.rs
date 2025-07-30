@@ -371,7 +371,7 @@ impl Consensus {
                     break parents;
                 }
 
-                sleep(Duration::from_millis(5)).await;
+                sleep(Duration::from_millis(1)).await;
             };
 
             for parent in parents {
