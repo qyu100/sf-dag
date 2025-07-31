@@ -308,7 +308,7 @@ impl Proposer {
                 }
                 // Advance to the next round.
                 self.round += 1;
-                debug!("Dag moved to round {}", self.round);
+                info!("Dag moved to round {}", self.round);
 
                 let header_proposers = self.committee.header_proposers((self.round) as usize, self.propose_rate);
                 let propose_next_round = header_proposers.contains(&self.name);
