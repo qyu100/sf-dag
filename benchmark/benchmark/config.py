@@ -77,6 +77,7 @@ class Committee:
         port = base_port
         json = {'authorities': OrderedDict()}
         num_authorities = len(addresses)
+        failure_nodes = 0
 
         for i, (name, hosts) in enumerate(addresses.items()):
             # port = base_port
@@ -101,10 +102,13 @@ class Committee:
                 }
                 port += 3
 
+            is_honest = True
+
             json['authorities'][name] = {
                 # Corresponds to the determination of faulty nodes in primary_addresses.
+                'node_id': i,
                 'bls_pubkey_g2': bls_pubkeys_g2[i],
-                'is_honest': i < num_authorities - faults,
+                'is_honest': is_honest,
                 'stake': 1,
                 'consensus': consensus_addr,
                 'primary': primary_addr,
@@ -120,9 +124,10 @@ class Committee:
         ''' Returns an ordered list of primaries' addresses. '''
         assert faults < self.size()
         addresses = []
-        good_nodes = self.size() - faults
-        for authority in list(self.json['authorities'].values())[:good_nodes]:
-            addresses += [authority['primary']['primary_to_primary']]
+        nodes = self.size()
+        for authority in list(self.json['authorities'].values())[:nodes]:
+            if authority['is_honest']: 
+                addresses += [(authority['node_id'], authority['primary']['primary_to_primary'])]
         return addresses
 
     def workers_addresses(self, faults=0):
