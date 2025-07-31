@@ -283,7 +283,7 @@ impl Proposer {
                 }
                 // Advance to the next round.
                 self.round += 1;
-                debug!("Dag moved to round {}", self.round);
+                info!("Dag moved to round {}", self.round);
                 // debug!("node_id:{:?}", self.committee.get_node_id(&self.committee.leader((self.round) as usize)));
                 // Make a new header.
                 self.make_header().await;
