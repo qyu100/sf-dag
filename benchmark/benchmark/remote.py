@@ -549,7 +549,7 @@ class Bench:
             traceback.print_exc()
             raise BenchError('Failed to configure nodes', e)
         
-        names = names[:len(names) - bench_parameters.faults]
+        # names = names[:len(names) - bench_parameters.faults]
         msg = f'Uploading configuration files'
         if update:
             msg += f' and changing repository {self.settings.repo_name} to branch {self.settings.branch}'
