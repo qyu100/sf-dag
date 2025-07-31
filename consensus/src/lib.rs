@@ -7,6 +7,7 @@ use primary::{Certificate, ConsensusMessage, Round};
 use std::cmp::max;
 use std::collections::{HashMap, HashSet};
 use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::time::{sleep, Duration};
 
 // #[cfg(test)]
 // #[path = "tests/consensus_tests.rs"]
@@ -158,9 +159,9 @@ impl Consensus {
                                 // Get an ordered list of past leaders that are linked to the current leader.
                                 debug!("Leader {:?} has enough support with header at round {}", leader, leader_round);
                                 let mut sequence = Vec::new();
-                                for leader in self.order_leaders(leader, &state).iter().rev() {
+                                for leader in self.order_leaders(leader, &state).await.iter().rev() {
                                     // Starting from the oldest leader, flatten the sub-dag referenced by the leader.
-                                    for x in self.order_dag(leader, &state) {
+                                    for x in self.order_dag(leader, &state).await {
                                         // Update and clean up internal state.
                                         state.update(&x, self.gc_depth);
 
@@ -229,9 +230,9 @@ impl Consensus {
                                 // Get an ordered list of past leaders that are linked to the current leader.
                                 debug!("Leader {:?} has enough support with header at round {}", leader, leader_round);
                                 let mut sequence = Vec::new();
-                                for leader in self.order_leaders(leader, &state).iter().rev() {
+                                for leader in self.order_leaders(leader, &state).await.iter().rev() {
                                     // Starting from the oldest leader, flatten the sub-dag referenced by the leader.
-                                    for x in self.order_dag(leader, &state) {
+                                    for x in self.order_dag(leader, &state).await {
                                         // Update and clean up internal state.
                                         state.update(&x, self.gc_depth);
 
@@ -308,7 +309,7 @@ impl Consensus {
     }
 
     /// Order the past leaders that we didn't already commit.
-    fn order_leaders(&self, leader: &Certificate, state: &State) -> Vec<Certificate> {
+    async fn order_leaders(&self, leader: &Certificate, state: &State) -> Vec<Certificate> {
         let mut to_commit = vec![leader.clone()];
         let mut leader = leader;
         for r in (state.last_committed_round + 1..=leader.round() - 1).rev() {
@@ -320,7 +321,7 @@ impl Consensus {
 
             // Check whether there is a path between the last two leaders.
             if leader.round == prev_leader.round + 1 {
-                if self.linked_strong_edge(leader, prev_leader, &state) {
+                if self.linked_strong_edge(leader, prev_leader, &state).await {
                     to_commit.push(prev_leader.clone());
                     leader = prev_leader;
                 }
@@ -345,29 +346,46 @@ impl Consensus {
     }
 
     /// Checks if there is a strong edge between two leaders.
-    fn linked_strong_edge(&self, leader: &Certificate, prev_leader: &Certificate, state: &State) -> bool {
+    async fn linked_strong_edge(
+        &self,
+        leader: &Certificate,
+        prev_leader: &Certificate,
+        state: &State,
+    ) -> bool {
         let mut parents = vec![leader];
         for r in (prev_leader.round()..leader.round()).rev() {
-            parents = state
+            let round_certificates = state
                 .dag
                 .get(&(r))
-                .expect("We should have the whole history by now")
-                .values()
-                .filter(|(digest, _)| {
-                    parents.iter().any(|x| {
-                        let parents = state.parent_info.get(&x.header_id).unwrap();
-                        parents.contains(digest)
-                    })
-                })
-                .map(|(_, certificate)| certificate)
-                .collect();
+                .expect("We should have the whole history by now");
+
+            let mut new_parents = Vec::new();
+
+            for (digest, certificate) in round_certificates.values() {
+                for parent_cert in &parents {
+                    loop {
+                        if let Some(parents_set) = state.parent_info.get(&parent_cert.header_id) {
+                            if parents_set.contains(digest) {
+                                new_parents.push(certificate);
+                                break;
+                            } else {
+                                break; 
+                            }
+                        } else {
+                            sleep(Duration::from_millis(1)).await;
+                        }
+                    }
+                }
+            }
+
+            parents = new_parents;
         }
         parents.contains(&prev_leader)
     }
 
     /// Flatten the dag referenced by the input certificate. This is a classic depth-first search (pre-order):
     /// https://en.wikipedia.org/wiki/Tree_traversal#Pre-order
-    fn order_dag(&self, leader: &Certificate, state: &State) -> Vec<Certificate> {
+    async fn order_dag(&self, leader: &Certificate, state: &State) -> Vec<Certificate> {
         debug!("Processing sub-dag of {:?}", leader);
         let mut ordered = Vec::new();
         let mut already_ordered = HashSet::new();
@@ -377,7 +395,14 @@ impl Consensus {
         while let Some(x) = buffer.pop() {
             debug!("Sequencing {:?}", x);
             ordered.push(x.clone());
-            let parents = state.parent_info.get(&x.header_id).unwrap();
+
+            let parents = loop {
+                if let Some(parents) = state.parent_info.get(&x.header_id) {
+                    break parents;
+                }
+
+                sleep(Duration::from_millis(1)).await;
+            };
 
             for parent in parents {
                 let (digest, certificate) = match state
