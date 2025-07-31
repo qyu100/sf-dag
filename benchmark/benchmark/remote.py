@@ -596,8 +596,7 @@ class Bench:
                             bench_parameters.workers,
                             bench_parameters.collocate,
                             rate,
-                            bench_parameters.tx_size,
-                            bench_parameters.propose_rate
+                            bench_parameters.tx_size
                         ))
                 
                     except (subprocess.SubprocessError, ParseError) as e:
