@@ -7,6 +7,7 @@
 .idea/*
 rust/.idea/*
 .db-*
+*.txt
 
 target/
 !/**/src/**/target/

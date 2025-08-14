@@ -14,12 +14,12 @@ def local(ctx, debug=True):
     ''' Run benchmarks on localhost '''
     bench_params = {
         'faults': 0,
-        'nodes': [4],
+        'nodes': [10],
         'workers': 1,
         'co-locate': True,
         'rate': [240_000],
         'tx_size': 512,
-        'duration': 60,
+        'duration': 20,
         'runs': 1,
 
         # Unused
@@ -30,7 +30,7 @@ def local(ctx, debug=True):
     }
     node_params = {
         'timeout_delay': 5_000,  # ms
-        'header_size': 32,  # bytes
+        'header_size': 512,  # bytes
         'max_header_delay': 5_000,  # ms
         'gc_depth': 50,  # rounds
         'sync_retry_delay': 5_000,  # ms
@@ -57,7 +57,7 @@ def local(ctx, debug=True):
 
 
 @task
-def create(ctx, nodes=6):
+def create(ctx, nodes=1):
     ''' Create a testbed'''
     try:
         InstanceManager.make().create_instances(nodes)
@@ -111,16 +111,16 @@ def install(ctx):
 
 
 @task
-def remote(ctx, debug=True):
+def remote(ctx, debug=False):
     ''' Run benchmarks on AWS '''
     bench_params = {
         'faults': 0,
-        'nodes': [4],
+        'nodes': [10],
         'workers': 1,
         'co-locate': True,
         'rate': [240_000],
         'tx_size': 512,
-        'duration': 60,
+        'duration': 10,
         'runs': 1,
 
         # Unused
@@ -140,7 +140,7 @@ def remote(ctx, debug=True):
         'max_batch_delay': 20,  # ms
         'use_optimistic_tips': True,
         'use_parallel_proposals': True,
-        'k': 4,
+        'k': 10,
         'use_fast_path': True,
         'fast_path_timeout': 5_000,
         'use_ride_share': False,

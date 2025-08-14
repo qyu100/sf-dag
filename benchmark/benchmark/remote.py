@@ -10,11 +10,11 @@ from math import ceil
 from copy import deepcopy
 import subprocess
 
-from benchmark.config import Committee, Key, NodeParameters, BenchParameters, ConfigError
+from benchmark.config import Committee, EdKey, NodeParameters, BenchParameters, ConfigError
 from benchmark.utils import BenchError, Print, PathMaker, progress_bar
 from benchmark.commands import CommandMaker
 from benchmark.logs import LogParser, ParseError
-from benchmark.gcp_instance import InstanceManager
+from benchmark.instance import InstanceManager
 
 
 class FabricError(Exception):
@@ -217,7 +217,7 @@ class Bench:
         for filename in key_files:
             cmd = CommandMaker.generate_key(filename).split()
             subprocess.run(cmd, check=True)
-            keys += [Key.from_file(filename)]
+            keys += [EdKey.from_file(filename)]
 
         names = [x.name for x in keys]
 

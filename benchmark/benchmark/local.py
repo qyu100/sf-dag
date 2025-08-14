@@ -5,7 +5,7 @@ from os.path import basename, splitext
 from time import sleep
 
 from benchmark.commands import CommandMaker
-from benchmark.config import Key, LocalCommittee, NodeParameters, BenchParameters, ConfigError
+from benchmark.config import EdKey, LocalCommittee, NodeParameters, BenchParameters, ConfigError
 from benchmark.logs import LogParser, ParseError
 from benchmark.utils import Print, BenchError, PathMaker
 
@@ -69,7 +69,7 @@ class LocalBench:
             for filename in key_files:
                 cmd = CommandMaker.generate_key(filename).split()
                 subprocess.run(cmd, check=True)
-                keys += [Key.from_file(filename)]
+                keys += [EdKey.from_file(filename)]
             print('past keys')
 
             names = [x.name for x in keys]
