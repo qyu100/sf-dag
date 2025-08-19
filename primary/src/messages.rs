@@ -209,6 +209,7 @@ pub struct Support {
     pub author: PublicKey,
     pub signature: Signature,
     pub vote: bool,
+    pub parents: Vec<Digest>,
     pub propose_next_round: bool,
 }
 
@@ -218,6 +219,7 @@ impl Support {
         round: Round,
         signature_service: &mut SignatureService,
         vote: bool,
+        parents: Vec<Digest>,
         propose_next_round: bool,
     ) -> Self {
         let support= Self {
@@ -225,6 +227,7 @@ impl Support {
             round,
             signature: Signature::default(),
             vote,
+            parents,
             propose_next_round,
         };
         let signature = signature_service.request_signature(support.digest()).await;
@@ -329,6 +332,68 @@ impl fmt::Debug for Timeout {
 impl fmt::Display for Timeout {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         write!(f, "Round {} Timeout by {}", self.round, self.author)
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct NoVoteMsg {
+    pub round: Round,
+    pub leader: PublicKey,
+    pub author: PublicKey,
+    pub signature: Signature,
+}
+
+impl NoVoteMsg {
+    pub async fn new(
+        round: Round,
+        leader: PublicKey,
+        author: PublicKey,
+        signature_service: &mut SignatureService,
+    ) -> Self {
+        let msg = Self {
+            round,
+            leader,
+            author,
+            signature: Signature::default(),
+        };
+        let signature = signature_service.request_signature(msg.digest()).await;
+        Self {
+            signature,
+            ..msg
+        }
+    }
+
+    pub fn verify(&self, committee: &Committee) -> DagResult<()> {
+        // Ensure the authority has voting rights.
+        ensure!(
+            committee.stake(&self.author) > 0,
+            DagError::UnknownAuthority(self.author)
+        );
+
+        // Check the signature.
+        self.signature
+            .verify(&self.digest(), &self.author)
+            .map_err(DagError::from)
+    }
+}
+
+impl Hash for NoVoteMsg {
+    fn digest(&self) -> Digest {
+        let mut hasher = Sha512::new();
+        hasher.update(self.round.to_le_bytes());
+        hasher.update(&self.author);
+        Digest(hasher.finalize().as_slice()[..32].try_into().unwrap())
+    }
+}
+
+impl fmt::Debug for NoVoteMsg {
+    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+        write!(
+            f,
+            "NoVoteMsg: R{}({})",
+            self.round,
+            self.author,
+        )
     }
 }
 
@@ -454,6 +519,50 @@ impl TimeoutCert {
         }
 
         // Check if the accumulated weight meets the quorum threshold.
+        ensure!(
+            weight >= committee.quorum_threshold(),
+            DagError::CertificateRequiresQuorum
+        );
+
+        Ok(())
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, Default)]
+pub struct NoVoteCert {
+    pub round: Round,
+    pub no_votes: Vec<(PublicKey, Signature)>,
+}
+
+impl NoVoteCert {
+    pub fn new(round: Round) -> Self {
+        Self {
+            round,
+            no_votes: Vec::new(),
+        }
+    }
+
+    pub fn add_no_vote(&mut self, author: PublicKey, signature: Signature) -> DagResult<()> {
+        if self.no_votes.iter().any(|(pk, _)| *pk == author) {
+            return Err(DagError::AuthorityReuse(author));
+        }
+
+        self.no_votes.push((author, signature));
+
+        Ok(())
+    }
+
+    pub fn verify(&self, committee: &Committee) -> DagResult<()> {
+        let mut weight = 0;
+        let mut used = HashSet::new();
+        for (author, _) in &self.no_votes {
+            ensure!(!used.contains(author), DagError::AuthorityReuse(*author));
+            let voting_rights = committee.stake(author);
+            ensure!(voting_rights > 0, DagError::UnknownAuthority(*author));
+            used.insert(*author);
+            weight += voting_rights;
+        }
+
         ensure!(
             weight >= committee.quorum_threshold(),
             DagError::CertificateRequiresQuorum

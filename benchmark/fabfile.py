@@ -31,8 +31,9 @@ def local(ctx, debug=True, consensus_only=True, header_size=512):
         'batch_size': header_size,  # bytescd
         'tx_size': bench_params['tx_size'],
         'max_batch_delay': 200,  # ms
-        'propose_rate': 0.8,  # rate of proposing a header
+        'propose_rate': 1,  # rate of proposing a header
         'f_num': 3,
+        'leaders_per_round': 6,
     }
     try:
         ret = LocalBench(bench_params, node_params).run(debug, consensus_only)

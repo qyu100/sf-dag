@@ -217,6 +217,7 @@ class NodeParameters:
             inputs += [json['tx_size']]
             inputs += [json['propose_rate']]
             inputs += [json['f_num']]
+            inputs += [json['leaders_per_round']]
         except KeyError as e:
             raise ConfigError(f'Malformed parameters: missing key {e}')
 

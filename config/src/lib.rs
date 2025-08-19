@@ -87,6 +87,7 @@ pub struct Parameters {
     pub max_batch_delay: u64,
     pub propose_rate: f64, // rate of proposing a header
     pub f_num: u32, // number of faulty nodes
+    pub leaders_per_round: usize, // number of leaders per round
 }
 
 impl Default for Parameters {
@@ -103,6 +104,7 @@ impl Default for Parameters {
             max_batch_delay: 100,
             propose_rate: 0.1,
             f_num: 3,
+            leaders_per_round: 5,
         }
     }
 }
@@ -123,6 +125,8 @@ impl Parameters {
         info!("Max batch delay set to {} ms", self.max_batch_delay);
         info!("Transaction size set to {} B", self.tx_size);
         info!("Rate of proposing a header set to {}", self.propose_rate);
+        info!("Number of faulty nodes set to {}", self.f_num);
+        info!("Number of leaders per round set to {}", self.leaders_per_round);
     }
 }
 
@@ -225,21 +229,6 @@ impl Committee {
         keys[seed % self.size()]
     }
 
-    pub fn header_proposers(&self, seed: usize, propose_rate: f64) -> Vec<PublicKey> {
-        let mut keys: Vec<PublicKey> = self.authorities.keys().cloned().collect();
-        keys.sort();
-        
-        let n = keys.len();
-        let k = (propose_rate * n as f64).floor() as usize;
-
-        let mut rng = StdRng::seed_from_u64(seed as u64);
-
-        keys.shuffle(&mut rng);
-        keys.truncate(k);
-
-        keys
-    }
-
     pub fn sub_leaders(&self, seed: usize, num_leaders: usize) -> Vec<PublicKey> {
         let mut keys: Vec<_> = self.authorities.keys().cloned().collect();
         keys.sort();
@@ -255,6 +244,32 @@ impl Committee {
         }
 
         sub_leaders
+    }
+
+    pub fn header_proposers(&self, seed: usize, propose_rate: f64, num_leaders: usize) -> Vec<PublicKey> {
+        let mut keys: Vec<PublicKey> = self.authorities.keys().cloned().collect();
+        keys.sort();
+        
+        let n = keys.len();
+        let k = (propose_rate * n as f64).floor() as usize;
+
+        let leader = self.leader(seed);
+        let sub_leaders = self.sub_leaders(seed, num_leaders);
+
+        let exclude: std::collections::HashSet<_> = std::iter::once(&leader)
+            .chain(sub_leaders.iter())
+            .collect();
+
+        let mut candidates: Vec<_> = keys.into_iter()
+            .filter(|pk| !exclude.contains(pk))
+            .collect();
+
+        let mut rng = StdRng::seed_from_u64(seed as u64);
+        candidates.shuffle(&mut rng);
+
+        candidates.truncate(k);
+
+        candidates
     }
 
     /// Returns the primary addresses of the target primary.

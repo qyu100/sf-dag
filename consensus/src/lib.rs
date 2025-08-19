@@ -2,8 +2,8 @@
 use config::Committee;
 use crypto::Hash as _;
 use crypto::{Digest, PublicKey};
-use log::{debug, info, warn};
-use primary::{Certificate, ConsensusMessage, Round};
+use log::{debug, info, warn, log_enabled};
+use primary::{Certificate, ConsensusMessage, Round, HeaderInfo, Support};
 use std::cmp::max;
 use std::collections::{HashMap, HashSet};
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -85,6 +85,10 @@ pub struct Consensus {
     genesis: Vec<Certificate>,
     /// The stake vote received by the leader of a round.
     stake_vote: HashMap<Round, u32>,
+    /// The stake vote received by the sub leaders of a round.
+    sub_leaders_stake_vote: HashMap<Round, HashMap<PublicKey, u32>>,
+    ///The total numbers of leaders in each round
+    leaders_per_round: usize,
 }
 
 impl Consensus {
@@ -95,6 +99,7 @@ impl Consensus {
         rx_primary_header_msg: Receiver<ConsensusMessage>,
         tx_primary: Sender<Certificate>,
         tx_output: Sender<Certificate>,
+        leaders_per_round: usize,
     ) {
         tokio::spawn(async move {
             Self {
@@ -106,10 +111,134 @@ impl Consensus {
                 tx_output,
                 genesis: Certificate::genesis(&committee),
                 stake_vote: HashMap::with_capacity(2 * gc_depth as usize),
+                sub_leaders_stake_vote: HashMap::with_capacity(2 * gc_depth as usize),
+                leaders_per_round
             }
             .run()
             .await;
         });
+    }
+
+    fn update_sub_leaders(&mut self, dag: &Dag, round: Round, header_info: &HeaderInfo) -> Vec<Certificate> {
+        // Number of leaders might be dynamic, consider parameterizing it if necessary
+        // TODO: Change this to input
+        let num_leaders = self.leaders_per_round;
+        let current_leaders = self.committee.sub_leaders(round as usize, num_leaders);
+        let mut commitable_leaders = Vec::new();
+        let mut push_to_leaders = true;
+    
+        // Safely access the DAG and update stakes based on valid leader digests in header parents.
+        if let Some(round_entries) = dag.get(&round) {
+            for leader in current_leaders {
+                if let Some((leader_digest, _cert)) = round_entries.get(&leader) {
+                    if header_info.parents.contains(leader_digest) {
+                        let stake = self.committee.stake(&header_info.author);
+                        let stake_entry = self.sub_leaders_stake_vote.entry(round).or_default().entry(leader).or_insert(0);
+                        *stake_entry += stake;
+
+                        // Check if the updated stake meets the quorum threshold
+                        if *stake_entry >= self.committee.quorum_threshold() && push_to_leaders {
+                            commitable_leaders.push(_cert.clone());
+                        } else {
+                            push_to_leaders = false;
+                        }
+                    }
+                }
+            }
+        }
+        commitable_leaders
+    }
+
+    fn update_sub_leaders_support(&mut self, dag: &Dag, round: Round, support: &Support) -> Vec<Certificate> {
+        // Number of leaders might be dynamic, consider parameterizing it if necessary
+        // TODO: Change this to input
+        let num_leaders = self.leaders_per_round;
+        let current_leaders = self.committee.sub_leaders(round as usize, num_leaders);
+        let mut commitable_leaders = Vec::new();
+        let mut push_to_leaders = true;
+    
+        // Safely access the DAG and update stakes based on valid leader digests in header parents.
+        if let Some(round_entries) = dag.get(&round) {
+            for leader in current_leaders {
+                if let Some((leader_digest, _cert)) = round_entries.get(&leader) {
+                    if support.parents.contains(leader_digest) {
+                        let stake = self.committee.stake(&support.author);
+                        let stake_entry = self.sub_leaders_stake_vote.entry(round).or_default().entry(leader).or_insert(0);
+                        *stake_entry += stake;
+
+                        // Check if the updated stake meets the quorum threshold
+                        if *stake_entry >= self.committee.quorum_threshold() && push_to_leaders {
+                            commitable_leaders.push(_cert.clone());
+                        } else {
+                            push_to_leaders = false;
+                        }
+                    }
+                }
+            }
+        }
+        commitable_leaders
+    }
+
+    fn update_sub_leaders_post_commit(&mut self, dag: &Dag, round: Round, header_info: &HeaderInfo) -> Vec<Certificate> {
+        // Number of leaders might be dynamic, consider parameterizing it if necessary
+        // TODO: Change this to input
+        let num_leaders = self.leaders_per_round;
+        let current_leaders = self.committee.sub_leaders(round as usize, num_leaders);
+        let mut commitable_leaders = Vec::new();
+        let mut push_to_leaders = true;
+    
+        // Safely access the DAG and update stakes based on valid leader digests in header parents.
+        if let Some(round_entries) = dag.get(&round) {
+            for leader in current_leaders {
+                if let Some((leader_digest, _cert)) = round_entries.get(&leader) {
+                    let stake_entry = self.sub_leaders_stake_vote.entry(round).or_default().entry(leader).or_insert(0);
+
+                    if header_info.parents.contains(leader_digest) && *stake_entry < self.committee.quorum_threshold() {
+                        let stake = self.committee.stake(&header_info.author);
+                        *stake_entry += stake;
+
+                        // Check if the updated stake meets the quorum threshold
+                        if *stake_entry >= self.committee.quorum_threshold() && push_to_leaders {
+                            commitable_leaders.push(_cert.clone());
+                        } else {
+                            push_to_leaders = false;
+                        }
+                    }
+                }
+            }
+        }
+        commitable_leaders
+    }
+
+    fn update_sub_leaders_post_commit_support(&mut self, dag: &Dag, round: Round, support: &Support) -> Vec<Certificate> {
+        // Number of leaders might be dynamic, consider parameterizing it if necessary
+        // TODO: Change this to input
+        let num_leaders = self.leaders_per_round;
+        let current_leaders = self.committee.sub_leaders(round as usize, num_leaders);
+        let mut commitable_leaders = Vec::new();
+        let mut push_to_leaders = true;
+    
+        // Safely access the DAG and update stakes based on valid leader digests in header parents.
+        if let Some(round_entries) = dag.get(&round) {
+            for leader in current_leaders {
+                if let Some((leader_digest, _cert)) = round_entries.get(&leader) {
+                    let stake_entry = self.sub_leaders_stake_vote.entry(round).or_default().entry(leader).or_insert(0);
+
+                    if support.parents.contains(leader_digest) && *stake_entry < self.committee.quorum_threshold() {
+                        let stake = self.committee.stake(&support.author);
+                        *stake_entry += stake;
+
+                        // Check if the updated stake meets the quorum threshold
+                        if *stake_entry >= self.committee.quorum_threshold() && push_to_leaders {
+                            commitable_leaders.push(_cert.clone());
+                        } else {
+                            push_to_leaders = false;
+                        }
+                    }
+                }
+            }
+        }
+        commitable_leaders
     }
 
     async fn run(&mut self) {
@@ -139,6 +268,44 @@ impl Consensus {
                             if leader_round <= state.last_committed_round || leader_round == 0 {
                                 continue;
                             }
+                            
+                            if leader_round == state.last_committed_round {
+                                let commitable_leaders = self.update_sub_leaders_post_commit_support(&state.dag, leader_round, &support);
+
+                                let mut sequence = Vec::new();
+
+                                for leader in commitable_leaders {
+                                    // Starting from the oldest leader, flatten the sub-dag referenced by the leader.
+                                    for x in self.order_dag(&leader, &state).await {
+                                        // Update and clean up internal state.
+                                        state.update(&x, self.gc_depth);
+                    
+                                        // Add the certificate to the sequence.
+                                        sequence.push(x);
+                                    }
+                                }
+
+                                // Output the sequence in the right order.
+                                for certificate in sequence {
+                                    #[cfg(not(feature = "benchmark"))]
+                                    info!("Committed {} with header", certificate.header_id);
+                    
+                                    #[cfg(feature = "benchmark")]
+                                    // NOTE: This log entry is used to compute performance.
+                                    info!("Committed {:?} Leader", certificate.header_id);
+                
+                                    self.tx_primary
+                                        .send(certificate.clone())
+                                        .await
+                                        .expect("Failed to send certificate to primary with header");
+                    
+                                    if let Err(e) = self.tx_output.send(certificate).await {
+                                        warn!("Failed to output certificate: {} with header", e);
+                                    }
+                                }
+
+                                continue;
+                            }
 
                             let (leader_digest, leader) = match self.leader(leader_round, &state.dag) {
                                 Some(x) => x,
@@ -148,6 +315,8 @@ impl Consensus {
                             if support.vote {
                                 *self.stake_vote.entry(support.round).or_insert(0) += self.committee.stake(&support.author);
                             }
+
+                            let commitable_leaders = self.update_sub_leaders_support(&state.dag, leader_round, &support);
 
                             let current_stake = self.stake_vote.get(&support.round);
                             let current_stake_value = *current_stake.unwrap_or(&0);
@@ -168,6 +337,17 @@ impl Consensus {
                                     }
                                 }
 
+                                for leader in commitable_leaders {
+                                    // Starting from the oldest leader, flatten the sub-dag referenced by the leader.
+                                    for x in self.order_dag(&leader, &state).await {
+                                        // Update and clean up internal state.
+                                        state.update(&x, self.gc_depth);
+                    
+                                        // Add the certificate to the sequence.
+                                        sequence.push(x);
+                                    }
+                                }
+                                
                                 // Output the sequence in the right order.
                                 for certificate in sequence {
                                     #[cfg(not(feature = "benchmark"))]
@@ -205,6 +385,44 @@ impl Consensus {
                             if leader_round <= state.last_committed_round || leader_round == 0 {
                                 continue;
                             }
+                            
+                            if leader_round == state.last_committed_round {
+                                let commitable_leaders = self.update_sub_leaders_post_commit(&state.dag, leader_round, &header_info);
+
+                                let mut sequence = Vec::new();
+
+                                for leader in commitable_leaders {
+                                    // Starting from the oldest leader, flatten the sub-dag referenced by the leader.
+                                    for x in self.order_dag(&leader, &state).await {
+                                        // Update and clean up internal state.
+                                        state.update(&x, self.gc_depth);
+                    
+                                        // Add the certificate to the sequence.
+                                        sequence.push(x);
+                                    }
+                                }
+
+                                // Output the sequence in the right order.
+                                for certificate in sequence {
+                                    #[cfg(not(feature = "benchmark"))]
+                                    info!("Committed {} with header", certificate.header_id);
+                    
+                                    #[cfg(feature = "benchmark")]
+                                    // NOTE: This log entry is used to compute performance.
+                                    info!("Committed {:?} Leader", certificate.header_id);
+                
+                                    self.tx_primary
+                                        .send(certificate.clone())
+                                        .await
+                                        .expect("Failed to send certificate to primary with header");
+                    
+                                    if let Err(e) = self.tx_output.send(certificate).await {
+                                        warn!("Failed to output certificate: {} with header", e);
+                                    }
+                                }
+
+                                continue;
+                            }
 
                             let (leader_digest, leader) = match self.leader(leader_round, &state.dag) {
                                 Some(x) => x,
@@ -214,6 +432,8 @@ impl Consensus {
                             if header_info.parents.contains(leader_digest) {
                                 *self.stake_vote.entry(header_info.round).or_insert(0) += self.committee.stake(&header_info.author);
                             }
+
+                            let commitable_leaders = self.update_sub_leaders(&state.dag, leader_round, &header_info);
 
                             let current_stake = self.stake_vote.get(&header_info.round);
                             let current_stake_value = *current_stake.unwrap_or(&0);
@@ -231,6 +451,24 @@ impl Consensus {
 
                                         // Add the certificate to the sequence.
                                         sequence.push(x);
+                                    }
+                                }
+                                
+                                for leader in commitable_leaders {
+                                    // Starting from the oldest leader, flatten the sub-dag referenced by the leader.
+                                    for x in self.order_dag(&leader, &state).await {
+                                        // Update and clean up internal state.
+                                        state.update(&x, self.gc_depth);
+                    
+                                        // Add the certificate to the sequence.
+                                        sequence.push(x);
+                                    }
+                                }
+                    
+                                // Log the latest committed round of every authority (for debug).
+                                if log_enabled!(log::Level::Debug) {
+                                    for (name, round) in &state.last_committed {
+                                        debug!("Latest commit of {}: Round {} with header", name, round);
                                     }
                                 }
 

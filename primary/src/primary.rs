@@ -6,7 +6,7 @@ use crate::garbage_collector::GarbageCollector;
 use crate::header_waiter::HeaderWaiter;
 use crate::helper::Helper;
 use crate::messages::{
-    Certificate, Header, HeaderInfo, HeaderInfoWithCertificate, HeaderWithCertificate, Timeout, Vote, Support,
+    Certificate, Header, HeaderInfo, HeaderInfoWithCertificate, HeaderWithCertificate, Timeout, Vote, Support, NoVoteMsg,
 };
 use crate::proposer::Proposer;
 use crate::synchronizer::Synchronizer;
@@ -38,6 +38,7 @@ pub enum PrimaryMessage {
     Support(Support),
     Timeout(Timeout),
     Vote(Vote),
+    NoVoteMsg(NoVoteMsg),
     Certificate(Certificate),
     VerifiedCertificate(Certificate),
     CertificatesRequest(Vec<Digest>, /* requestor */ PublicKey),
@@ -101,6 +102,8 @@ impl Primary {
         let (tx_headers, rx_headers) = channel(CHANNEL_CAPACITY);
         let (tx_timeout, rx_timeout) = channel(CHANNEL_CAPACITY);
         let (tx_timeout_cert, rx_timeout_cert) = channel(CHANNEL_CAPACITY);
+        let (tx_no_vote_msg, rx_no_vote_msg) = channel(CHANNEL_CAPACITY);
+        let (tx_no_vote_cert, rx_no_vote_cert) = channel(CHANNEL_CAPACITY);
         let (tx_sync_headers, rx_sync_headers) = channel(CHANNEL_CAPACITY);
         let (tx_sync_certificates, rx_sync_certificates) = channel(CHANNEL_CAPACITY);
         let (tx_headers_loopback, rx_headers_loopback) = channel(CHANNEL_CAPACITY);
@@ -199,10 +202,12 @@ impl Primary {
             /* rx_certificate_waiter */ rx_certificates_loopback,
             /* rx_proposer */ rx_headers,
             rx_timeout,
+            rx_no_vote_msg,
             rx_support,
             tx_consensus,
             /* tx_proposer */ tx_parents.clone(),
             tx_timeout_cert,
+            tx_no_vote_cert,
             tx_consensus_header_msg,
             sorted_keys.clone(),
             combined_key.clone(),
@@ -252,8 +257,11 @@ impl Primary {
             /* tx_core */ tx_headers,
             /* tx_core_timeout */ tx_timeout,
             rx_timeout_cert,
+            tx_no_vote_msg,
+            rx_no_vote_cert,
             parameters.propose_rate,
             tx_support,
+            parameters.leaders_per_round,
         );
 
         // The `Helper` is dedicated to reply to certificates requests from other primaries.
