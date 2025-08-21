@@ -11,10 +11,10 @@ from google.oauth2 import service_account
 
 #path to your GCP service account key json file
 GCP_KEY_PATH = '../benchmark/benchmark/key.json'
-SSH_PUB_KEY_PATH = '/Users/qianyu/.ssh/sf-dag.pub'
+SSH_PUB_KEY_PATH = '{path_to_ssh_public_key}'
 
 os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = GCP_KEY_PATH
-compute_service = build('compute', 'v1')
+# compute_service = build('compute', 'v1')
 
 # Set up authentication using a service account
 credentials = service_account.Credentials.from_service_account_file(GCP_KEY_PATH)
@@ -106,7 +106,7 @@ class InstanceManager:
                                 "boot": True,
                                 "autoDelete": True,
                                 "initializeParams": {
-                                    "sourceImage": "projects/ubuntu-os-cloud/global/images/family/ubuntu-2204-lts"
+                                    "sourceImage": "projects/ubuntu-os-cloud/global/images/family/ubuntu-2004-lts"
                                 }
                             }
                         ],

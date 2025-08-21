@@ -38,7 +38,7 @@ class Settings:
         self.branch = branch
 
         self.instance_type = instance_type
-        self.aws_regions = regions
+        self.zones = regions
 
     @classmethod
     def load(cls, filename):
