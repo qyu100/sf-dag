@@ -1,7 +1,7 @@
 {
-    "testbed": "alberto-hotstuff",
+    // "testbed": "alberto-hotstuff",
     "key": {
-        "name": "aws",
+        "name": "sf-dag",
         "path": "/Users/alberto/.ssh/aws"
     },
     "ports": {
@@ -10,18 +10,14 @@
         "front": 6000
     },
     "repo": {
-        "name": "hotstuff",
-        "url": "https://github.com/asonnino/hotstuff.git",
-        "branch": "main"
+        "name": "sf-dag",
+        "url": "https://github.com/qyu100/sf-dag.git",
+        "branch": "Jolteon"
     },
     "instances": {
-        "type": "m5d.8xlarge",
+        "type": "e2-standard-16",
         "regions": [
-            "us-east-1",
-            "eu-north-1",
-            "ap-southeast-2",
-            "us-west-1",
-            "ap-northeast-1"
+            "europe-west1-b","europe-north1-b","us-east1-b","us-west1-a", "asia-northeast1-a"
         ]
     }
 }
