@@ -140,7 +140,7 @@ impl Core {
         // Send all the newly committed blocks to the node's application layer.
         while let Some(block) = to_commit.pop_back() {
             if !block.payload.is_empty() {
-                info!("Committed {}", block);
+                debug!("Committed {}", block);
 
                 #[cfg(feature = "benchmark")]
                 for x in &block.payload {
@@ -273,7 +273,7 @@ impl Core {
         // Reset the timer and advance round.
         self.timer.reset();
         self.round = round + 1;
-        debug!("Moved to round {}", self.round);
+        info!("Moved to round {}", self.round);
 
         // Cleanup the vote aggregator.
         self.aggregator.cleanup(&self.round);
