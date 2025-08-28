@@ -27,8 +27,8 @@ class GCPError(Exception):
 class InstanceManager:
     
      #setup instance name and GCP project ID
-    INSTANCE_NAME = 'bullshark'
-    PROJECT_ID = 'supra-testnet-417213'
+    INSTANCE_NAME = ''
+    PROJECT_ID = ''
 
     
     def __init__(self,settings):

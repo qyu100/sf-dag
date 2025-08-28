@@ -1,0 +1,194 @@
+{
+    "authorities": {
+        "lXNu+BKjyruW6xPxbLEVUh0XyQ4RZpcjL6WmjIXYaZo=": {
+            "bls_pubkey_g2": "kATx+ILbawm2k7eP7eJ2q7cH7MO9L/K2lDfpgOup4wsNgRfr0E43ZcUuXo2TbPvSBmEzA1GWSQD+lhbgBCPWScEK7g8DleSvuBK/SOt+Tm4hi9jI2v+lbLgCu+A11bxX",
+            "is_honest": true,
+            "stake": 1,
+            "consensus": {
+                "consensus_to_consensus": "127.0.0.1:3000"
+            },
+            "primary": {
+                "primary_to_primary": "127.0.0.1:3001",
+                "worker_to_primary": "127.0.0.1:3002"
+            },
+            "workers": {
+                "0": {
+                    "primary_to_worker": "127.0.0.1:3003",
+                    "transactions": "127.0.0.1:3004",
+                    "worker_to_worker": "127.0.0.1:3005"
+                }
+            }
+        },
+        "Y7LqSHZREqrv8VM5nkxAyVSwcuN+zw/dPvLS+IPlGkU=": {
+            "bls_pubkey_g2": "tdi0W2inAfAPvpx6KCKxxqNehTAy7yhvsSy+tveP9jRlxDJ4sH1QUSqmhPCd2tHqD9Ut0APYbAFKCTbl5fh4MFuAym4ogfuouqVERy4h8gm72+h3gys/g4erw0jgbUUH",
+            "is_honest": true,
+            "stake": 1,
+            "consensus": {
+                "consensus_to_consensus": "127.0.0.1:3006"
+            },
+            "primary": {
+                "primary_to_primary": "127.0.0.1:3007",
+                "worker_to_primary": "127.0.0.1:3008"
+            },
+            "workers": {
+                "0": {
+                    "primary_to_worker": "127.0.0.1:3009",
+                    "transactions": "127.0.0.1:3010",
+                    "worker_to_worker": "127.0.0.1:3011"
+                }
+            }
+        },
+        "RyP0nWJZwPWVGTm1fOmwxp45slPnfIYVDLcn5h9jOPY=": {
+            "bls_pubkey_g2": "j2p+ipiLy9oweKlojxr30STZu99IQXirnKeZvAih1k/z+YyFzwkskZ4cF6mz3qMZBQRfGsfVHADBhqSiCEf2tymQq8biSuAL/uyslp8NYYeuUl5rKbPDjjwJp5vpLENj",
+            "is_honest": true,
+            "stake": 1,
+            "consensus": {
+                "consensus_to_consensus": "127.0.0.1:3012"
+            },
+            "primary": {
+                "primary_to_primary": "127.0.0.1:3013",
+                "worker_to_primary": "127.0.0.1:3014"
+            },
+            "workers": {
+                "0": {
+                    "primary_to_worker": "127.0.0.1:3015",
+                    "transactions": "127.0.0.1:3016",
+                    "worker_to_worker": "127.0.0.1:3017"
+                }
+            }
+        },
+        "RB/OiqfkaGJd8wXnP+xNQrDu0qDyfrszvVWosBRyrIQ=": {
+            "bls_pubkey_g2": "iDAgUTUC5RJgK0YieWwV0o+I5Y7wBIQdmCR6nse7RNMeCmuHb9We1lRkukhDIwSpDCeIjtGUUSpalOEc8NNGUYUKViZIVf8CZ/C4n0zh4440WFXbUzvJ/z5J4SPYQZRz",
+            "is_honest": true,
+            "stake": 1,
+            "consensus": {
+                "consensus_to_consensus": "127.0.0.1:3018"
+            },
+            "primary": {
+                "primary_to_primary": "127.0.0.1:3019",
+                "worker_to_primary": "127.0.0.1:3020"
+            },
+            "workers": {
+                "0": {
+                    "primary_to_worker": "127.0.0.1:3021",
+                    "transactions": "127.0.0.1:3022",
+                    "worker_to_worker": "127.0.0.1:3023"
+                }
+            }
+        },
+        "O3FtlxqACpaXbkoI0kmcdMFcwVU+4+zIthCidLR0EGo=": {
+            "bls_pubkey_g2": "q8pxP+h6iHLyu/HKIBxhGi89UaypazOZYoyi6Ty4QVkrNU7bj7I3hk3XXyVfHOjRASZzJ3h3Vx/dG/OAIkDXYL3iEnLYOhqdPwUTw2mR9zU230SStoZB1nbpvf9VGyQj",
+            "is_honest": true,
+            "stake": 1,
+            "consensus": {
+                "consensus_to_consensus": "127.0.0.1:3024"
+            },
+            "primary": {
+                "primary_to_primary": "127.0.0.1:3025",
+                "worker_to_primary": "127.0.0.1:3026"
+            },
+            "workers": {
+                "0": {
+                    "primary_to_worker": "127.0.0.1:3027",
+                    "transactions": "127.0.0.1:3028",
+                    "worker_to_worker": "127.0.0.1:3029"
+                }
+            }
+        },
+        "8w4tXh3Efy7TTy0tPXdJ1V/8ZB12HCA/us4T+k9+pW4=": {
+            "bls_pubkey_g2": "jqRUNtxWrNQHX8acYVOZGdy1o3S3w/a1rNIEv28eR9MmWGIHKOvlMjRInGwoXPApDp8TC2h7GglG/ZwcW4PQHU+iSxkomo05bz4voUhNR5uEYH+NsMlQgRSjWOUFpkwn",
+            "is_honest": true,
+            "stake": 1,
+            "consensus": {
+                "consensus_to_consensus": "127.0.0.1:3030"
+            },
+            "primary": {
+                "primary_to_primary": "127.0.0.1:3031",
+                "worker_to_primary": "127.0.0.1:3032"
+            },
+            "workers": {
+                "0": {
+                    "primary_to_worker": "127.0.0.1:3033",
+                    "transactions": "127.0.0.1:3034",
+                    "worker_to_worker": "127.0.0.1:3035"
+                }
+            }
+        },
+        "dKXf4/OEL3GSUSn2RFyit1YU8rSn96rBZthN9q8NOmE=": {
+            "bls_pubkey_g2": "rpLWhu/zKex4li/gdnzlwKVx+N3HprxxKm566k1eauS7l1eIrkvqkCZlUHE+8ciXCUiEuKziwG0HocG1aWh6HwdXfZUVo9Noc/YfNPS8Kup/MugUq6anK5avXMS97KYn",
+            "is_honest": true,
+            "stake": 1,
+            "consensus": {
+                "consensus_to_consensus": "127.0.0.1:3036"
+            },
+            "primary": {
+                "primary_to_primary": "127.0.0.1:3037",
+                "worker_to_primary": "127.0.0.1:3038"
+            },
+            "workers": {
+                "0": {
+                    "primary_to_worker": "127.0.0.1:3039",
+                    "transactions": "127.0.0.1:3040",
+                    "worker_to_worker": "127.0.0.1:3041"
+                }
+            }
+        },
+        "MSELSVpA2Zx78D5NG1+M3RrvxCsxcbSeruzWNT/f+Xg=": {
+            "bls_pubkey_g2": "piFSR97kq1DC0cTldKWUO0pBAokCm5Vnoht9Aj5KmTw1fvQ2uXWFTKZuXxiTgXa8BwzQUcfq6tmTHUNYmlmvFz0ffXV5la7L2FFE80ZYF4FpxA78MC2ZuVjhXTZwumhS",
+            "is_honest": true,
+            "stake": 1,
+            "consensus": {
+                "consensus_to_consensus": "127.0.0.1:3042"
+            },
+            "primary": {
+                "primary_to_primary": "127.0.0.1:3043",
+                "worker_to_primary": "127.0.0.1:3044"
+            },
+            "workers": {
+                "0": {
+                    "primary_to_worker": "127.0.0.1:3045",
+                    "transactions": "127.0.0.1:3046",
+                    "worker_to_worker": "127.0.0.1:3047"
+                }
+            }
+        },
+        "ziz/MfO3zMmp6/TBhpTBglGv7Ee2vOPXvwDR5pOcVG8=": {
+            "bls_pubkey_g2": "kcOsY167CUMGBGZ0P6U5+q9XUy6A/vOq7lNV0BsP2nkaf1EAbwr8PEjrBsd6uFHsGZYTNjU9HUN61UQT/10O4YY50tCYZD4PSf1Ss9DLKhRO2dmwIpuS8QoN1JaTjLEq",
+            "is_honest": true,
+            "stake": 1,
+            "consensus": {
+                "consensus_to_consensus": "127.0.0.1:3048"
+            },
+            "primary": {
+                "primary_to_primary": "127.0.0.1:3049",
+                "worker_to_primary": "127.0.0.1:3050"
+            },
+            "workers": {
+                "0": {
+                    "primary_to_worker": "127.0.0.1:3051",
+                    "transactions": "127.0.0.1:3052",
+                    "worker_to_worker": "127.0.0.1:3053"
+                }
+            }
+        },
+        "xnNcJoHNZkckWSDmVXFlRfp762Aja6p4PijR450abTI=": {
+            "bls_pubkey_g2": "iGszUO94tMOqv8zFDo+eizJepPo3Ma8/MnDl0g8+W4rtn1V+gSQdYXBipMLqqdbTBB+WZO7AyzqHxE3nYFp36hb1idtGh1o+W3O1OLs9ZMN7hww9uU3hJXRwHyuo9pc7",
+            "is_honest": true,
+            "stake": 1,
+            "consensus": {
+                "consensus_to_consensus": "127.0.0.1:3054"
+            },
+            "primary": {
+                "primary_to_primary": "127.0.0.1:3055",
+                "worker_to_primary": "127.0.0.1:3056"
+            },
+            "workers": {
+                "0": {
+                    "primary_to_worker": "127.0.0.1:3057",
+                    "transactions": "127.0.0.1:3058",
+                    "worker_to_worker": "127.0.0.1:3059"
+                }
+            }
+        }
+    }
+}
