@@ -3,10 +3,6 @@
         "name": "sf-dag",
         "path": ""
     },
-    "github_deploy_key": {
-        "name": "qyu100",
-        "path": ""
-    },
     "port": 5000,
     "repo": {
         "name": "sf-dag",
