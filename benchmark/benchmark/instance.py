@@ -27,8 +27,8 @@ class GCPError(Exception):
 class InstanceManager:
     
      #setup instance name and GCP project ID
-    INSTANCE_NAME = ''
-    PROJECT_ID = ''
+    INSTANCE_NAME = 'sf-dag'
+    PROJECT_ID = 'sf-dag-454112'
 
     
     def __init__(self,settings):

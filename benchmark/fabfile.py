@@ -104,7 +104,7 @@ def remote(ctx, burst = 50, debug=False, consensus_only=True, header_size=512_00
         'collocate': True,
         'rate': [100000],
         'tx_size': 512,
-        'duration': 180,
+        'duration': 120,
         'runs': 1,
         'burst' : [burst],
     }
