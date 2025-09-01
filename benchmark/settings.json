@@ -10,7 +10,7 @@
         "branch": "OptSFSailfish"
     },
     "instances": {
-        "machine_type": "e2-standard-16",
+        "machine_type": "e2-standard-4",
         "zones": ["europe-west1-b","europe-north1-b","us-east1-b","us-west1-a", "asia-northeast1-a"]
     }
 }
