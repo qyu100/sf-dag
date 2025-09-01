@@ -5,7 +5,7 @@
     },
     "port": 5000,
     "repo": {
-        "name": "sf-dag",
+        "name": "SFSailfish",
         "url": "https://github.com/qyu100/SFSailfish.git",
         "branch": "OptSFSailfish"
     },
