@@ -11,7 +11,8 @@ from google.auth import compute_engine
 from google.oauth2 import service_account
 
 GCP_KEY_PATH = '../benchmark/benchmark/key.json'
-SSH_PUB_KEY_PATH = '/Users/nibesh/.ssh/id_rsa.pub'
+SSH_PUB_KEY_PATH = '/home/yqy/.ssh/gcp-key.pub'
+
 
 os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = GCP_KEY_PATH
 compute_service = build('compute', 'v1')
@@ -25,8 +26,11 @@ class GCPError(Exception):
         super().__init__(self.message)
 
 class InstanceManager:
-    INSTANCE_NAME = 'hydrangea-bench'
-    PROJECT_ID = 'supra-testnet-417213'
+    
+     #setup instance name and GCP project ID
+    INSTANCE_NAME = 'sf-dag'
+    PROJECT_ID = 'sf-dag-454112'
+
 ##################################################################
 
     def __init__(self,settings):

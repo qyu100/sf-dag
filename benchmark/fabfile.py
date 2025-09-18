@@ -15,7 +15,7 @@ def local(ctx, debug=False, consensus_only=True, aggregate=False):
     ''' Run benchmarks on localhost '''
     bench_params = {
         'faults': 1,
-        'nodes': 15,
+        'nodes': 50,
         'workers': 1,
         'rate': 100_000,
         'tx_size': 512,
@@ -25,9 +25,9 @@ def local(ctx, debug=False, consensus_only=True, aggregate=False):
     }
     node_params = {
         'n': bench_params['nodes'], # Number of nodes
-        'f': 2, #Number of Byzantine parties tolerated
-        'c': 2, # Number of crash faults,
-        'k': 4, # a parameter
+        'f': 16, #Number of Byzantine parties tolerated
+        'c': 0, # Number of crash faults,
+        'k': 1, # a parameter
         'max_block_size': 10,
         'consensus_only': consensus_only,
         'timeout_delay': 1000,  # ms
@@ -119,7 +119,7 @@ def remote(ctx, block_size=50, debug=False, consensus_only=True, update=True, ag
     
     bench_params = {
         'faults': 0,
-        'nodes': [100],
+        'nodes': [50],
         'workers': 1,
         'collocate': True,
         'rate': [100_000],
@@ -139,13 +139,13 @@ def remote(ctx, block_size=50, debug=False, consensus_only=True, update=True, ag
  
     node_params = {
         'n': bench_params['nodes'][0], # Number of nodes
-        'f': 19, #Number of Byzantine parties tolerated
-        'c': 20, # Number of crash faults,
-        'k': 2, # a parameter
+        'f': 16, #Number of Byzantine parties tolerated
+        'c': 0, # Number of crash faults,
+        'k': 1, # a parameter
         'max_block_size': block_size,
         'consensus_only': consensus_only,
         'timeout_delay': 5_000,  # ms
-        'header_size': 1024_000,  # bytes
+        'header_size': 128_000,  # bytes
         'max_header_delay': 2000,  # ms
         'gc_depth': 50,  # rounds
         'sync_retry_delay': 5_000,  # ms
