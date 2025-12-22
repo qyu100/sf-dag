@@ -4,7 +4,7 @@ use crate::consensus::{ConsensusMessage, Round};
 use crate::error::{ConsensusError, ConsensusResult};
 use crate::leader::LeaderElector;
 use crate::mempool::MempoolDriver;
-use crate::messages::{Block, Timeout, Vote, QC, TC};
+use crate::messages::{Block, Timeout, Vote, QC, TC, Ready};
 use crate::proposer::ProposerMessage;
 use crate::synchronizer::Synchronizer;
 use crate::timer::Timer;
@@ -115,13 +115,18 @@ impl Core {
         Some(Vote::new(block, self.name, self.signature_service.clone()).await)
     }
 
-    async fn commit(&mut self, block: Block) -> ConsensusResult<()> {
-        if self.last_committed_round >= block.round {
+    async fn commit(&mut self, ready: Ready) -> ConsensusResult<()> {
+        if self.last_committed_round >= ready.round {
             return Ok(());
         }
 
         // Ensure we commit the entire chain. This is needed after view-change.
         let mut to_commit = VecDeque::new();
+        let block = self
+            .synchronizer
+            .get_block(&ready.hash)
+            .await?
+            .expect("We should have the decided block by now");
         let mut parent = block.clone();
         while self.last_committed_round + 1 < parent.round {
             let ancestor = self
@@ -213,13 +218,40 @@ impl Core {
         if let Some(qc) = self.aggregator.add_vote(vote.clone())? {
             debug!("Assembled {:?}", qc);
 
-            // Process the QC.
+            // Process the QC (may advance the round and update high_qc).
             self.process_qc(&qc).await;
+
+            let ready = Ready::new(&vote, self.name, qc.clone(), self.signature_service.clone()).await;
+
+            // Clone ready for serialization so we can still use the original below.
+            let message = bincode::serialize(&ConsensusMessage::Ready(ready.clone()))
+                .expect("Failed to serialize ready message");
+            let addresses = self
+                .committee
+                .broadcast_addresses(&self.name)
+                .into_iter()
+                .map(|(_, x)| x)
+                .collect();
+            self.network.broadcast(addresses, Bytes::from(message)).await;
 
             // Make a new block if we are the next leader.
             if self.name == self.leader_elector.get_leader(self.round) {
                 self.generate_proposal(None).await;
             }
+
+            self.handle_ready(&ready).await?;
+        }
+        Ok(())
+    }
+
+    #[async_recursion]
+    async fn handle_ready(&mut self, ready: &Ready) -> ConsensusResult<()> {
+        debug!("Processing {:?}", ready);
+
+        ready.verify(&self.committee)?;
+        if let Some(qc) = self.aggregator.add_ready(ready.clone())? {
+            self.mempool_driver.cleanup(ready.round).await;
+            self.commit(ready.clone()).await?;
         }
         Ok(())
     }
@@ -287,12 +319,11 @@ impl Core {
             .expect("Failed to send message to proposer");
     }
 
-    async fn cleanup_proposer(&mut self, b0: &Block, b1: &Block, block: &Block) {
-        let digests = b0
+   async fn cleanup_proposer(&mut self, parent: &Block, block: &Block) {
+        let digests = parent
             .payload
             .iter()
             .cloned()
-            .chain(b1.payload.iter().cloned())
             .chain(block.payload.iter().cloned())
             .collect();
         self.tx_proposer
@@ -315,7 +346,7 @@ impl Core {
         // If we don't, the synchronizer asks for them to other nodes. It will
         // then ensure we process both ancestors in the correct order, and
         // finally make us resume processing this block.
-        let (b0, b1) = match self.synchronizer.get_ancestors(block).await? {
+        let (parent) = match self.synchronizer.get_ancestors(block).await? {
             Some(ancestors) => ancestors,
             None => {
                 debug!("Processing of {} suspended: missing parent", block.digest());
@@ -326,14 +357,14 @@ impl Core {
         // Store the block only if we have already processed all its ancestors.
         self.store_block(block).await;
 
-        self.cleanup_proposer(&b0, &b1, block).await;
+        self.cleanup_proposer(&parent, block).await;
 
         // Check if we can commit the head of the 2-chain.
         // Note that we commit blocks only if we have all its ancestors.
-        if b0.round + 1 == b1.round {
-            self.mempool_driver.cleanup(b0.round).await;
-            self.commit(b0).await?;
-        }
+        // if b0.round + 1 == b1.round {
+        //     self.mempool_driver.cleanup(b0.round).await;
+        //     self.commit(b0).await?;
+        // }
 
         // Ensure the block's round is as expected.
         // This check is important: it prevents bad leaders from producing blocks
@@ -345,18 +376,23 @@ impl Core {
         // See if we can vote for this block.
         if let Some(vote) = self.make_vote(block).await {
             debug!("Created {:?}", vote);
+            // Broadcast vote1 to all replicas (vote1 all-to-all).
+            let message = bincode::serialize(&ConsensusMessage::Vote(vote.clone()))
+                .expect("Failed to serialize vote");
+            let addresses = self
+                .committee
+                .broadcast_addresses(&self.name)
+                .into_iter()
+                .map(|(_, x)| x)
+                .collect();
+            self.network
+                .broadcast(addresses, Bytes::from(message))
+                .await;
+
+            // Also process our own vote immediately if we are the next leader.
             let next_leader = self.leader_elector.get_leader(self.round + 1);
             if next_leader == self.name {
                 self.handle_vote(&vote).await?;
-            } else {
-                debug!("Sending {:?} to {}", vote, next_leader);
-                let address = self
-                    .committee
-                    .address(&next_leader)
-                    .expect("The next leader is not in the committee");
-                let message = bincode::serialize(&ConsensusMessage::Vote(vote))
-                    .expect("Failed to serialize vote");
-                self.network.send(address, Bytes::from(message)).await;
             }
         }
         Ok(())
@@ -424,6 +460,7 @@ impl Core {
                 Some(message) = self.rx_message.recv() => match message {
                     ConsensusMessage::Propose(block) => self.handle_proposal(&block).await,
                     ConsensusMessage::Vote(vote) => self.handle_vote(&vote).await,
+                    ConsensusMessage::Ready(ready) => self.handle_ready(&ready).await,
                     ConsensusMessage::Timeout(timeout) => self.handle_timeout(&timeout).await,
                     ConsensusMessage::TC(tc) => self.handle_tc(tc).await,
                     _ => panic!("Unexpected protocol message")

@@ -1,7 +1,7 @@
 use crate::config::{Committee, Stake};
 use crate::consensus::Round;
 use crate::error::{ConsensusError, ConsensusResult};
-use crate::messages::{Timeout, Vote, QC, TC};
+use crate::messages::{Timeout, Vote, QC, TC, Ready};
 use crypto::Hash as _;
 use crypto::{Digest, PublicKey, Signature};
 use std::collections::{HashMap, HashSet};
@@ -13,6 +13,7 @@ pub mod aggregator_tests;
 pub struct Aggregator {
     committee: Committee,
     votes_aggregators: HashMap<Round, HashMap<Digest, Box<QCMaker>>>,
+    ready_aggregators: HashMap<Round, HashMap<Digest, Box<QCMaker>>>,
     timeouts_aggregators: HashMap<Round, Box<TCMaker>>,
 }
 
@@ -21,6 +22,7 @@ impl Aggregator {
         Self {
             committee,
             votes_aggregators: HashMap::new(),
+            ready_aggregators: HashMap::new(),
             timeouts_aggregators: HashMap::new(),
         }
     }
@@ -35,7 +37,20 @@ impl Aggregator {
             .or_insert_with(HashMap::new)
             .entry(vote.digest())
             .or_insert_with(|| Box::new(QCMaker::new()))
-            .append(vote, &self.committee)
+            .append_vote(vote, &self.committee)
+    }
+
+    pub fn add_ready(&mut self, ready: Ready) -> ConsensusResult<Option<QC>> {
+        // TODO [issue #7]: A bad node may make us run out of memory by sending many votes
+        // with different round numbers or different digests.
+
+        // Add the new vote to our aggregator and see if we have a QC.
+        self.ready_aggregators
+            .entry(ready.round)
+            .or_insert_with(HashMap::new)
+            .entry(ready.digest())
+            .or_insert_with(|| Box::new(QCMaker::new()))
+            .append_ready(ready, &self.committee)
     }
 
     pub fn add_timeout(&mut self, timeout: Timeout) -> ConsensusResult<Option<TC>> {
@@ -51,6 +66,7 @@ impl Aggregator {
 
     pub fn cleanup(&mut self, round: &Round) {
         self.votes_aggregators.retain(|k, _| k >= round);
+        self.ready_aggregators.retain(|k, _| k >= round);
         self.timeouts_aggregators.retain(|k, _| k >= round);
     }
 }
@@ -71,7 +87,7 @@ impl QCMaker {
     }
 
     /// Try to append a signature to a (partial) quorum.
-    pub fn append(&mut self, vote: Vote, committee: &Committee) -> ConsensusResult<Option<QC>> {
+    pub fn append_vote(&mut self, vote: Vote, committee: &Committee) -> ConsensusResult<Option<QC>> {
         let author = vote.author;
 
         // Ensure it is the first time this authority votes.
@@ -87,6 +103,32 @@ impl QCMaker {
             return Ok(Some(QC {
                 hash: vote.hash.clone(),
                 round: vote.round,
+                votes: self.votes.clone(),
+            }));
+        }
+        Ok(None)
+    }
+
+    pub fn append_ready(
+        &mut self,
+        ready: Ready,
+        committee: &Committee,
+    ) -> ConsensusResult<Option<QC>> {
+        let author = ready.author;
+
+        // Ensure it is the first time this authority votes.
+        ensure!(
+            self.used.insert(author),
+            ConsensusError::AuthorityReuse(author)
+        );
+
+        self.votes.push((author, ready.signature));
+        self.weight += committee.stake(&author);
+        if self.weight >= committee.quorum_threshold() {
+            self.weight = 0; // Ensures QC is only made once.
+            return Ok(Some(QC {
+                hash: ready.hash.clone(),
+                round: ready.round,
                 votes: self.votes.clone(),
             }));
         }

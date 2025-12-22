@@ -117,6 +117,13 @@ impl Synchronizer {
         Ok(deliver)
     }
 
+    pub async fn get_block(&mut self, digest: &Digest) -> ConsensusResult<Option<Block>> {
+        match self.store.read(digest.to_vec()).await? {
+            Some(bytes) => Ok(Some(bincode::deserialize(&bytes)?)),
+            None => Ok(None),
+        }
+    }
+
     pub async fn get_parent_block(&mut self, block: &Block) -> ConsensusResult<Option<Block>> {
         if block.qc == QC::genesis() {
             return Ok(Some(Block::genesis()));
@@ -136,15 +143,11 @@ impl Synchronizer {
     pub async fn get_ancestors(
         &mut self,
         block: &Block,
-    ) -> ConsensusResult<Option<(Block, Block)>> {
-        let b1 = match self.get_parent_block(block).await? {
+    ) -> ConsensusResult<Option<(Block)>> {
+        let parent = match self.get_parent_block(block).await? {
             Some(b) => b,
             None => return Ok(None),
         };
-        let b0 = self
-            .get_parent_block(&b1)
-            .await?
-            .expect("We should have all ancestors of delivered blocks");
-        Ok(Some((b0, b1)))
+        Ok(Some((parent)))
     }
 }
