@@ -443,6 +443,7 @@ impl Core {
     }
 
     async fn handle_proposal(&mut self, block: &Block) -> ConsensusResult<()> {
+        debug!("Processing proposal {:?}", block);
         let digest = block.digest();
 
         // Ensure the block proposer is the right leader for the round.
@@ -458,8 +459,8 @@ impl Core {
         // Check the block is correctly formed.
         block.verify(&self.committee)?;
 
-        // Process the QC. This may allow us to advance round.
-        self.process_qc(&block.qc).await;
+        // // Process the QC. This may allow us to advance round.
+        // self.process_qc(&block.qc).await;
 
         // Process the TC (if any). This may also allow us to advance round.
         if let Some(ref tc) = block.tc {
