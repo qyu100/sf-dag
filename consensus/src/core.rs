@@ -15,7 +15,7 @@ use crypto::{PublicKey, SignatureService};
 use log::{debug, error, info, warn};
 use network::SimpleSender;
 use std::cmp::max;
-use std::collections::VecDeque;
+use std::collections::{VecDeque, HashMap};
 use store::Store;
 use tokio::sync::mpsc::{Receiver, Sender};
 
@@ -41,6 +41,12 @@ pub struct Core {
     high_qc: QC,
     timer: Timer,
     aggregator: Aggregator,
+    pending_decides: HashMap<crypto::Digest, Ready>,
+    // processed_blocks now stores the round in which the block was processed so we can GC old entries
+    processed_blocks: HashMap<crypto::Digest, Round>,
+    // garbage collection parameters
+    gc_depth: Round,
+    gc_round: Round,
     network: SimpleSender,
 }
 
@@ -79,6 +85,12 @@ impl Core {
                 high_qc: QC::genesis(),
                 timer: Timer::new(timeout_delay),
                 aggregator: Aggregator::new(committee),
+                pending_decides: HashMap::new(),
+                // start with empty processed_blocks map
+                processed_blocks: HashMap::new(),
+                // set gc_depth to 50 as requested and gc_round to 0
+                gc_depth: 50,
+                gc_round: 0,
                 network: SimpleSender::new(),
             }
             .run()
@@ -122,11 +134,20 @@ impl Core {
 
         // Ensure we commit the entire chain. This is needed after view-change.
         let mut to_commit = VecDeque::new();
-        let block = self
+        let block_opt = self
             .synchronizer
             .get_block(&ready.hash)
-            .await?
-            .expect("We should have the decided block by now");
+            .await?;
+
+        let mut block = match block_opt {
+            Some(b) => b,
+            None => {
+                warn!("Decided block {} not found in store", ready.hash);
+                self.pending_decides.insert(ready.hash.clone(), ready.clone());
+                return Ok(());
+            }
+        };
+
         let mut parent = block.clone();
         while self.last_committed_round + 1 < parent.round {
             let ancestor = self
@@ -222,7 +243,7 @@ impl Core {
             self.process_qc(&qc).await;
 
             let ready = Ready::new(&vote, self.name, qc.clone(), self.signature_service.clone()).await;
-
+            debug!("Created {:?}", ready);
             // Clone ready for serialization so we can still use the original below.
             let message = bincode::serialize(&ConsensusMessage::Ready(ready.clone()))
                 .expect("Failed to serialize ready message");
@@ -341,12 +362,14 @@ impl Core {
     async fn process_block(&mut self, block: &Block) -> ConsensusResult<()> {
         debug!("Processing {:?}", block);
 
-        // Let's see if we have the last three ancestors of the block, that is:
-        //      b0 <- |qc0; b1| <- |qc1; block|
-        // If we don't, the synchronizer asks for them to other nodes. It will
-        // then ensure we process both ancestors in the correct order, and
-        // finally make us resume processing this block.
-        let (parent) = match self.synchronizer.get_ancestors(block).await? {
+        // Skip if we've already processed this block.
+        let digest = block.digest();
+        if self.processed_blocks.contains_key(&digest) {
+            debug!("Already processed {}, skipping", digest);
+            return Ok(());
+        }
+
+        let (parent) = match self.synchronizer.get_parent_block(block).await? {
             Some(ancestors) => ancestors,
             None => {
                 debug!("Processing of {} suspended: missing parent", block.digest());
@@ -356,6 +379,27 @@ impl Core {
 
         // Store the block only if we have already processed all its ancestors.
         self.store_block(block).await;
+
+        // Mark this block as processed to avoid re-processing it.
+        self.processed_blocks.insert(digest, block.round);
+
+
+        if let Some(ready) = self.pending_decides.remove(&block.digest()) {
+            debug!("Found pending decide for block {}, attempting commit", block.digest());
+            if let Err(e) = self.commit(ready).await {
+                warn!("Failed to commit pending decide for {}: {}", block.digest(), e);
+            }
+        }
+
+
+        // Garbage collect processed_blocks entries older than gc_depth rounds.
+        if self.round > self.gc_depth {
+            let gc_round = self.round - self.gc_depth;
+            self.processed_blocks.retain(|_, &mut r| r >= gc_round);
+            self.gc_round = gc_round;
+            debug!("Garbage collected processed_blocks up to round {}", gc_round);
+        }
+
 
         self.cleanup_proposer(&parent, block).await;
 
@@ -457,13 +501,17 @@ impl Core {
         // and receive timeout notifications from our Timeout Manager.
         loop {
             let result = tokio::select! {
-                Some(message) = self.rx_message.recv() => match message {
+                Some(message) = self.rx_message.recv() => 
+                {
+                // debug!("Core main loop received consensus message: {:?}", message);
+                match message {
                     ConsensusMessage::Propose(block) => self.handle_proposal(&block).await,
                     ConsensusMessage::Vote(vote) => self.handle_vote(&vote).await,
                     ConsensusMessage::Ready(ready) => self.handle_ready(&ready).await,
                     ConsensusMessage::Timeout(timeout) => self.handle_timeout(&timeout).await,
                     ConsensusMessage::TC(tc) => self.handle_tc(tc).await,
                     _ => panic!("Unexpected protocol message")
+                }
                 },
                 Some(block) = self.rx_loopback.recv() => self.process_block(&block).await,
                 () = &mut self.timer => self.local_timeout_round().await,

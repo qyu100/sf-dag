@@ -157,7 +157,7 @@ impl Hash for Vote {
 
 impl fmt::Debug for Vote {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
-        write!(f, "V({}, {}, {})", self.author, self.round, self.hash)
+        write!(f, "V({}, {}, {})", self.hash, self.round, self.round)
     }
 }
 
@@ -212,7 +212,7 @@ impl Hash for Ready {
 
 impl fmt::Debug for Ready {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
-        write!(f, "V({}, {}, {})", self.author, self.round, self.hash)
+        write!(f, "R({}, {}, {})", self.hash, self.round, self.round)
     }
 }
 
