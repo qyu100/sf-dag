@@ -391,7 +391,6 @@ impl Core {
             }
         }
 
-
         // Garbage collect processed_blocks entries older than gc_depth rounds.
         if self.round > self.gc_depth {
             let gc_round = self.round - self.gc_depth;
@@ -433,11 +432,7 @@ impl Core {
                 .broadcast(addresses, Bytes::from(message))
                 .await;
 
-            // Also process our own vote immediately if we are the next leader.
-            let next_leader = self.leader_elector.get_leader(self.round + 1);
-            if next_leader == self.name {
-                self.handle_vote(&vote).await?;
-            }
+            self.handle_vote(&vote).await?;
         }
         Ok(())
     }
