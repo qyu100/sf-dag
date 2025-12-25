@@ -380,12 +380,16 @@ impl Core {
         // Store the block only if we have already processed all its ancestors.
         self.store_block(block).await;
 
+        self.cleanup_proposer(&parent, block).await;
+
         // Mark this block as processed to avoid re-processing it.
         self.processed_blocks.insert(digest, block.round);
 
 
         if let Some(ready) = self.pending_decides.remove(&block.digest()) {
             debug!("Found pending decide for block {}, attempting commit", block.digest());
+            
+            self.mempool_driver.cleanup(ready.round).await;
             if let Err(e) = self.commit(ready).await {
                 warn!("Failed to commit pending decide for {}: {}", block.digest(), e);
             }
@@ -398,9 +402,6 @@ impl Core {
             self.gc_round = gc_round;
             debug!("Garbage collected processed_blocks up to round {}", gc_round);
         }
-
-
-        self.cleanup_proposer(&parent, block).await;
 
         // Check if we can commit the head of the 2-chain.
         // Note that we commit blocks only if we have all its ancestors.
