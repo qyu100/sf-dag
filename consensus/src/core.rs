@@ -153,7 +153,7 @@ impl Core {
         while self.last_committed_round + 1 < parent.round {
             let ancestor = self
                 .synchronizer
-                .get_block(&parent.parent(), &block.author)
+                .get_block(&parent.parent(), &parent.author)
                 .await?
                 .expect("We should have all the ancestors by now");
             to_commit.push_front(ancestor.clone());
