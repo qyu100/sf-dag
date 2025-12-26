@@ -27,8 +27,7 @@ const TIMER_ACCURACY: u64 = 5_000;
 
 #[derive(Debug)]
 pub enum SyncMessage {
-    Block(Block, oneshot::Sender<ConsensusResult<Block>>),
-    Digest(Digest, oneshot::Sender<ConsensusResult<Block>>),
+    Digest(Digest, PublicKey, oneshot::Sender<ConsensusResult<Block>>),
 }
 
 pub struct Synchronizer {
@@ -58,44 +57,7 @@ impl Synchronizer {
             loop {
                 tokio::select! {
                     Some(message) = rx_inner.recv() => match message {
-                        SyncMessage::Block(block, responder) =>
-                        {   
-                            let parent = block.parent().clone();
-                            if pending.insert(parent.clone()) {
-                                let author = block.author;
-                                let store_for_fut = store_copy.clone();
-                                let parent_for_fut = parent.clone();
-                                let block_for_fut = block.clone();
-                                // waiter that also replies to the requester when ready
-                                let fut = async move {
-                                    let res = Self::waiter(store_for_fut, parent_for_fut.clone(), block_for_fut).await;
-                                    if let Ok(b) = &res {
-                                        let _ = responder.send(Ok(b.clone()));
-                                    }
-                                    res
-                                };
-                                waiting.push(fut.boxed());
-
-                                if !requests.contains_key(&parent){
-                                    debug!("Requesting sync for parent {}", parent);
-                                    let now = SystemTime::now()
-                                        .duration_since(UNIX_EPOCH)
-                                        .expect("Failed to measure time")
-                                        .as_millis();
-                                    requests.insert(parent.clone(), now);
-                                    let addresses = committee
-                                        .broadcast_addresses(&name)
-                                        .into_iter()
-                                        .map(|(_, x)| x)
-                                        .collect();
-                                    let message = ConsensusMessage::SyncRequest(parent.clone(), name);
-                                    let message = bincode::serialize(&message)
-                                        .expect("Failed to serialize sync request");
-                                    network.broadcast(addresses, Bytes::from(message)).await;
-                                }
-                            }
-                        },
-                        SyncMessage::Digest(digest,responder) =>
+                        SyncMessage::Digest(digest, origin, responder) =>
                         {
                             // when we only have a digest, wait for the store to receive that digest,
                             // then read and deserialize the block from the store and return it.
@@ -119,15 +81,13 @@ impl Synchronizer {
                                         .expect("Failed to measure time")
                                         .as_millis();
                                     requests.insert(digest.clone(), now);
-                                    let addresses = committee
-                                        .broadcast_addresses(&name)
-                                        .into_iter()
-                                        .map(|(_, x)| x)
-                                        .collect();
+                                    let address = committee
+                                        .address(&origin)
+                                        .expect("Author of valid block is not in the committee");
                                     let message = ConsensusMessage::SyncRequest(digest.clone(), name);
                                     let message = bincode::serialize(&message)
                                         .expect("Failed to serialize sync request");
-                                    network.broadcast(addresses, Bytes::from(message)).await;
+                                    network.send(address, Bytes::from(message)).await;
                                 }
                             }
                         }
@@ -173,14 +133,6 @@ impl Synchronizer {
         }
     }
 
-    async fn waiter(mut store: Store, wait_on: Digest, deliver: Block) -> ConsensusResult<Block> {
-        let _ = store.notify_read(wait_on.to_vec()).await?;
-        match store.read(wait_on.to_vec()).await? {
-            Some(bytes) => Ok(bincode::deserialize(&bytes)?),
-            None => Err(ConsensusError::MalformedBlock(wait_on)),
-        }
-    }
-
     async fn waiter_digest(mut store: Store, wait_on: Digest) -> ConsensusResult<Block> {
         let _ = store.notify_read(wait_on.to_vec()).await?;
         match store.read(wait_on.to_vec()).await? {
@@ -189,50 +141,20 @@ impl Synchronizer {
         }
     }
 
-    pub async fn get_block(&mut self, digest: &Digest) -> ConsensusResult<Option<Block>> {
+    pub async fn get_block(&mut self, digest: &Digest, origin: &PublicKey) -> ConsensusResult<Option<Block>> {
         debug!("Getting block {:?}", digest);
-        if digest == &Block::genesis().digest() {
+        if digest == &Digest::default() {
             return Ok(Some(Block::genesis()));
         }
         match self.store.read(digest.to_vec()).await? {
             Some(bytes) => Ok(Some(bincode::deserialize(&bytes)?)),
             None => {
                 let (tx, _rx) = oneshot::channel();
-                if let Err(e) = self.inner_channel.send(SyncMessage::Digest(digest.clone(), tx)).await {
+                if let Err(e) = self.inner_channel.send(SyncMessage::Digest(digest.clone(), origin.clone(), tx)).await {
                     panic!("Failed to send request to synchronizer: {}", e);
                 }
                 Ok(None)
             }
         }
-    }
-    
-    pub async fn get_parent_block(&mut self, block: &Block) -> ConsensusResult<Option<Block>> {
-        debug!("Getting parent block {:?}", (block.parent()));
-        
-        if block.parent()== &Digest::default() {
-            return Ok(Some(Block::genesis()));
-        }
-        let parent = block.parent().clone();
-        match self.store.read(parent.to_vec()).await? {
-            Some(bytes) => Ok(Some(bincode::deserialize(&bytes)?)),
-            None => {
-                let (tx, _rx) = oneshot::channel();
-                if let Err(e) = self.inner_channel.send(SyncMessage::Block(block.clone(), tx)).await {
-                    panic!("Failed to send request to synchronizer: {}", e);
-                }
-                Ok(None)
-            }
-        }
-    }
-
-    pub async fn get_ancestors(
-        &mut self,
-        block: &Block,
-    ) -> ConsensusResult<Option<(Block)>> {
-        let parent = match self.get_parent_block(block).await? {
-            Some(b) => b,
-            None => return Ok(None),
-        };
-        Ok(Some((parent)))
     }
 }

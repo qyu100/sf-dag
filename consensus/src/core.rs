@@ -134,9 +134,10 @@ impl Core {
 
         // Ensure we commit the entire chain. This is needed after view-change.
         let mut to_commit = VecDeque::new();
+
         let block_opt = self
             .synchronizer
-            .get_block(&ready.hash)
+            .get_block(&ready.hash, &self.leader_elector.get_leader(self.round))
             .await?;
 
         let mut block = match block_opt {
@@ -152,7 +153,7 @@ impl Core {
         while self.last_committed_round + 1 < parent.round {
             let ancestor = self
                 .synchronizer
-                .get_parent_block(&parent)
+                .get_block(&parent.parent(), &block.author)
                 .await?
                 .expect("We should have all the ancestors by now");
             to_commit.push_front(ancestor.clone());
@@ -255,12 +256,13 @@ impl Core {
                 .collect();
             self.network.broadcast(addresses, Bytes::from(message)).await;
 
-            // Make a new block if we are the next leader.
+            self.handle_ready(&ready).await?;
+
+
             if self.name == self.leader_elector.get_leader(self.round) {
                 self.generate_proposal(None).await;
             }
 
-            self.handle_ready(&ready).await?;
         }
         Ok(())
     }
@@ -362,14 +364,7 @@ impl Core {
     async fn process_block(&mut self, block: &Block) -> ConsensusResult<()> {
         debug!("Processing {:?}", block);
 
-        // Skip if we've already processed this block.
-        let digest = block.digest();
-        if self.processed_blocks.contains_key(&digest) {
-            debug!("Already processed {}, skipping", digest);
-            return Ok(());
-        }
-
-        let (parent) = match self.synchronizer.get_parent_block(block).await? {
+        let (parent) = match self.synchronizer.get_block(block.parent(), &block.author).await? {
             Some(ancestors) => ancestors,
             None => {
                 debug!("Processing of {} suspended: missing parent", block.digest());
@@ -383,12 +378,11 @@ impl Core {
         self.cleanup_proposer(&parent, block).await;
 
         // Mark this block as processed to avoid re-processing it.
-        self.processed_blocks.insert(digest, block.round);
-
+        self.processed_blocks.insert(block.digest(), block.round);
 
         if let Some(ready) = self.pending_decides.remove(&block.digest()) {
             debug!("Found pending decide for block {}, attempting commit", block.digest());
-            
+
             self.mempool_driver.cleanup(ready.round).await;
             if let Err(e) = self.commit(ready).await {
                 warn!("Failed to commit pending decide for {}: {}", block.digest(), e);
@@ -400,7 +394,6 @@ impl Core {
             let gc_round = self.round - self.gc_depth;
             self.processed_blocks.retain(|_, &mut r| r >= gc_round);
             self.gc_round = gc_round;
-            debug!("Garbage collected processed_blocks up to round {}", gc_round);
         }
 
         // Check if we can commit the head of the 2-chain.
@@ -413,9 +406,9 @@ impl Core {
         // Ensure the block's round is as expected.
         // This check is important: it prevents bad leaders from producing blocks
         // far in the future that may cause overflow on the round number.
-        if block.round != self.round {
-            return Ok(());
-        }
+        // if block.round != self.round {
+        //     return Ok(());
+        // }
 
         // See if we can vote for this block.
         if let Some(vote) = self.make_vote(block).await {
@@ -439,9 +432,17 @@ impl Core {
     }
 
     async fn handle_proposal(&mut self, block: &Block) -> ConsensusResult<()> {
-        debug!("Processing proposal {:?}", block);
+        // Skip if we've already processed this block.
         let digest = block.digest();
+        if self.processed_blocks.contains_key(&digest) {
+            debug!("Already processed {}, skipping", digest);
+            return Ok(());
+        }
 
+        debug!("Processing proposal {:?}", block);
+
+        let digest = block.digest();
+        
         // Ensure the block proposer is the right leader for the round.
         ensure!(
             block.author == self.leader_elector.get_leader(block.round),
