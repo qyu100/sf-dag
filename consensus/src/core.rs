@@ -364,7 +364,7 @@ impl Core {
     async fn process_block(&mut self, block: &Block) -> ConsensusResult<()> {
         debug!("Processing {:?}", block);
 
-        let (parent) = match self.synchronizer.get_block(block.parent(), &block.author).await? {
+        let (parent) = match self.synchronizer.get_block(block.parent(), &self.leader_elector.get_leader(block.round-1)).await? {
             Some(ancestors) => ancestors,
             None => {
                 debug!("Processing of {} suspended: missing parent", block.digest());
