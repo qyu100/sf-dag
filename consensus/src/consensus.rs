@@ -4,7 +4,7 @@ use crate::error::ConsensusError;
 use crate::helper::Helper;
 use crate::leader::LeaderElector;
 use crate::mempool::MempoolDriver;
-use crate::messages::{Block, Timeout, Vote, TC};
+use crate::messages::{Block, Timeout, Vote, TC, Ready, Decide};
 use crate::proposer::Proposer;
 use crate::synchronizer::Synchronizer;
 use async_trait::async_trait;
@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use std::error::Error;
 use store::Store;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
+use log::{debug, error, warn};
 
 #[cfg(test)]
 #[path = "tests/consensus_tests.rs"]
@@ -33,8 +34,9 @@ pub type Round = u64;
 pub enum ConsensusMessage {
     Propose(Block),
     Vote(Vote),
+    Ready(Ready),
+    Decide(Decide),
     Timeout(Timeout),
-    TC(TC),
     SyncRequest(Digest, PublicKey),
 }
 
@@ -144,19 +146,26 @@ impl MessageHandler for ConsensusReceiverHandler {
             message @ ConsensusMessage::Propose(..) => {
                 // Reply with an ACK.
                 let _ = writer.send(Bytes::from("Ack")).await;
+            
+                // Debug: log that we received a propose and will forward it to core.
+                debug!("Dispatching Propose to core: {:?}", message);
 
                 // Pass the message to the consensus core.
                 self.tx_consensus
                     .send(message)
                     .await
-                    .expect("Failed to consensus message")
+                    .expect("Failed to consensus message");
+                debug!("ConsensusReceiverHandler forwarded message to core");
             }
-            message => self
-                .tx_consensus
-                .send(message)
-                .await
-                .expect("Failed to consensus message"),
-        }
-        Ok(())
-    }
-}
+            message => {
+                debug!("Dispatching consensus message to core: {:?}", message);
+                self
+                    .tx_consensus
+                    .send(message)
+                    .await
+                    .expect("Failed to consensus message");
+         }
+         }
+         Ok(())
+     }
+ }

@@ -13,35 +13,31 @@ use std::fmt;
 #[path = "tests/messages_tests.rs"]
 pub mod messages_tests;
 
-#[derive(Serialize, Deserialize, Default, Clone)]
+#[derive(Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct Block {
-    pub qc: QC,
-    pub tc: Option<TC>,
     pub author: PublicKey,
     pub round: Round,
     pub payload: Vec<Digest>,
-    pub signature: Signature,
+    pub parent: Digest,
+    pub id: Digest,
 }
 
 impl Block {
     pub async fn new(
-        qc: QC,
-        tc: Option<TC>,
         author: PublicKey,
         round: Round,
         payload: Vec<Digest>,
-        mut signature_service: SignatureService,
+        parent: Digest,
     ) -> Self {
-        let block = Self {
-            qc,
-            tc,
+        let header = Self {
             author,
             round,
             payload,
-            signature: Signature::default(),
+            parent,
+            id: Digest::default(),
         };
-        let signature = signature_service.request_signature(block.digest()).await;
-        Self { signature, ..block }
+        let id = header.digest();
+        Self { id, ..header }
     }
 
     pub fn genesis() -> Self {
@@ -49,29 +45,16 @@ impl Block {
     }
 
     pub fn parent(&self) -> &Digest {
-        &self.qc.hash
+        &self.parent
     }
 
     pub fn verify(&self, committee: &Committee) -> ConsensusResult<()> {
+        // Ensure the header id is well formed.
+        ensure!(self.digest() == self.id, ConsensusError::InvalidHeaderId);
+
         // Ensure the authority has voting rights.
         let voting_rights = committee.stake(&self.author);
-        ensure!(
-            voting_rights > 0,
-            ConsensusError::UnknownAuthority(self.author)
-        );
-
-        // Check the signature.
-        self.signature.verify(&self.digest(), &self.author)?;
-
-        // Check the embedded QC.
-        if self.qc != QC::genesis() {
-            self.qc.verify(committee)?;
-        }
-
-        // Check the TC embedded in the block (if any).
-        if let Some(ref tc) = self.tc {
-            tc.verify(committee)?;
-        }
+        ensure!(voting_rights > 0, ConsensusError::UnknownAuthority(self.author));
         Ok(())
     }
 }
@@ -79,27 +62,21 @@ impl Block {
 impl Hash for Block {
     fn digest(&self) -> Digest {
         let mut hasher = Sha512::new();
-        hasher.update(self.author.0);
+        hasher.update(&self.author);
         hasher.update(self.round.to_le_bytes());
         for x in &self.payload {
             hasher.update(x);
         }
-        hasher.update(&self.qc.hash);
+        // for x in &self.parents {
+        //     hasher.update(x);
+        // }
         Digest(hasher.finalize().as_slice()[..32].try_into().unwrap())
     }
 }
 
 impl fmt::Debug for Block {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
-        write!(
-            f,
-            "{}: B({}, {}, {:?}, {})",
-            self.digest(),
-            self.author,
-            self.round,
-            self.qc,
-            self.payload.iter().map(|x| x.size()).sum::<usize>(),
-        )
+        write!(f, "{}: B{}({})", self.id, self.round, self.author,)
     }
 }
 
@@ -111,26 +88,22 @@ impl fmt::Display for Block {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Vote {
-    pub hash: Digest,
+    pub id: Digest,
     pub round: Round,
     pub author: PublicKey,
-    pub signature: Signature,
 }
 
 impl Vote {
     pub async fn new(
         block: &Block,
         author: PublicKey,
-        mut signature_service: SignatureService,
     ) -> Self {
         let vote = Self {
-            hash: block.digest(),
+            id: block.digest(),
             round: block.round,
             author,
-            signature: Signature::default(),
         };
-        let signature = signature_service.request_signature(vote.digest()).await;
-        Self { signature, ..vote }
+        vote
     }
 
     pub fn verify(&self, committee: &Committee) -> ConsensusResult<()> {
@@ -140,8 +113,6 @@ impl Vote {
             ConsensusError::UnknownAuthority(self.author)
         );
 
-        // Check the signature.
-        self.signature.verify(&self.digest(), &self.author)?;
         Ok(())
     }
 }
@@ -149,7 +120,7 @@ impl Vote {
 impl Hash for Vote {
     fn digest(&self) -> Digest {
         let mut hasher = Sha512::new();
-        hasher.update(&self.hash);
+        hasher.update(&self.id);
         hasher.update(self.round.to_le_bytes());
         Digest(hasher.finalize().as_slice()[..32].try_into().unwrap())
     }
@@ -157,9 +128,102 @@ impl Hash for Vote {
 
 impl fmt::Debug for Vote {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
-        write!(f, "V({}, {}, {})", self.author, self.round, self.hash)
+        write!(f, "V({}, {}, {})", self.author, self.round, self.id)
     }
 }
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Ready {
+    pub id: Digest,
+    pub round: Round,
+    pub author: PublicKey,
+}
+
+impl Ready {
+    pub async fn new(
+        vote: &Vote,
+        author: PublicKey,
+    ) -> Self {
+        let ready = Self {
+            id: vote.id.clone(),
+            round: vote.round,
+            author,
+        };
+        ready
+    }
+
+    pub fn verify(&self, committee: &Committee) -> ConsensusResult<()> {
+        // Ensure the authority has voting rights.
+        ensure!(
+            committee.stake(&self.author) > 0,
+            ConsensusError::UnknownAuthority(self.author)
+        );
+
+        Ok(())
+    }
+}
+
+impl Hash for Ready {
+    fn digest(&self) -> Digest {
+        let mut hasher = Sha512::new();
+        hasher.update(&self.id);
+        hasher.update(self.round.to_le_bytes());
+        Digest(hasher.finalize().as_slice()[..32].try_into().unwrap())
+    }
+}
+
+impl fmt::Debug for Ready {
+    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+        write!(f, "R({}, {}, {})", self.author, self.round, self.id)
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Decide {
+    pub id: Digest,
+    pub round: Round,
+    pub author: PublicKey,
+}
+
+impl Decide {
+    pub async fn new(
+        ready: &Ready,
+        author: PublicKey,
+    ) -> Self {
+        let decide = Self {
+            id: ready.id.clone(),
+            round: ready.round,
+            author,
+        };
+        decide
+    }
+
+    pub fn verify(&self, committee: &Committee) -> ConsensusResult<()> {
+        // Ensure the authority has voting rights.
+        ensure!(
+            committee.stake(&self.author) > 0,
+            ConsensusError::UnknownAuthority(self.author)
+        );
+
+        Ok(())
+    }
+}
+
+impl Hash for Decide {
+    fn digest(&self) -> Digest {
+        let mut hasher = Sha512::new();
+        hasher.update(&self.id);
+        hasher.update(self.round.to_le_bytes());
+        Digest(hasher.finalize().as_slice()[..32].try_into().unwrap())
+    }
+}
+
+impl fmt::Debug for Decide {
+    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+        write!(f, "D({}, {}, {})", self.author, self.round, self.id)
+    }
+}
+
 
 #[derive(Clone, Serialize, Deserialize, Default)]
 pub struct QC {
@@ -221,30 +285,20 @@ impl PartialEq for QC {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Timeout {
-    pub high_qc: QC,
     pub round: Round,
     pub author: PublicKey,
-    pub signature: Signature,
 }
 
 impl Timeout {
     pub async fn new(
-        high_qc: QC,
         round: Round,
         author: PublicKey,
-        mut signature_service: SignatureService,
     ) -> Self {
         let timeout = Self {
-            high_qc,
             round,
             author,
-            signature: Signature::default(),
         };
-        let signature = signature_service.request_signature(timeout.digest()).await;
-        Self {
-            signature,
-            ..timeout
-        }
+        timeout
     }
 
     pub fn verify(&self, committee: &Committee) -> ConsensusResult<()> {
@@ -253,14 +307,6 @@ impl Timeout {
             committee.stake(&self.author) > 0,
             ConsensusError::UnknownAuthority(self.author)
         );
-
-        // Check the signature.
-        self.signature.verify(&self.digest(), &self.author)?;
-
-        // Check the embedded QC.
-        if self.high_qc != QC::genesis() {
-            self.high_qc.verify(committee)?;
-        }
         Ok(())
     }
 }
@@ -269,14 +315,13 @@ impl Hash for Timeout {
     fn digest(&self) -> Digest {
         let mut hasher = Sha512::new();
         hasher.update(self.round.to_le_bytes());
-        hasher.update(self.high_qc.round.to_le_bytes());
         Digest(hasher.finalize().as_slice()[..32].try_into().unwrap())
     }
 }
 
 impl fmt::Debug for Timeout {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
-        write!(f, "TV({}, {}, {:?})", self.author, self.round, self.high_qc)
+        write!(f, "T({}, {})", self.author, self.round)
     }
 }
 

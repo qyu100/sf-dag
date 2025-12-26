@@ -1,7 +1,7 @@
 use crate::config::{Committee, Stake};
 use crate::consensus::Round;
 use crate::error::{ConsensusError, ConsensusResult};
-use crate::messages::{Timeout, Vote, QC, TC};
+use crate::messages::{Timeout, Vote, QC, TC, Ready, Decide};
 use crypto::Hash as _;
 use crypto::{Digest, PublicKey, Signature};
 use std::collections::{HashMap, HashSet};
@@ -12,8 +12,11 @@ pub mod aggregator_tests;
 
 pub struct Aggregator {
     committee: Committee,
-    votes_aggregators: HashMap<Round, HashMap<Digest, Box<QCMaker>>>,
-    timeouts_aggregators: HashMap<Round, Box<TCMaker>>,
+    // Track votes per round. For each round we keep (accumulated weight, map author->Vote).
+    votes_aggregators: HashMap<Round, (Stake, HashMap<PublicKey, Vote>)>,
+    ready_aggregators: HashMap<Round, (Stake, HashMap<PublicKey, Ready>)>,
+    decide_aggregators: HashMap<Round, (Stake, HashMap<PublicKey, Decide>)>,
+    timeouts_aggregators: HashMap<Round, (u32, HashMap<PublicKey, Timeout>)>,
 }
 
 impl Aggregator {
@@ -21,119 +24,136 @@ impl Aggregator {
         Self {
             committee,
             votes_aggregators: HashMap::new(),
+            ready_aggregators: HashMap::new(),
+            decide_aggregators: HashMap::new(),
             timeouts_aggregators: HashMap::new(),
         }
     }
 
-    pub fn add_vote(&mut self, vote: Vote) -> ConsensusResult<Option<QC>> {
+    // Append a vote for the given round. Returns Ok(true) when accumulated stake for
+    // that round reaches committee.quorum_threshold().
+    pub fn add_vote(&mut self, vote: Vote) -> ConsensusResult<bool> {
         // TODO [issue #7]: A bad node may make us run out of memory by sending many votes
-        // with different round numbers or different digests.
-
-        // Add the new vote to our aggregator and see if we have a QC.
-        self.votes_aggregators
-            .entry(vote.round)
-            .or_insert_with(HashMap::new)
-            .entry(vote.digest())
-            .or_insert_with(|| Box::new(QCMaker::new()))
-            .append(vote, &self.committee)
-    }
-
-    pub fn add_timeout(&mut self, timeout: Timeout) -> ConsensusResult<Option<TC>> {
-        // TODO: A bad node may make us run out of memory by sending many timeouts
         // with different round numbers.
 
-        // Add the new timeout to our aggregator and see if we have a TC.
-        self.timeouts_aggregators
+        let round_entry = self
+            .votes_aggregators
+            .entry(vote.round)
+            .or_insert_with(|| (0 as Stake, HashMap::new()));
+
+        let weight = &mut round_entry.0;
+        let votes_map = &mut round_entry.1;
+
+        let author = vote.author;
+
+        // Ensure it is the first time this authority votes in this round.
+        ensure!(
+            !votes_map.contains_key(&author),
+            ConsensusError::AuthorityReuse(author)
+        );
+
+        // Record the vote and update accumulated stake for the round.
+        votes_map.insert(author, vote);
+        *weight += self.committee.stake(&author);
+
+        if *weight >= self.committee.quorum_threshold() {
+            *weight = 0; // Ensures quorum is only reported once for this round.
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    pub fn add_ready(&mut self, ready: Ready) -> ConsensusResult<bool> {
+        // TODO [issue #7]: A bad node may make us run out of memory by sending many votes
+        // with different round numbers.
+
+        let round_entry = self
+            .ready_aggregators
+            .entry(ready.round)
+            .or_insert_with(|| (0 as Stake, HashMap::new()));
+
+        let weight = &mut round_entry.0;
+        let ready_map = &mut round_entry.1;
+
+        let author = ready.author;
+
+        // Ensure it is the first time this authority votes in this round.
+        ensure!(
+            !ready_map.contains_key(&author),
+            ConsensusError::AuthorityReuse(author)
+        );
+
+        // Record the vote and update accumulated stake for the round.
+        ready_map.insert(author, ready);
+        *weight += self.committee.stake(&author);
+
+        if *weight >= self.committee.quorum_threshold() {
+            *weight = 0; // Ensures quorum is only reported once for this round.
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    pub fn add_decide(&mut self, decide: Decide) -> ConsensusResult<bool> {
+        let round_entry = self
+            .decide_aggregators
+            .entry(decide.round)
+            .or_insert_with(|| (0 as Stake, HashMap::new()));
+
+        let weight = &mut round_entry.0;
+        let decide_map = &mut round_entry.1;
+
+        let author = decide.author;
+
+        // Ensure it is the first time this authority votes in this round.
+        ensure!(
+            !decide_map.contains_key(&author),
+            ConsensusError::AuthorityReuse(author)
+        );
+
+        // Record the vote and update accumulated stake for the round.
+        decide_map.insert(author, decide);
+        *weight += self.committee.stake(&author);
+
+        if *weight >= self.committee.quorum_threshold() {
+            *weight = 0; // Ensures quorum is only reported once for this round.
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    pub fn add_timeout(&mut self, timeout: Timeout) -> ConsensusResult<bool> {
+        let round_entry = self
+            .timeouts_aggregators
             .entry(timeout.round)
-            .or_insert_with(|| Box::new(TCMaker::new()))
-            .append(timeout, &self.committee)
+            .or_insert_with(|| (0, HashMap::new()));
+
+        let weight = &mut round_entry.0;
+        let timeout_map = &mut round_entry.1;
+
+        let author = timeout.author;
+
+        // Ensure it is the first time this authority votes in this round.
+        ensure!(
+            !timeout_map.contains_key(&author),
+            ConsensusError::AuthorityReuse(author)
+        );
+
+        // Record the vote and update accumulated stake for the round.
+        timeout_map.insert(author, timeout);
+        *weight += 1;
+
+        if *weight >= self.committee.quorum_threshold() {
+            *weight = 0; // Ensures quorum is only reported once for this round.
+            return Ok(true);
+        }
+        Ok(false)
     }
 
     pub fn cleanup(&mut self, round: &Round) {
         self.votes_aggregators.retain(|k, _| k >= round);
         self.timeouts_aggregators.retain(|k, _| k >= round);
-    }
-}
-
-struct QCMaker {
-    weight: Stake,
-    votes: Vec<(PublicKey, Signature)>,
-    used: HashSet<PublicKey>,
-}
-
-impl QCMaker {
-    pub fn new() -> Self {
-        Self {
-            weight: 0,
-            votes: Vec::new(),
-            used: HashSet::new(),
-        }
-    }
-
-    /// Try to append a signature to a (partial) quorum.
-    pub fn append(&mut self, vote: Vote, committee: &Committee) -> ConsensusResult<Option<QC>> {
-        let author = vote.author;
-
-        // Ensure it is the first time this authority votes.
-        ensure!(
-            self.used.insert(author),
-            ConsensusError::AuthorityReuse(author)
-        );
-
-        self.votes.push((author, vote.signature));
-        self.weight += committee.stake(&author);
-        if self.weight >= committee.quorum_threshold() {
-            self.weight = 0; // Ensures QC is only made once.
-            return Ok(Some(QC {
-                hash: vote.hash.clone(),
-                round: vote.round,
-                votes: self.votes.clone(),
-            }));
-        }
-        Ok(None)
-    }
-}
-
-struct TCMaker {
-    weight: Stake,
-    votes: Vec<(PublicKey, Signature, Round)>,
-    used: HashSet<PublicKey>,
-}
-
-impl TCMaker {
-    pub fn new() -> Self {
-        Self {
-            weight: 0,
-            votes: Vec::new(),
-            used: HashSet::new(),
-        }
-    }
-
-    /// Try to append a signature to a (partial) quorum.
-    pub fn append(
-        &mut self,
-        timeout: Timeout,
-        committee: &Committee,
-    ) -> ConsensusResult<Option<TC>> {
-        let author = timeout.author;
-
-        // Ensure it is the first time this authority votes.
-        ensure!(
-            self.used.insert(author),
-            ConsensusError::AuthorityReuse(author)
-        );
-
-        // Add the timeout to the accumulator.
-        self.votes
-            .push((author, timeout.signature, timeout.high_qc.round));
-        self.weight += committee.stake(&author);
-        if self.weight >= committee.quorum_threshold() {
-            self.weight = 0; // Ensures TC is only created once.
-            return Ok(Some(TC {
-                round: timeout.round,
-                votes: self.votes.clone(),
-            }));
-        }
-        Ok(None)
+        self.ready_aggregators.retain(|k, _| k >= round);
+        self.decide_aggregators.retain(|k, _| k >= round);
     }
 }
