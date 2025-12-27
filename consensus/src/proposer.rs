@@ -80,22 +80,7 @@ impl Proposer {
             }
         }
         debug!("Created {:?}", block);
-
-        // Broadcast our new block.
-        debug!("Broadcasting {:?}", block);
-        let (names, addresses): (Vec<_>, _) = self
-            .committee
-            .broadcast_addresses(&self.name)
-            .iter()
-            .cloned()
-            .unzip();
-        let message = bincode::serialize(&ConsensusMessage::Propose(block.clone()))
-            .expect("Failed to serialize block");
-        let handles = self
-            .network
-            .broadcast(addresses, Bytes::from(message))
-            .await;
-
+        
         // Send our block to the core for processing.
         self.tx_loopback
             .send(block)

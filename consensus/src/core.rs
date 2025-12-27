@@ -13,7 +13,7 @@ use bytes::Bytes;
 use crypto::Hash as _;
 use crypto::{PublicKey, SignatureService};
 use log::{debug, error, info, warn};
-use network::SimpleSender;
+use network::{CancelHandler, ReliableSender};
 use std::cmp::max;
 use std::collections::{VecDeque, HashMap};
 use store::Store;
@@ -46,8 +46,8 @@ pub struct Core {
     processed_blocks: HashMap<crypto::Digest, Round>,
     // garbage collection parameters
     gc_depth: Round,
-    gc_round: Round,
-    network: SimpleSender,
+    network: ReliableSender,
+    cancel_handlers: HashMap<Round, Vec<CancelHandler>>,
 }
 
 impl Core {
@@ -86,12 +86,10 @@ impl Core {
                 timer: Timer::new(timeout_delay),
                 aggregator: Aggregator::new(committee),
                 pending_decides: HashMap::new(),
-                // start with empty processed_blocks map
                 processed_blocks: HashMap::new(),
-                // set gc_depth to 50 as requested and gc_round to 0
                 gc_depth: 50,
-                gc_round: 0,
-                network: SimpleSender::new(),
+                network: ReliableSender::new(),
+                cancel_handlers: HashMap::new(),
             }
             .run()
             .await
@@ -137,7 +135,7 @@ impl Core {
 
         let block_opt = self
             .synchronizer
-            .get_block(&ready.hash, &self.leader_elector.get_leader(self.round))
+            .get_block(&ready.hash, &ready.author)
             .await?;
 
         let mut block = match block_opt {
@@ -218,9 +216,14 @@ impl Core {
             .collect();
         let message = bincode::serialize(&ConsensusMessage::Timeout(timeout.clone()))
             .expect("Failed to serialize timeout message");
-        self.network
+        let handlers = self.network
             .broadcast(addresses, Bytes::from(message))
             .await;
+
+        self.cancel_handlers
+            .entry(timeout.round)
+            .or_insert_with(Vec::new)
+            .extend(handlers);
 
         // Process our message.
         self.handle_timeout(&timeout).await
@@ -254,12 +257,18 @@ impl Core {
                 .into_iter()
                 .map(|(_, x)| x)
                 .collect();
-            self.network.broadcast(addresses, Bytes::from(message)).await;
+            let handlers = self.network.broadcast(addresses, Bytes::from(message)).await;
+
+            self.cancel_handlers
+                .entry(ready.round)
+                .or_insert_with(Vec::new)
+                .extend(handlers);
 
             self.handle_ready(&ready).await?;
 
 
             if self.name == self.leader_elector.get_leader(self.round) {
+                debug!("leader of round {}", self.round);
                 self.generate_proposal(None).await;
             }
 
@@ -308,10 +317,14 @@ impl Core {
                 .collect();
             let message = bincode::serialize(&ConsensusMessage::TC(tc.clone()))
                 .expect("Failed to serialize timeout certificate");
-            self.network
+            let handlers = self.network
                 .broadcast(addresses, Bytes::from(message))
                 .await;
-
+            self.cancel_handlers
+                .entry(timeout.round)
+                .or_insert_with(Vec::new)
+                .extend(handlers);
+            
             // Make a new block if we are the next leader.
             if self.name == self.leader_elector.get_leader(self.round) {
                 self.generate_proposal(Some(tc)).await;
@@ -359,12 +372,32 @@ impl Core {
         self.advance_round(qc.round).await;
         self.update_high_qc(qc);
     }
+    
+    #[async_recursion]
+    async fn process_own_block(&mut self, block: &Block) -> ConsensusResult<()> {
+
+        debug!("Broadcasting {:?}", block);
+        let (names, addresses): (Vec<_>, _) = self
+            .committee
+            .broadcast_addresses(&self.name)
+            .iter()
+            .cloned()
+            .unzip();
+        let message = bincode::serialize(&ConsensusMessage::Propose(block.clone()))
+            .expect("Failed to serialize block");
+        let handles = self
+            .network
+            .broadcast(addresses, Bytes::from(message))
+            .await;
+
+        self.process_block(block).await
+    }
 
     #[async_recursion]
     async fn process_block(&mut self, block: &Block) -> ConsensusResult<()> {
         debug!("Processing {:?}", block);
 
-        let (parent) = match self.synchronizer.get_block(block.parent(), &self.leader_elector.get_leader(block.round-1)).await? {
+        let (parent) = match self.synchronizer.get_block(block.parent(), &block.author).await? {
             Some(ancestors) => ancestors,
             None => {
                 debug!("Processing of {} suspended: missing parent", block.digest());
@@ -389,28 +422,7 @@ impl Core {
             }
         }
 
-        // Garbage collect processed_blocks entries older than gc_depth rounds.
-        if self.round > self.gc_depth {
-            let gc_round = self.round - self.gc_depth;
-            self.processed_blocks.retain(|_, &mut r| r >= gc_round);
-            self.gc_round = gc_round;
-        }
-
-        // Check if we can commit the head of the 2-chain.
-        // Note that we commit blocks only if we have all its ancestors.
-        // if b0.round + 1 == b1.round {
-        //     self.mempool_driver.cleanup(b0.round).await;
-        //     self.commit(b0).await?;
-        // }
-
-        // Ensure the block's round is as expected.
-        // This check is important: it prevents bad leaders from producing blocks
-        // far in the future that may cause overflow on the round number.
-        // if block.round != self.round {
-        //     return Ok(());
-        // }
-
-        // See if we can vote for this block.
+        // Check if we can vote for this block.
         if let Some(vote) = self.make_vote(block).await {
             debug!("Created {:?}", vote);
             // Broadcast vote1 to all replicas (vote1 all-to-all).
@@ -422,22 +434,25 @@ impl Core {
                 .into_iter()
                 .map(|(_, x)| x)
                 .collect();
-            self.network
+            let handlers = self.network
                 .broadcast(addresses, Bytes::from(message))
                 .await;
-
+            self.cancel_handlers
+                .entry(vote.round)
+                .or_insert_with(Vec::new)
+                .extend(handlers);
             self.handle_vote(&vote).await?;
         }
         Ok(())
     }
 
     async fn handle_proposal(&mut self, block: &Block) -> ConsensusResult<()> {
-        // Skip if we've already processed this block.
-        let digest = block.digest();
-        if self.processed_blocks.contains_key(&digest) {
-            debug!("Already processed {}, skipping", digest);
-            return Ok(());
-        }
+        // // Skip if we've already processed this block.
+        // let digest = block.digest();
+        // if self.processed_blocks.contains_key(&digest) {
+        //     debug!("Already processed {}, skipping", digest);
+        //     return Ok(());
+        // }
 
         debug!("Processing proposal {:?}", block);
 
@@ -472,7 +487,9 @@ impl Core {
         }
 
         // All check pass, we can process this block.
-        self.process_block(block).await
+        self.process_block(block).await?;
+
+        Ok(())
     }
 
     async fn handle_tc(&mut self, tc: TC) -> ConsensusResult<()> {
@@ -511,7 +528,7 @@ impl Core {
                     _ => panic!("Unexpected protocol message")
                 }
                 },
-                Some(block) = self.rx_loopback.recv() => self.process_block(&block).await,
+                Some(block) = self.rx_loopback.recv() => self.process_own_block(&block).await,
                 () = &mut self.timer => self.local_timeout_round().await,
             };
             match result {
@@ -520,6 +537,17 @@ impl Core {
                 Err(ConsensusError::SerializationError(e)) => error!("Store corrupted. {}", e),
                 Err(e) => warn!("{}", e),
             }
+            // Centralized garbage collection executed each loop iteration.
+            if self.round > self.gc_depth {
+                let gc_round = self.round - self.gc_depth;
+                // drop processed_blocks entries older than gc_round
+                self.processed_blocks.retain(|_, &mut r| r >= gc_round);
+                // drop cancel handlers for old rounds (dropping receivers cancels them)
+                self.cancel_handlers.retain(|r, _| *r >= gc_round);
+                // drop pending decides older than gc_round
+                self.pending_decides.retain(|_, ready| ready.round >= gc_round);
+            }
+
         }
     }
 }

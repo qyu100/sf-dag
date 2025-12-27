@@ -57,7 +57,7 @@ impl Synchronizer {
             loop {
                 tokio::select! {
                     Some(message) = rx_inner.recv() => match message {
-                        SyncMessage::Digest(digest, origin, responder) =>
+                        SyncMessage::Digest(digest, author, responder) =>
                         {
                             // when we only have a digest, wait for the store to receive that digest,
                             // then read and deserialize the block from the store and return it.
@@ -82,7 +82,7 @@ impl Synchronizer {
                                         .as_millis();
                                     requests.insert(digest.clone(), now);
                                     let address = committee
-                                        .address(&origin)
+                                        .address(&author)
                                         .expect("Author of valid block is not in the committee");
                                     let message = ConsensusMessage::SyncRequest(digest.clone(), name);
                                     let message = bincode::serialize(&message)
@@ -141,7 +141,7 @@ impl Synchronizer {
         }
     }
 
-    pub async fn get_block(&mut self, digest: &Digest, origin: &PublicKey) -> ConsensusResult<Option<Block>> {
+    pub async fn get_block(&mut self, digest: &Digest, author: &PublicKey) -> ConsensusResult<Option<Block>> {
         debug!("Getting block {:?}", digest);
         if digest == &Digest::default() {
             return Ok(Some(Block::genesis()));
@@ -150,7 +150,7 @@ impl Synchronizer {
             Some(bytes) => Ok(Some(bincode::deserialize(&bytes)?)),
             None => {
                 let (tx, _rx) = oneshot::channel();
-                if let Err(e) = self.inner_channel.send(SyncMessage::Digest(digest.clone(), origin.clone(), tx)).await {
+                if let Err(e) = self.inner_channel.send(SyncMessage::Digest(digest.clone(), author.clone(), tx)).await {
                     panic!("Failed to send request to synchronizer: {}", e);
                 }
                 Ok(None)
