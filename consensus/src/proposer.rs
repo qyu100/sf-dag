@@ -80,30 +80,13 @@ impl Proposer {
             }
         }
         debug!("Created {:?}", block);
-        
+
         // Send our block to the core for processing.
         self.tx_loopback
             .send(block)
             .await
             .expect("Failed to send block");
-
-        // Control system: Wait for 2f+1 nodes to acknowledge our block before continuing.
-        let mut wait_for_quorum: FuturesUnordered<_> = names
-            .into_iter()
-            .zip(handles.into_iter())
-            .map(|(name, handler)| {
-                let stake = self.committee.stake(&name);
-                Self::waiter(handler, stake)
-            })
-            .collect();
-
-        let mut total_stake = self.committee.stake(&self.name);
-        while let Some(stake) = wait_for_quorum.next().await {
-            total_stake += stake;
-            if total_stake >= self.committee.quorum_threshold() {
-                break;
-            }
-        }
+        
     }
 
     async fn run(&mut self) {

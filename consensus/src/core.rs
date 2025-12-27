@@ -266,7 +266,6 @@ impl Core {
 
             self.handle_ready(&ready).await?;
 
-
             if self.name == self.leader_elector.get_leader(self.round) {
                 debug!("leader of round {}", self.round);
                 self.generate_proposal(None).await;
@@ -376,19 +375,21 @@ impl Core {
     #[async_recursion]
     async fn process_own_block(&mut self, block: &Block) -> ConsensusResult<()> {
 
-        debug!("Broadcasting {:?}", block);
-        let (names, addresses): (Vec<_>, _) = self
-            .committee
-            .broadcast_addresses(&self.name)
-            .iter()
-            .cloned()
-            .unzip();
-        let message = bincode::serialize(&ConsensusMessage::Propose(block.clone()))
-            .expect("Failed to serialize block");
-        let handles = self
-            .network
-            .broadcast(addresses, Bytes::from(message))
-            .await;
+            let message = bincode::serialize(&&ConsensusMessage::Propose(block.clone()))
+                .expect("Failed to serialize vote");
+            let addresses = self
+                .committee
+                .broadcast_addresses(&self.name)
+                .into_iter()
+                .map(|(_, x)| x)
+                .collect();
+            let handlers = self.network
+                .broadcast(addresses, Bytes::from(message))
+                .await;
+            self.cancel_handlers
+                .entry(block.round)
+                .or_insert_with(Vec::new)
+                .extend(handlers);
 
         self.process_block(block).await
     }
