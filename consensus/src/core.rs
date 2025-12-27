@@ -42,8 +42,6 @@ pub struct Core {
     timer: Timer,
     aggregator: Aggregator,
     pending_decides: HashMap<crypto::Digest, Ready>,
-    // processed_blocks now stores the round in which the block was processed so we can GC old entries
-    processed_blocks: HashMap<crypto::Digest, Round>,
     // garbage collection parameters
     gc_depth: Round,
     network: ReliableSender,
@@ -86,7 +84,6 @@ impl Core {
                 timer: Timer::new(timeout_delay),
                 aggregator: Aggregator::new(committee),
                 pending_decides: HashMap::new(),
-                processed_blocks: HashMap::new(),
                 gc_depth: 50,
                 network: ReliableSender::new(),
                 cancel_handlers: HashMap::new(),
@@ -243,7 +240,7 @@ impl Core {
         if let Some(qc) = self.aggregator.add_vote(vote.clone())? {
             debug!("Assembled {:?}", qc);
 
-            // Process the QC (may advance the round and update high_qc).
+            // Process the QC.
             self.process_qc(&qc).await;
 
             let ready = Ready::new(&vote, self.name, qc.clone(), self.signature_service.clone()).await;
@@ -267,7 +264,6 @@ impl Core {
             self.handle_ready(&ready).await?;
 
             if self.name == self.leader_elector.get_leader(self.round) {
-                debug!("leader of round {}", self.round);
                 self.generate_proposal(None).await;
             }
 
@@ -411,9 +407,6 @@ impl Core {
 
         self.cleanup_proposer(&parent, block).await;
 
-        // Mark this block as processed to avoid re-processing it.
-        self.processed_blocks.insert(block.digest(), block.round);
-
         if let Some(ready) = self.pending_decides.remove(&block.digest()) {
             debug!("Found pending decide for block {}, attempting commit", block.digest());
 
@@ -423,7 +416,6 @@ impl Core {
             }
         }
 
-        // Check if we can vote for this block.
         if let Some(vote) = self.make_vote(block).await {
             debug!("Created {:?}", vote);
             // Broadcast vote1 to all replicas (vote1 all-to-all).
@@ -448,12 +440,6 @@ impl Core {
     }
 
     async fn handle_proposal(&mut self, block: &Block) -> ConsensusResult<()> {
-        // // Skip if we've already processed this block.
-        // let digest = block.digest();
-        // if self.processed_blocks.contains_key(&digest) {
-        //     debug!("Already processed {}, skipping", digest);
-        //     return Ok(());
-        // }
 
         debug!("Processing proposal {:?}", block);
 
@@ -472,9 +458,6 @@ impl Core {
         // Check the block is correctly formed.
         block.verify(&self.committee)?;
 
-        // // Process the QC. This may allow us to advance round.
-        // self.process_qc(&block.qc).await;
-
         // Process the TC (if any). This may also allow us to advance round.
         if let Some(ref tc) = block.tc {
             self.advance_round(tc.round).await;
@@ -488,9 +471,7 @@ impl Core {
         }
 
         // All check pass, we can process this block.
-        self.process_block(block).await?;
-
-        Ok(())
+        self.process_block(block).await
     }
 
     async fn handle_tc(&mut self, tc: TC) -> ConsensusResult<()> {
@@ -517,17 +498,13 @@ impl Core {
         // and receive timeout notifications from our Timeout Manager.
         loop {
             let result = tokio::select! {
-                Some(message) = self.rx_message.recv() => 
-                {
-                // debug!("Core main loop received consensus message: {:?}", message);
-                match message {
+                Some(message) = self.rx_message.recv() => match message {
                     ConsensusMessage::Propose(block) => self.handle_proposal(&block).await,
                     ConsensusMessage::Vote(vote) => self.handle_vote(&vote).await,
                     ConsensusMessage::Ready(ready) => self.handle_ready(&ready).await,
                     ConsensusMessage::Timeout(timeout) => self.handle_timeout(&timeout).await,
                     ConsensusMessage::TC(tc) => self.handle_tc(tc).await,
                     _ => panic!("Unexpected protocol message")
-                }
                 },
                 Some(block) = self.rx_loopback.recv() => self.process_own_block(&block).await,
                 () = &mut self.timer => self.local_timeout_round().await,
@@ -538,14 +515,10 @@ impl Core {
                 Err(ConsensusError::SerializationError(e)) => error!("Store corrupted. {}", e),
                 Err(e) => warn!("{}", e),
             }
-            // Centralized garbage collection executed each loop iteration.
+
             if self.round > self.gc_depth {
                 let gc_round = self.round - self.gc_depth;
-                // drop processed_blocks entries older than gc_round
-                self.processed_blocks.retain(|_, &mut r| r >= gc_round);
-                // drop cancel handlers for old rounds (dropping receivers cancels them)
                 self.cancel_handlers.retain(|r, _| *r >= gc_round);
-                // drop pending decides older than gc_round
                 self.pending_decides.retain(|_, ready| ready.round >= gc_round);
             }
 

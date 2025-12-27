@@ -80,13 +80,13 @@ impl Proposer {
             }
         }
         debug!("Created {:?}", block);
-
+        
         // Send our block to the core for processing.
         self.tx_loopback
             .send(block)
             .await
             .expect("Failed to send block");
-        
+
     }
 
     async fn run(&mut self) {

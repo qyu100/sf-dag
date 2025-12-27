@@ -59,14 +59,11 @@ impl Synchronizer {
                     Some(message) = rx_inner.recv() => match message {
                         SyncMessage::Digest(digest, author, responder) =>
                         {
-                            // when we only have a digest, wait for the store to receive that digest,
-                            // then read and deserialize the block from the store and return it.
                             if pending.insert(digest.clone()) {
-                                // create per-future clones so we don't move `store_copy` or `digest`
                                 let store_for_fut = store_copy.clone();
                                 let d_for_fut = digest.clone();
                                 let fut = async move {
-                                    let res = Self::waiter_digest(store_for_fut, d_for_fut.clone()).await;
+                                    let res = Self::waiter(store_for_fut, d_for_fut.clone()).await;
                                     if let Ok(b) = &res {
                                         let _ = responder.send(Ok(b.clone()));
                                     }
@@ -133,7 +130,7 @@ impl Synchronizer {
         }
     }
 
-    async fn waiter_digest(mut store: Store, wait_on: Digest) -> ConsensusResult<Block> {
+    async fn waiter(mut store: Store, wait_on: Digest) -> ConsensusResult<Block> {
         let _ = store.notify_read(wait_on.to_vec()).await?;
         match store.read(wait_on.to_vec()).await? {
             Some(bytes) => Ok(bincode::deserialize(&bytes)?),
