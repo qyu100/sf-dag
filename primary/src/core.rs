@@ -24,6 +24,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use store::Store;
 use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::time::{sleep, Duration};
 
 // #[cfg(test)]
 // #[path = "tests/core_tests.rs"]
@@ -46,6 +47,7 @@ pub struct Core {
     consensus_round: Arc<AtomicU64>,
     /// The depth of the garbage collector.
     gc_depth: Round,
+    delta: u64,
     /// Sender to loopback messages to self (core)
     tx_primary: Sender<PrimaryMessage>,
     /// Receiver for dag messages (headers, timeouts, votes, certificates).
@@ -105,6 +107,7 @@ impl Core {
         bls_signature_service: BlsSignatureService,
         consensus_round: Arc<AtomicU64>,
         gc_depth: Round,
+        delta: u64,
         tx_primary: Sender<PrimaryMessage>,
         rx_primaries: Receiver<PrimaryMessage>,
         rx_header_waiter: Receiver<HeaderMessage>,
@@ -141,6 +144,7 @@ impl Core {
                 tx_timeout_cert,
                 tx_consensus_header_msg,
                 gc_round: 0,
+                delta: 0,
                 last_voted: HashMap::with_capacity(2 * gc_depth as usize),
                 processing_header_infos: HashMap::new(),
                 //processing_vote_aggregators: HashMap::new(),
@@ -408,6 +412,8 @@ impl Core {
                 &self.committee, 
             self.header_proposers.get(&(support.round-1)).map(|set| set.len()).unwrap_or(0))?
         {   
+            // wait a small timeout before sending to proposer
+            sleep(Duration::from_millis(self.delta)).await;
             // Send it to the `Proposer`.
             self.tx_proposer
                 .send((parents, support.round))
@@ -516,6 +522,7 @@ impl Core {
                 &self.committee, 
             self.header_proposers.get(&(certificate.round-1)).map(|set| set.len()).unwrap_or(0))?
         {   
+            sleep(Duration::from_millis(self.delta)).await;
             // Send it to the `Proposer`.
             self.tx_proposer
                 .send((parents, certificate.round()))

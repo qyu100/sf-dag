@@ -193,6 +193,7 @@ impl Primary {
             bls_signature_service,
             consensus_round.clone(),
             parameters.gc_depth,
+            parameters.delta,
             tx_primary_messages,
             /* rx_primaries */ rx_primary_messages,
             /* rx_header_waiter */ rx_headers_loopback,

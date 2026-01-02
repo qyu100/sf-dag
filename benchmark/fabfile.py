@@ -31,8 +31,9 @@ def local(ctx, debug=True, consensus_only=True, header_size=512):
         'batch_size': header_size,  # bytescd
         'tx_size': bench_params['tx_size'],
         'max_batch_delay': 200,  # ms
-        'propose_rate': 0.8,  # rate of proposing a header
+        'propose_rate': 1,  # rate of proposing a header
         'f_num': 3,
+        'delta': 10,  # ms
     }
     try:
         ret = LocalBench(bench_params, node_params).run(debug, consensus_only)
@@ -127,6 +128,7 @@ def remote(ctx, burst = 50, debug=False, consensus_only=False, header_size=512):
         'leaders_per_round': 67,
         'propose_rate': 1,  # rate of proposing a header
         'f_num': 3,
+        'delta': 50,  # ms
     }
     try:
         Bench(ctx).run(bench_params, node_params, debug, consensus_only)

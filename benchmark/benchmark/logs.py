@@ -147,6 +147,9 @@ class LogParser:
             'gc_depth': int(
                 search(r'Garbage collection depth .* (\d+)', log).group(1)
             ),
+            'delta': int(
+                search(r'Delta .* (\d+)', log).group(1)
+            ),
             'sync_retry_delay': int(
                 search(r'Sync retry delay .* (\d+)', log).group(1)
             ),
@@ -259,6 +262,7 @@ class LogParser:
         header_size = self.configs[0]['header_size']
         max_header_delay = self.configs[0]['max_header_delay']
         gc_depth = self.configs[0]['gc_depth']
+        delta = self.configs[0]['delta']
         sync_retry_delay = self.configs[0]['sync_retry_delay']
         sync_retry_nodes = self.configs[0]['sync_retry_nodes']
         batch_size = self.configs[0]['batch_size']
@@ -305,6 +309,7 @@ class LogParser:
                 f' Header size: {header_size:,} B\n'
                 f' Max header delay: {max_header_delay:,} ms\n'
                 f' GC depth: {gc_depth:,} round(s)\n'
+                f' Delta: {delta:,} ms\n'
                 f' Sync retry delay: {sync_retry_delay:,} ms\n'
                 f' Sync retry nodes: {sync_retry_nodes:,} node(s)\n'
                 f' batch size: {batch_size:,} B\n'

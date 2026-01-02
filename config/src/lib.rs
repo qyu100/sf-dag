@@ -87,6 +87,7 @@ pub struct Parameters {
     pub max_batch_delay: u64,
     pub propose_rate: f64, // rate of proposing a header
     pub f_num: u32, // number of faulty nodes
+    pub delta: u64, // max delay in ms
 }
 
 impl Default for Parameters {
@@ -103,6 +104,7 @@ impl Default for Parameters {
             max_batch_delay: 100,
             propose_rate: 0.1,
             f_num: 3,
+            delta: 50,
         }
     }
 }
@@ -123,6 +125,7 @@ impl Parameters {
         info!("Max batch delay set to {} ms", self.max_batch_delay);
         info!("Transaction size set to {} B", self.tx_size);
         info!("Rate of proposing a header set to {}", self.propose_rate);
+        info!("Delta set to {} ms", self.delta);
     }
 }
 
