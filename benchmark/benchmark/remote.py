@@ -426,7 +426,7 @@ class Bench:
         try:
             hosts_to_tc = [Committee.ip(address) for (node_id, address) in committee.primary_addresses(bench_parameters.faults) if (node_id + 1) % 3 == 0]
             if hosts_to_tc:
-                Print.info('Applying TC delay to primaries where node_id % 3 == 0...')
+                Print.info('Applying TC delay to primaries where (node_id + 1) % 3 == 0...')
                 await self._set_tc_filter(hosts_to_tc, delay_ms=bench_parameters.delay)
         except Exception as e:
             Print.warn(f'Failed to apply TC filter to subset of primaries: {e}')
@@ -557,8 +557,7 @@ class Bench:
         Print.info('Setting TC filter...')
         # Remove any existing qdisc first to avoid stacking delays, then add the desired netem rule.
         cmd = [
-            f'sudo tc qdisc del dev {iface} root || true',
-            f'sudo tc qdisc add dev {iface} root netem delay {delay_ms}ms',
+            f'sudo tc qdisc replace dev {iface} root netem delay {delay_ms}ms'
         ]
 
         tc_filter_cmd = ' && '.join(cmd)
