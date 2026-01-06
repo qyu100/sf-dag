@@ -28,6 +28,11 @@ class LogParser:
         self.consensus_only = consensus_only
         self.burst = burst
         self.faults = faults
+        # Initialize attributes that may be populated later by _parse_primaries
+        # to avoid AttributeError in result() if parsing fails or returns older shape.
+        self.dag_rounds = []
+        self.total_proposer_origins = 0
+
         if isinstance(faults, int):
             self.committee_size = len(primaries) + int(faults)
         else:
@@ -52,7 +57,12 @@ class LogParser:
         except (ValueError, IndexError, AttributeError) as e:
             raise ParseError(f'Failed to parse nodes\' logs: {e}')
         
-        proposals, commits, self.configs, primary_ips, leader_commits, non_leader_commits, self.received_samples, sizes = zip(*results)
+        # _parse_primaries now returns two extra values: the max dag round and the per-primary
+        # sum of 'origins from header_proposers' found in that primary's log.
+        proposals, commits, self.configs, primary_ips, leader_commits, non_leader_commits, self.received_samples, sizes, dag_rounds, proposer_origins = zip(*results)
+        # Store dag_rounds and the per-primary proposer origins so summaries can reference them.
+        self.dag_rounds = list(dag_rounds)
+        self.total_proposer_origins = sum(proposer_origins)
         self.proposals = self._merge_results([x.items() for x in proposals])
         self.commits = self._merge_results([x.items() for x in commits])
         self.leader_commits = self._merge_results([x.items() for x in leader_commits])
@@ -162,11 +172,22 @@ class LogParser:
             'transaction_size': int(
                 search(r'Transaction size .* (\d+)', log).group(1)
             ),
+            'delta': int(
+                search(r'Network delay .* (\d+)', log).group(1)
+            ),
         }
 
         ip = search(r'booted on (\d+.\d+.\d+.\d+)', log).group(1)
 
-        return proposals, commits, configs, ip, leader_commits, non_leader_commits, samples, sizes
+        # Detect the maximum DAG round reached in this primary's log (if any).
+        tmp_rounds = findall(r'Dag moved to round (\d+)', log)
+        max_round = max((int(r) for r in tmp_rounds), default=0)
+
+        # Detect and sum occurrences of the aggregator info log 'N origins from header_proposers'.
+        tmp_proposer_lines = findall(r'(\d+) origins from header_proposers', log)
+        proposer_origins_sum = sum(int(x) for x in tmp_proposer_lines) if tmp_proposer_lines else 0
+
+        return proposals, commits, configs, ip, leader_commits, non_leader_commits, samples, sizes, max_round, proposer_origins_sum
 
     # def _parse_workers(self, log):
     #     if search(r'(?:panic|Error)', log) is not None:
@@ -263,6 +284,7 @@ class LogParser:
         sync_retry_nodes = self.configs[0]['sync_retry_nodes']
         batch_size = self.configs[0]['batch_size']
         max_batch_delay = self.configs[0]['max_batch_delay']
+        delta = self.configs[0]['delta']
 
         consensus_latency = self._consensus_latency() * 1_000
         leader_consensus_latency = self._consensus_leader_latency() * 1_000
@@ -309,6 +331,7 @@ class LogParser:
                 f' Sync retry nodes: {sync_retry_nodes:,} node(s)\n'
                 f' batch size: {batch_size:,} B\n'
                 f' Max batch delay: {max_batch_delay:,} ms\n'
+                f' delta: {delta:,} ms\n'
                 '\n'
                 ' + RESULTS:\n'
                 f' Consensus BLPS: {round(blps_first):,} Block/s\n'
@@ -316,6 +339,8 @@ class LogParser:
                 f' Consensus latency: {round(consensus_latency):,} ms\n'
                 f' Consensus leader latency: {round(leader_consensus_latency):,} ms\n'
                 f' Consensus non leader latency: {round(non_leader_consensus_latency):,} ms\n'
+                f' Max DAG round: {max(self.dag_rounds)}\n'
+                f' Total proposer origins: {self.total_proposer_origins}\n'
                 '-----------------------------------------\n'
             )
         else:
@@ -351,6 +376,8 @@ class LogParser:
                 f' End-to-end TPS: {round(end_to_end_tps):,} tx/s\n'
                 f' End-to-end BPS: {round(end_to_end_bps):,} B/s\n'
                 f' End-to-end latency: {round(end_to_end_latency):,} ms\n'
+                f' Max DAG round: {max(self.dag_rounds)}\n'
+                f' Total proposer origins: {self.total_proposer_origins}\n'
                 '-----------------------------------------\n'
             )
 

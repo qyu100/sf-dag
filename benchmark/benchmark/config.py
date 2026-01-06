@@ -79,6 +79,7 @@ class Committee:
         num_authorities = len(addresses)
 
         for i, (name, hosts) in enumerate(addresses.items()):
+
             # port = base_port
             host = hosts.pop(0)
             consensus_addr = {
@@ -103,6 +104,7 @@ class Committee:
 
             json['authorities'][name] = {
                 # Corresponds to the determination of faulty nodes in primary_addresses.
+                'node_id': i,
                 'bls_pubkey_g2': bls_pubkeys_g2[i],
                 'is_honest': i < num_authorities - faults,
                 'stake': 1,
@@ -217,6 +219,7 @@ class NodeParameters:
             inputs += [json['tx_size']]
             inputs += [json['propose_rate']]
             inputs += [json['f_num']]
+            inputs += [json['delta']]
         except KeyError as e:
             raise ConfigError(f'Malformed parameters: missing key {e}')
 

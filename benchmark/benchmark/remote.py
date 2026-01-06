@@ -346,7 +346,7 @@ class Bench:
         tasks = []
         
         for i, addresses in enumerate(workers_addresses):
-            for (id, address) in addresses:
+            for (node_id, id, address) in addresses:
                 host = Committee.ip(address)
                 cmd = CommandMaker.run_client(
                     address,
@@ -355,7 +355,7 @@ class Bench:
                     rate_share,
                     [x for y in workers_addresses for _, x in y]
                 )
-                log_file = PathMaker.client_log_file(i, int(id))
+                log_file = PathMaker.client_log_file(int(node_id), int(id))
                 connection = connections[host]
                 tasks.append(self._run_on_host(host, cmd, log_file, connection))
         
@@ -366,17 +366,17 @@ class Bench:
         Print.info('Booting primaries...')
         tasks = []
 
-        for i, address in enumerate(committee.primary_addresses(faults)):
+        for i, (node_id,address) in enumerate(committee.primary_addresses(faults)):
             host = Committee.ip(address)
             cmd = CommandMaker.run_primary(
-                PathMaker.ed_key_file(i),
-                PathMaker.bls_key_file(i),
+                PathMaker.ed_key_file(node_id),
+                PathMaker.bls_key_file(node_id),
                 PathMaker.committee_file(),
-                PathMaker.db_path(i),
+                PathMaker.db_path(node_id),
                 PathMaker.parameters_file(),
                 debug=debug
             )
-            log_file = PathMaker.primary_log_file(i)
+            log_file = PathMaker.primary_log_file(node_id)
             connection = connections[host]
             tasks.append(self._run_on_host(host, cmd, log_file, connection))
         
@@ -387,18 +387,18 @@ class Bench:
         tasks = []
 
         for i, addresses in enumerate(workers_addresses):
-            for (id, address) in addresses:
+            for (node_id, id, address) in addresses:
                 host = Committee.ip(address)
                 cmd = CommandMaker.run_worker(
-                    PathMaker.ed_key_file(i),
-                    PathMaker.bls_key_file(i),
+                    PathMaker.ed_key_file(node_id),
+                    PathMaker.bls_key_file(node_id),
                     PathMaker.committee_file(),
-                    PathMaker.db_path(i, id),
+                    PathMaker.db_path(node_id, id),
                     PathMaker.parameters_file(),
                     id,  # The worker's id.
                     debug=debug
                 )
-                log_file = PathMaker.worker_log_file(i, id)
+                log_file = PathMaker.worker_log_file(node_id, id)
                 connection = connections[host]
                 tasks.append(self._run_on_host(host, cmd, log_file, connection))
         
@@ -421,7 +421,17 @@ class Bench:
         # Run the primaries (except the faulty ones).
         primaries = self._run_primaries(committee, hosts_to_connections, bench_parameters.faults, debug)
         await primaries
-        
+
+        # Apply TC delay to primaries whose node_id % 3 == 0
+        try:
+            hosts_to_tc = [Committee.ip(address) for (node_id, address) in committee.primary_addresses(bench_parameters.faults) if node_id % 3 == 0]
+            if hosts_to_tc:
+                Print.info('Applying TC delay to primaries where node_id % 3 == 0...')
+                # default iface and delay are fine, override by passing args if needed
+                self.set_tc_filter(hosts_to_tc)
+        except Exception as e:
+            Print.warn(f'Failed to apply TC filter to subset of primaries: {e}')
+
         if not consensus_only:
             # Run the clients (they will wait for the nodes to be ready).
             # Filter all faulty nodes from the client addresses (or they will wait
@@ -492,10 +502,10 @@ class Bench:
         tasks = []
 
         print('Downloading primaries logs...')
-        for i, address in enumerate(primary_addresses):
+        for i, (node_id, address) in enumerate(primary_addresses):
             host = Committee.ip(address)
-            src = PathMaker.primary_log_file(i)
-            dest = PathMaker.primary_log_file(i)
+            src = PathMaker.primary_log_file(node_id)
+            dest = PathMaker.primary_log_file(node_id)
             connection = hosts_to_connections[host]
             tasks.append(self._download_log(host, connection, src, dest))
             
@@ -507,15 +517,55 @@ class Bench:
 
         print('Downloading client logs...')
         for i, addresses in enumerate(workers_addresses):
-            for j, address in addresses:
+            for (node_id,id, address) in addresses:
                 host = Committee.ip(address)
-                src = PathMaker.client_log_file(i, int(j))
-                dest = PathMaker.client_log_file(i, int(j))
+                src = PathMaker.client_log_file(node_id, int(id))
+                dest = PathMaker.client_log_file(node_id, int(id))
                 connection = hosts_to_connections[host]
                 tasks.append(self._download_log(host, connection, src, dest))
             
         await self._gather_and_parse(tasks, 'Download Client Logs')
+    
+    def set_tc_filter(self, hosts=None, iface='ens4', delay_ms=100):
+        """Apply a netem delay to a set of hosts.
+
+        - hosts: optional flat list of IPs (or dict zone->ips). If None, use all hosts.
+        - iface: network interface name on the remote machines (default 'ens4').
+        - delay_ms: delay in milliseconds to apply.
+        """
+        asyncio.get_event_loop().run_until_complete(self._set_tc_filter(hosts, iface, delay_ms))
+
+    async def _filter_one(self, host, connection, cmd):
+        try:
+            result = await connection.run(cmd)
+            return host, result
+        except Exception as e:
+            return host, Exception(f'Failed to perform filter action on {host} because of {e}')
         
+    async def _set_tc_filter(self, hosts=None, iface='ens4', delay_ms=100):
+        # Determine target hosts
+        if hosts is None:
+            hosts = self.manager.hosts(flat=True)
+        # Allow passing zone->ips dict
+        if isinstance(hosts, dict):
+            hosts = [x for y in hosts.values() for x in y]
+        # Filter out falsy entries
+        hosts = [h for h in hosts if h]
+
+        hosts_and_connections = await self._try_connect_all(hosts)
+        hosts_to_connections = { h: c for h, c in hosts_and_connections }
+
+        Print.info('Setting TC filter...')
+        # Use a robust root netem qdisc command
+        cmd = [
+            f'sudo tc qdisc add dev {iface} root netem delay {delay_ms}ms',
+        ]
+
+        tc_filter_cmd = ' && '.join(cmd)
+
+        tasks = [ self._filter_one(h, c, tc_filter_cmd) for h, c in hosts_to_connections.items() ]
+        await self._gather_and_parse(tasks, 'Set')
+
     async def _configure_one(self, host, id, connection, update=True):
         try: 
             if update:

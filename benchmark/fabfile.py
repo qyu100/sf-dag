@@ -33,6 +33,7 @@ def local(ctx, debug=True, consensus_only=True, header_size=512):
         'max_batch_delay': 200,  # ms
         'propose_rate': 0.8,  # rate of proposing a header
         'f_num': 3,
+        'delta': 300,  # network delay in ms
     }
     try:
         ret = LocalBench(bench_params, node_params).run(debug, consensus_only)
@@ -40,6 +41,14 @@ def local(ctx, debug=True, consensus_only=True, header_size=512):
     except BenchError as e:
         Print.error(e)
 
+@task
+def set_filter(ctx):
+    '''Set TC filter'''
+    try:
+        Bench(ctx).set_tc_filter()
+    except BenchError as e:
+        Print.error(e)
+        
 
 @task
 def create(ctx, nodes=2):
@@ -127,6 +136,7 @@ def remote(ctx, burst = 50, debug=False, consensus_only=False, header_size=512):
         'leaders_per_round': 67,
         'propose_rate': 1,  # rate of proposing a header
         'f_num': 3,
+        'delta': 100,  # network delay in ms
     }
     try:
         Bench(ctx).run(bench_params, node_params, debug, consensus_only)

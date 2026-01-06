@@ -87,6 +87,7 @@ pub struct Parameters {
     pub max_batch_delay: u64,
     pub propose_rate: f64, // rate of proposing a header
     pub f_num: u32, // number of faulty nodes
+    pub delta: u64, // network delay in ms
 }
 
 impl Default for Parameters {
@@ -103,6 +104,7 @@ impl Default for Parameters {
             max_batch_delay: 100,
             propose_rate: 0.1,
             f_num: 3,
+            delta: 0,
         }
     }
 }
@@ -123,6 +125,7 @@ impl Parameters {
         info!("Max batch delay set to {} ms", self.max_batch_delay);
         info!("Transaction size set to {} B", self.tx_size);
         info!("Rate of proposing a header set to {}", self.propose_rate);
+        info!("Network delay set to {} ms", self.delta);
     }
 }
 
@@ -146,6 +149,7 @@ pub struct WorkerAddresses {
 
 #[derive(Clone, Deserialize)]
 pub struct Authority {
+    pub node_id: u32,
     pub bls_pubkey_g2: PublicKeyShareG2,
     /// The voting power of this authority.
     pub stake: Stake,
@@ -182,6 +186,10 @@ impl Committee {
         committee
     }
 
+    pub fn get_node_id(&self,name: &PublicKey) -> u32 {
+        self.authorities.get(name).unwrap().node_id
+    }
+
     /// Returns the number of authorities.
     pub fn size(&self) -> usize {
         self.authorities.len()
@@ -209,6 +217,12 @@ impl Committee {
         2 * self.f_num + 1
     }
 
+    /// Returns the stake required to reach a blocking set (f+1).
+    pub fn blocking_threshold(&self) -> Stake {
+        // If N = 3f + 1 + k (0 <= k < 3)
+        self.f_num + 1
+    }
+
     /// Returns the stake required to reach availability (f+1).
     pub fn validity_threshold(&self) -> Stake {
         // If N = 3f + 1 + k (0 <= k < 3)
@@ -220,22 +234,37 @@ impl Committee {
     /// Returns a leader node in a round-robin fashion.
     /// This does not have to be changed because it works for odd and even numbers.
     pub fn leader(&self, seed: usize) -> PublicKey {
-        let mut keys: Vec<_> = self.authorities.keys().cloned().collect();
-        keys.sort();
-        keys[seed % self.size()]
+        let mut sorted_keys: Vec<_> = self.authorities
+            .iter()
+            .map(|(pubkey, authority)| (authority.node_id, pubkey.clone()))
+            .collect();
+        sorted_keys.sort_by_key(|&(node_id, _)| node_id);
+
+        // Select only nodes with node_id % 3 != 0
+        let mut selected: Vec<PublicKey> = Vec::new();
+        for (node_id, key) in sorted_keys.iter() {
+            if (node_id+1) % 3 != 0 {
+                selected.push(key.clone());
+            }
+        }
+
+        selected[seed % selected.len()].clone()
     }
 
-    pub fn header_proposers(&self, seed: usize, propose_rate: f64) -> Vec<PublicKey> {
-        let mut keys: Vec<PublicKey> = self.authorities.keys().cloned().collect();
-        keys.sort();
-        
-        let n = keys.len();
-        let k = (propose_rate * n as f64).floor() as usize;
+    pub fn header_proposers(&self) -> Vec<PublicKey> {
+        // Collect authorities sorted by node_id and keep only those with node_id % 3 != 0
+        let mut sorted: Vec<_> = self
+            .authorities
+            .iter()
+            .map(|(pubkey, authority)| (authority.node_id, pubkey.clone()))
+            .collect();
+        sorted.sort_by_key(|&(node_id, _)| node_id);
 
-        let mut rng = StdRng::seed_from_u64(seed as u64);
-
-        keys.shuffle(&mut rng);
-        keys.truncate(k);
+        let mut keys: Vec<PublicKey> = sorted
+            .into_iter()
+            .filter(|(node_id, _)| (node_id+1) % 3 != 0)
+            .map(|(_, key)| key)
+            .collect();
 
         keys
     }
