@@ -19,7 +19,8 @@ def local(ctx, debug=True, consensus_only=True, header_size=512):
         'rate': 100_000,
         'tx_size': 512,
         'duration': 10,
-        "burst" : 50
+        "burst" : 50,
+        "delay": 0
     }
     node_params = {
         'consensus_only': consensus_only,
@@ -48,7 +49,7 @@ def set_filter(ctx):
         Bench(ctx).set_tc_filter()
     except BenchError as e:
         Print.error(e)
-        
+
 
 @task
 def create(ctx, nodes=2):
@@ -117,6 +118,7 @@ def remote(ctx, burst = 50, debug=False, consensus_only=False, header_size=512):
         'duration': 60,
         'runs': 1,
         'burst' : [burst],
+        'delay': 100
     }
 
     nodes = bench_params['nodes']

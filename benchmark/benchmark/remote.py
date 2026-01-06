@@ -353,7 +353,7 @@ class Bench:
                     bench_parameters.tx_size,
                     burst,
                     rate_share,
-                    [x for y in workers_addresses for _, x in y]
+                    [x for y in workers_addresses for _, _, x in y]
                 )
                 log_file = PathMaker.client_log_file(int(node_id), int(id))
                 connection = connections[host]
@@ -427,8 +427,7 @@ class Bench:
             hosts_to_tc = [Committee.ip(address) for (node_id, address) in committee.primary_addresses(bench_parameters.faults) if node_id % 3 == 0]
             if hosts_to_tc:
                 Print.info('Applying TC delay to primaries where node_id % 3 == 0...')
-                # default iface and delay are fine, override by passing args if needed
-                self.set_tc_filter(hosts_to_tc)
+                await self._set_tc_filter(hosts_to_tc, delay_ms=bench_parameters.delay)
         except Exception as e:
             Print.warn(f'Failed to apply TC filter to subset of primaries: {e}')
 
@@ -541,7 +540,7 @@ class Bench:
             return host, result
         except Exception as e:
             return host, Exception(f'Failed to perform filter action on {host} because of {e}')
-        
+
     async def _set_tc_filter(self, hosts=None, iface='ens4', delay_ms=100):
         # Determine target hosts
         if hosts is None:
@@ -556,8 +555,9 @@ class Bench:
         hosts_to_connections = { h: c for h, c in hosts_and_connections }
 
         Print.info('Setting TC filter...')
-        # Use a robust root netem qdisc command
+        # Remove any existing qdisc first to avoid stacking delays, then add the desired netem rule.
         cmd = [
+            f'sudo tc qdisc del dev {iface} root || true',
             f'sudo tc qdisc add dev {iface} root netem delay {delay_ms}ms',
         ]
 
