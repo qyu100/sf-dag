@@ -424,7 +424,7 @@ class Bench:
 
         # Apply TC delay to primaries whose node_id % 3 == 0
         try:
-            hosts_to_tc = [Committee.ip(address) for (node_id, address) in committee.primary_addresses(bench_parameters.faults) if node_id % 3 == 0]
+            hosts_to_tc = [Committee.ip(address) for (node_id, address) in committee.primary_addresses(bench_parameters.faults) if (node_id + 1) % 3 == 0]
             if hosts_to_tc:
                 Print.info('Applying TC delay to primaries where node_id % 3 == 0...')
                 await self._set_tc_filter(hosts_to_tc, delay_ms=bench_parameters.delay)
