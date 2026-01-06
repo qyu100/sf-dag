@@ -79,6 +79,7 @@ class Committee:
         num_authorities = len(addresses)
 
         for i, (name, hosts) in enumerate(addresses.items()):
+
             # port = base_port
             host = hosts.pop(0)
             consensus_addr = {
@@ -103,6 +104,7 @@ class Committee:
 
             json['authorities'][name] = {
                 # Corresponds to the determination of faulty nodes in primary_addresses.
+                'node_id': i,
                 'bls_pubkey_g2': bls_pubkeys_g2[i],
                 'is_honest': i < num_authorities - faults,
                 'stake': 1,
@@ -122,7 +124,8 @@ class Committee:
         addresses = []
         good_nodes = self.size() - faults
         for authority in list(self.json['authorities'].values())[:good_nodes]:
-            addresses += [authority['primary']['primary_to_primary']]
+            # Return tuple (node_id, primary_address) so callers can access node id and address
+            addresses.append((authority['node_id'], authority['primary']['primary_to_primary']))
         return addresses
 
     def workers_addresses(self, faults=0):
@@ -132,8 +135,11 @@ class Committee:
         good_nodes = self.size() - faults
         for authority in list(self.json['authorities'].values())[:good_nodes]:
             authority_addresses = []
+            node_id = authority['node_id']
             for id, worker in authority['workers'].items():
-                authority_addresses += [(id, worker['transactions'])]
+                # Return tuple (node_id, worker_id, worker_address) so callers can access
+                # both the authority node id and the worker id/address.
+                authority_addresses += [(node_id, int(id), worker['transactions'])]
             addresses.append(authority_addresses)
         return addresses
 
@@ -218,8 +224,8 @@ class NodeParameters:
         except KeyError as e:
             raise ConfigError(f'Malformed parameters: missing key {e}')
 
-        if not all(isinstance(x, int) for x in inputs):
-            raise ConfigError('Invalid parameters type')
+        # if not all(isinstance(x, int) for x in inputs):
+        #     raise ConfigError('Invalid parameters type')
 
         self.json = json
 
@@ -261,6 +267,8 @@ class BenchParameters:
             self.runs = int(json['runs']) if 'runs' in json else 1
 
             self.burst = json['burst']
+
+            self.delay = int(json['delay']) if 'delay' in json else 100
             
         except KeyError as e:
             raise ConfigError(f'Malformed bench parameters: missing key {e}')

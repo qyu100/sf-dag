@@ -272,7 +272,7 @@ impl Proposer {
 
                 // Advance to the next round.
                 self.round += 1;
-                debug!("Dag moved to round {}", self.round);
+                info!("Dag moved to round {}", self.round);
 
                 // Make a new header.
                 self.make_header().await;

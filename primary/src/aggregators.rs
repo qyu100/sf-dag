@@ -4,7 +4,7 @@ use crate::messages::{Certificate, NoVoteCert, NoVoteMsg, Timeout, TimeoutCert, 
 use blsttc::{PublicKeyShareG2, SignatureShareG1};
 use config::{Committee, Stake};
 use crypto::{aggregate_sign, PublicKey, Signature};
-use log::debug;
+use log::{debug, info};
 use std::collections::HashSet;
 
 /// Aggregates votes for a particular header into a certificate.
@@ -71,6 +71,7 @@ pub struct CertificatesAggregator {
     weight: Stake,
     certificates: Vec<Certificate>,
     used: HashSet<PublicKey>,
+    slow_nodes_round: usize,
 }
 
 impl CertificatesAggregator {
@@ -79,6 +80,7 @@ impl CertificatesAggregator {
             weight: 0,
             certificates: Vec::new(),
             used: HashSet::new(),
+            slow_nodes_round: 0,
         }
     }
 
@@ -98,6 +100,9 @@ impl CertificatesAggregator {
 
         self.certificates.push(certificate.clone());
         self.weight += committee.stake(&origin);
+        if !committee.header_proposers().contains(&origin) {
+            self.slow_nodes_round += 1;
+        }
 
         let leader = committee.leader(round as usize);
         if !self.used.contains(&leader) {
@@ -106,6 +111,9 @@ impl CertificatesAggregator {
 
         if self.weight >= committee.quorum_threshold() {
             self.weight = 0; // Ensures quorum is only reached once.
+            info!("{} origins from non_header_proposers", self.slow_nodes_round);
+            // Reset proposer-origin counter for the next epoch.
+            self.slow_nodes_round = 0;
             return Ok(Some(self.certificates.drain(..).collect()));
         }
         Ok(None)

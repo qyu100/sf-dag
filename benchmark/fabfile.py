@@ -10,7 +10,7 @@ from benchmark.remote import Bench, BenchError
 
 
 @task
-def local(ctx, debug=False, consensus_only=False, header_size=512):
+def local(ctx, debug=False, consensus_only=True, header_size=512):
     ''' Run benchmarks on localhost '''
     bench_params = {
         'faults': 0,
@@ -19,7 +19,8 @@ def local(ctx, debug=False, consensus_only=False, header_size=512):
         'rate': 100_000,
         'tx_size': 512,
         'duration': 20,
-        "burst" : 50
+        "burst" : 50,
+        "delay" : 0,
     }
     node_params = {
         'consensus_only': consensus_only,
@@ -94,7 +95,7 @@ def install(ctx):
 
 
 @task
-def remote(ctx, burst = 50, debug=False, consensus_only=False, header_size=512):
+def remote(ctx, burst = 50, debug=False, consensus_only=True, header_size=512):
     ''' Run benchmarks on GCP '''
     bench_params = {
         'faults': 0,
@@ -106,6 +107,7 @@ def remote(ctx, burst = 50, debug=False, consensus_only=False, header_size=512):
         'duration': 60,
         'runs': 1,
         'burst' : [burst],
+        'delay' : 100
     }
 
     nodes = bench_params['nodes']

@@ -139,6 +139,7 @@ pub struct WorkerAddresses {
 
 #[derive(Clone, Deserialize)]
 pub struct Authority {
+    pub node_id: u32,
     pub bls_pubkey_g2: PublicKeyShareG2,
     /// The voting power of this authority.
     pub stake: Stake,
@@ -171,6 +172,10 @@ impl Committee {
             sorted_keys: keys,
         };
         committee
+    }
+
+    pub fn get_node_id(&self,name: &PublicKey) -> u32 {
+        self.authorities.get(name).unwrap().node_id
     }
 
     /// Returns the number of authorities.
@@ -208,13 +213,44 @@ impl Committee {
         (total_votes + 2) / 3
     }
 
+    pub fn header_proposers(&self) -> Vec<PublicKey> {
+        // Collect authorities sorted by node_id and keep only those with node_id % 3 != 0
+        let mut sorted: Vec<_> = self
+            .authorities
+            .iter()
+            .map(|(pubkey, authority)| (authority.node_id, pubkey.clone()))
+            .collect();
+        sorted.sort_by_key(|&(node_id, _)| node_id);
+
+        let mut keys: Vec<PublicKey> = sorted
+            .into_iter()
+            .filter(|(node_id, _)| (node_id+1) % 3 != 0)
+            .map(|(_, key)| key)
+            .collect();
+
+        keys
+    }
+    
     /// Returns a leader node in a round-robin fashion.
     /// This does not have to be changed because it works for odd and even numbers.
     pub fn leader(&self, seed: usize) -> PublicKey {
-        let mut keys: Vec<_> = self.authorities.keys().cloned().collect();
-        keys.sort();
-        keys[seed % self.size()]
+        let mut sorted_keys: Vec<_> = self.authorities
+            .iter()
+            .map(|(pubkey, authority)| (authority.node_id, pubkey.clone()))
+            .collect();
+        sorted_keys.sort_by_key(|&(node_id, _)| node_id);
+
+        // Select only nodes with node_id % 3 != 0
+        let mut selected: Vec<PublicKey> = Vec::new();
+        for (node_id, key) in sorted_keys.iter() {
+            if (node_id+1) % 3 != 0 {
+                selected.push(key.clone());
+            }
+        }
+
+        selected[seed % selected.len()].clone()
     }
+
 
     pub fn sub_leaders(&self, seed: usize, num_leaders: usize) -> Vec<PublicKey> {
         let mut keys: Vec<_> = self.authorities.keys().cloned().collect();
