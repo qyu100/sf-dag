@@ -59,10 +59,10 @@ class LogParser:
         
         # _parse_primaries now returns two extra values: the max dag round and the per-primary
         # sum of 'origins from header_proposers' found in that primary's log.
-        proposals, commits, self.configs, primary_ips, leader_commits, non_leader_commits, self.received_samples, sizes, dag_rounds, proposer_origins = zip(*results)
+        proposals, commits, self.configs, primary_ips, leader_commits, non_leader_commits, self.received_samples, sizes, dag_rounds, non_proposer_origins = zip(*results)
         # Store dag_rounds and the per-primary proposer origins so summaries can reference them.
         self.dag_rounds = list(dag_rounds)
-        self.total_proposer_origins = sum(proposer_origins)
+        self.total_non_proposer_origins = sum(non_proposer_origins)
         self.proposals = self._merge_results([x.items() for x in proposals])
         self.commits = self._merge_results([x.items() for x in commits])
         self.leader_commits = self._merge_results([x.items() for x in leader_commits])
@@ -184,10 +184,10 @@ class LogParser:
         max_round = max((int(r) for r in tmp_rounds), default=0)
 
         # Detect and sum occurrences of the aggregator info log 'N origins from header_proposers'.
-        tmp_proposer_lines = findall(r'(\d+) origins from header_proposers', log)
-        proposer_origins_sum = sum(int(x) for x in tmp_proposer_lines) if tmp_proposer_lines else 0
+        tmp_non_proposer_lines = findall(r'(\d+) origins from non_header_proposers', log)
+        non_proposer_origins_sum = sum(int(x) for x in tmp_non_proposer_lines) if tmp_non_proposer_lines else 0
 
-        return proposals, commits, configs, ip, leader_commits, non_leader_commits, samples, sizes, max_round, proposer_origins_sum
+        return proposals, commits, configs, ip, leader_commits, non_leader_commits, samples, sizes, max_round, non_proposer_origins_sum
 
     # def _parse_workers(self, log):
     #     if search(r'(?:panic|Error)', log) is not None:
@@ -340,7 +340,7 @@ class LogParser:
                 f' Consensus leader latency: {round(leader_consensus_latency):,} ms\n'
                 f' Consensus non leader latency: {round(non_leader_consensus_latency):,} ms\n'
                 f' Max DAG round: {max(self.dag_rounds)}\n'
-                f' Total proposer origins: {self.total_proposer_origins}\n'
+                f' Total non proposer origins: {self.total_non_proposer_origins}\n'
                 '-----------------------------------------\n'
             )
         else:

@@ -74,7 +74,7 @@ pub struct CertificatesAggregator {
     supports: Vec<Support>,
     used: HashSet<PublicKey>,
     certificate_weight: Stake,
-    proposer_origins_count: usize,
+    slow_nodes_round: usize,
 }
 
 impl CertificatesAggregator {
@@ -85,7 +85,7 @@ impl CertificatesAggregator {
             supports: Vec::new(),
             used: HashSet::new(),
             certificate_weight: 0,
-            proposer_origins_count: 0,
+            slow_nodes_round: 0,
         }
     }
 
@@ -107,8 +107,8 @@ impl CertificatesAggregator {
         self.certificates.push(certificate.clone());
         self.weight += committee.stake(&origin);
         self.certificate_weight += committee.stake(&origin);
-        if committee.header_proposers().contains(&origin) {
-            self.proposer_origins_count += 1;
+        if !committee.header_proposers().contains(&origin) {
+            self.slow_nodes_round += 1;
         }
 
         let leader = committee.leader(round as usize);
@@ -131,10 +131,10 @@ impl CertificatesAggregator {
             self.weight = 0;
             let parents: Vec<Certificate> = self.certificates.drain(..).collect();
             // Log only the requested summary: how many origins contributing to this aggregator
-            // are header proposers. This count was tracked incrementally in proposer_origins_count.
-            info!("{} origins from header_proposers", self.proposer_origins_count);
+            // are header proposers. This count was tracked incrementally in slow_nodes_round.
+            info!("{} origins from non_header_proposers", self.slow_nodes_round);
             // Reset proposer-origin counter for the next epoch.
-            self.proposer_origins_count = 0;
+            self.slow_nodes_round = 0;
             msgs.push(ProposerMessage::Parents(parents, certificate.round()));
             return Ok(Some(msgs));
         }
@@ -164,8 +164,8 @@ impl CertificatesAggregator {
         self.supports.push(support.clone());
         self.weight += committee.stake(&origin);
         // Track whether this origin is a header proposer.
-        if committee.header_proposers().contains(&origin) {
-            self.proposer_origins_count += 1;
+        if !committee.header_proposers().contains(&origin) {
+            self.slow_nodes_round += 1;
         }
 
         let leader = committee.leader(round as usize);
@@ -186,8 +186,8 @@ impl CertificatesAggregator {
         {
             self.weight = 0;
             let parents: Vec<Certificate> = self.certificates.drain(..).collect();
-            info!("{} origins from header_proposers", self.proposer_origins_count);
-            self.proposer_origins_count = 0;
+            info!("{} origins from non_header_proposers", self.slow_nodes_round);
+            self.slow_nodes_round = 0;
             msgs.push(ProposerMessage::Parents(parents, support.round));
             return Ok(Some(msgs));
         }
