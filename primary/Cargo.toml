@@ -18,11 +18,15 @@ env_logger = "0.7.1"
 log = "0.4.11"
 async-recursion = "0.3.2"
 async-trait = "0.1.50"
+tiny-keccak = { version = "2.0.1", features = ["sha3"]}
+byteorder = "1.3.2"
 
 crypto = { path = "../crypto" }
 store = { path = "../store" }
 config = { path = "../config" }
 network = { path = "../network" }
+reed-solomon-erasure = "6.0.0"
+hex_fmt = "0.3.0"
 
 [dev-dependencies]
 rand = "0.7.3"

@@ -6,7 +6,7 @@ use config::Comm;
 use config::Export as _;
 use config::Import as _;
 use config::{Committee, KeyPair, Parameters};
-use consensus::Consensus;
+// use consensus::Consensus;
 use env_logger::Env;
 use primary::{Certificate, Primary};
 use store::Store;
@@ -134,14 +134,14 @@ async fn run(matches: &ArgMatches<'_>) -> Result<()> {
                 /* rx_consensus */ rx_feedback,
                 tx_consensus_header,
             );
-            Consensus::spawn(
-                committee,
-                parameters.gc_depth,
-                /* rx_primary */ rx_new_certificates,
-                rx_consensus_header,
-                /* tx_primary */ tx_feedback,
-                tx_output,
-            );
+            // Consensus::spawn(
+            //     committee,
+            //     parameters.gc_depth,
+            //     /* rx_primary */ rx_new_certificates,
+            //     rx_consensus_header,
+            //     /* tx_primary */ tx_feedback,
+            //     tx_output,
+            // );
         }
         _ => unreachable!(),
     }

@@ -90,115 +90,105 @@ impl Synchronizer {
     //     Ok(true)
     // }
 
-    pub async fn deliver_vertex(&mut self, round: Round, header_id: Digest) -> DagResult<()> {
-        self.delivered_parents
-            .entry(round)
-            .or_insert_with(HashSet::new)
-            .insert(header_id);
-        Ok(())
-    }
+    // pub async fn deliver_vertex(&mut self, round: Round, header_id: Digest) -> DagResult<()> {
+    //     self.delivered_parents
+    //         .entry(round)
+    //         .or_insert_with(HashSet::new)
+    //         .insert(header_id);
+    //     Ok(())
+    // }
 
-    pub async fn garbage_collect(&mut self, gc_round: Round) -> DagResult<()> {
-        self.delivered_parents.retain(|k, _| k >= &gc_round);
-        Ok(())
-    }
+    // pub async fn garbage_collect(&mut self, gc_round: Round) -> DagResult<()> {
+    //     self.delivered_parents.retain(|k, _| k >= &gc_round);
+    //     Ok(())
+    // }
 
-    /// Returns the parents of a header if we have them all. If at least one parent is missing,
-    /// we return an empty vector, synchronize with other nodes, and re-schedule processing
-    /// of the header for when we will have all the parents.
-    pub async fn get_parents(&mut self, header_msg: &HeaderType) -> DagResult<Vec<Digest>> {
-        let h_parents: Vec<_>;
-        let round: Round;
+    // /// Returns the parent of a header if we have it. If we don't, we send a request to the `HeaderWaiter` to synchronize the missing parents.
+    // pub async fn get_parent(&mut self, header_info_with_proof: crate::messages::HeaderInfoWithProof) -> DagResult<Option<Digest>> {
+    //     // We only support a single parent in this helper.
+    //     let parent_digest = header_info_with_proof.parent;
+    //     let round = header_info_with_proof.round;
 
-        match header_msg {
-            HeaderType::Header(header) => {
-                h_parents = header.parents.clone();
-                round = header.round - 1;
-            }
-            HeaderType::HeaderInfo(header_info) => {
-                h_parents = header_info.parents.clone();
-                round = header_info.round - 1;
-            }
-        }
+    //     // If parent is genesis, we already have it.
+    //     if self.genesis.iter().any(|(x, _)| x == &parent_digest) {
+    //         return Ok(Some(parent_digest));
+    //     }
 
-        let mut missing = Vec::new();
-        let mut parents = Vec::new();
-        for digest in &h_parents {
-            if let Some(genesis) = self
-                .genesis
-                .iter()
-                .find(|(x, _)| x == digest)
-                .map(|(_, x)| x)
-            {
-                let genesis_header_msg = HeaderType::Header(genesis.clone());
-                parents.push(*digest);
-                continue;
-            }
+    //     // If we've already delivered this parent for the round, return it.
+    //     if let Some(set) = self.delivered_parents.get(&round) {
+    //         if set.contains(&parent_digest) {
+    //             return Ok(Some(parent_digest));
+    //         }
+    //     }
 
-            if let Some(par) = self.delivered_parents.get(&round) {
-                if par.contains(digest) {
-                    parents.push(*digest);
-                    continue;
-                }
-            }
+    //     // Check local storage.
+    //     match self.store.read(parent_digest.to_vec()).await? {
+    //         Some(_bytes) => {
+    //             // Record as delivered and return.
+    //             self.delivered_parents
+    //                 .entry(round)
+    //                 .or_insert_with(HashSet::new)
+    //                 .insert(parent_digest);
+    //             Ok(Some(parent_digest))
+    //         }
+    //         None => {
+    //             // Request the missing parent from peers via the HeaderWaiter and return None to indicate it's missing.
+    //             let missing = vec![parent_digest];
+    //             // Construct a minimal HeaderInfo to send to the waiter.
+    //             let header_info = crate::messages::HeaderInfo {
+    //                 author: header_info_with_proof.author,
+    //                 round: header_info_with_proof.round,
+    //                 payload: Digest::default(),
+    //                 parent: header_info_with_proof.parent,
+    //                 id: header_info_with_proof.id,
+    //                 payload_len: header_info_with_proof.payload_len,
+    //             };
+    //             self.tx_header_waiter
+    //                 .send(WaiterMessage::SyncParents(missing, HeaderType::HeaderInfo(header_info)))
+    //                 .await
+    //                 .expect("Failed to send sync parents request");
+    //             Ok(None)
+    //         }
+    //     }
+    // }
 
-            match self.store.read(digest.to_vec()).await? {
-                Some(h) => {
-                    let header_msg: HeaderType = bincode::deserialize(&h).unwrap();
-                    parents.push(*digest)
-                }
-                None => missing.push(digest.clone()),
-            };
-        }
+    // /// Check whether we have all the ancestors of the certificate. If we don't, send the certificate to
+    // /// the `CertificateWaiter` which will trigger re-processing once we have all the missing data.
+    // pub async fn deliver_certificate(&mut self, certificate: &Certificate) -> DagResult<bool> {
+    //     let key = certificate.header_id.to_vec();
 
-        if missing.is_empty() {
-            return Ok(parents);
-        }
+    //     if let Some(head) = self.store.read(key).await.unwrap() {
+    //         let parents: Vec<_>;
+    //         let header_msg: HeaderType = bincode::deserialize(&head).unwrap();
+    //         match header_msg {
+    //             HeaderType::Header(header) => {
+    //                 parents = header.parents;
+    //             }
+    //             HeaderType::HeaderInfo(header_info) => {
+    //                 parents = header_info.parents;
+    //             }
+    //         }
 
-        self.tx_header_waiter
-            .send(WaiterMessage::SyncParents(missing, header_msg.clone()))
-            .await
-            .expect("Failed to send sync parents request");
-        Ok(Vec::new())
-    }
+    //         for digest in &parents {
+    //             if self.genesis.iter().any(|(x, _)| x == digest) {
+    //                 continue;
+    //             }
 
-    /// Check whether we have all the ancestors of the certificate. If we don't, send the certificate to
-    /// the `CertificateWaiter` which will trigger re-processing once we have all the missing data.
-    pub async fn deliver_certificate(&mut self, certificate: &Certificate) -> DagResult<bool> {
-        let key = certificate.header_id.to_vec();
-
-        if let Some(head) = self.store.read(key).await.unwrap() {
-            let parents: Vec<_>;
-            let header_msg: HeaderType = bincode::deserialize(&head).unwrap();
-            match header_msg {
-                HeaderType::Header(header) => {
-                    parents = header.parents;
-                }
-                HeaderType::HeaderInfo(header_info) => {
-                    parents = header_info.parents;
-                }
-            }
-
-            for digest in &parents {
-                if self.genesis.iter().any(|(x, _)| x == digest) {
-                    continue;
-                }
-
-                if self.store.read(digest.to_vec()).await?.is_none() {
-                    self.tx_certificate_waiter
-                        .send(certificate.clone())
-                        .await
-                        .expect("Failed to send sync certificate request");
-                    return Ok(false);
-                };
-            }
-            Ok(true)
-        } else {
-            self.tx_certificate_waiter
-                .send(certificate.clone())
-                .await
-                .expect("Failed to send sync certificate request");
-            Ok(false)
-        }
-    }
+    //             if self.store.read(digest.to_vec()).await?.is_none() {
+    //                 self.tx_certificate_waiter
+    //                     .send(certificate.clone())
+    //                     .await
+    //                     .expect("Failed to send sync certificate request");
+    //                 return Ok(false);
+    //             };
+    //         }
+    //         Ok(true)
+    //     } else {
+    //         self.tx_certificate_waiter
+    //             .send(certificate.clone())
+    //             .await
+    //             .expect("Failed to send sync certificate request");
+    //         Ok(false)
+    //     }
+    // }
 }

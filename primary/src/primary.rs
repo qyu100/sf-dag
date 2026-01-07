@@ -6,8 +6,8 @@ use crate::garbage_collector::GarbageCollector;
 use crate::header_waiter::HeaderWaiter;
 use crate::helper::Helper;
 use crate::messages::{
-    Certificate, Header, HeaderInfo, HeaderInfoWithCertificate, HeaderWithCertificate, NoVoteMsg,
-    Ready, Timeout, Vote,
+    Certificate, Header, HeaderInfo, HeaderInfoWithCertificate, HeaderWithCertificate,
+    Ready, Timeout, Echo, HeaderInfoWithProof, Decide
 };
 use crate::proposer::Proposer;
 use crate::synchronizer::Synchronizer;
@@ -34,12 +34,13 @@ pub type Round = u64;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum PrimaryMessage {
-    HeaderMsg(HeaderMessage),
+    // HeaderMsg(HeaderMessage),
     Timeout(Timeout),
-    Vote(Vote),
+    Echo(Echo),
     Ready(Ready),
     CertificatesRequest(Vec<Digest>, /* requestor */ PublicKey),
-    PayloadRequest(Digest, PublicKey),
+    HeaderInfoWithProof(HeaderInfoWithProof),
+    Decide(Decide),
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -52,6 +53,7 @@ pub enum HeaderMessage {
 pub enum ConsensusMessage {
     HeaderInfo(HeaderInfo),
     Certificate(Certificate),
+    HeaderInfoWithProof(HeaderInfoWithProof),
 }
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum HeaderType {
@@ -95,7 +97,6 @@ impl Primary {
         let (tx_headers, rx_headers) = channel(CHANNEL_CAPACITY);
         let (tx_timeout, rx_timeout) = channel(CHANNEL_CAPACITY);
         let (tx_timeout_cert, rx_timeout_cert) = channel(CHANNEL_CAPACITY);
-        let (tx_no_vote_cert, rx_no_vote_cert) = channel(CHANNEL_CAPACITY);
         let (tx_sync_headers, rx_sync_headers) = channel(CHANNEL_CAPACITY);
         let (tx_sync_certificates, rx_sync_certificates) = channel(CHANNEL_CAPACITY);
         let (tx_headers_loopback, rx_headers_loopback) = channel(CHANNEL_CAPACITY);
@@ -192,7 +193,6 @@ impl Primary {
             tx_consensus.clone(),
             /* tx_proposer */ tx_parents.clone(),
             tx_timeout_cert,
-            tx_no_vote_cert,
             tx_consensus_header_msg,
         );
 
@@ -205,25 +205,25 @@ impl Primary {
         // Whenever the `Synchronizer` does not manage to validate a header due to missing parent certificates of
         // batch digests, it commands the `HeaderWaiter` to synchronizer with other nodes, wait for their reply, and
         // re-schedule execution of the header once we have all missing data.
-        HeaderWaiter::spawn(
-            name,
-            committee.clone(),
-            store.clone(),
-            consensus_round,
-            parameters.gc_depth,
-            parameters.sync_retry_delay,
-            parameters.sync_retry_nodes,
-            /* rx_synchronizer */ rx_sync_headers,
-            /* tx_core */ tx_headers_loopback,
-        );
+        // HeaderWaiter::spawn(
+        //     name,
+        //     committee.clone(),
+        //     store.clone(),
+        //     consensus_round,
+        //     parameters.gc_depth,
+        //     parameters.sync_retry_delay,
+        //     parameters.sync_retry_nodes,
+        //     /* rx_synchronizer */ rx_sync_headers,
+        //     /* tx_core */ tx_headers_loopback,
+        // );
 
         // The `CertificateWaiter` waits to receive all the ancestors of a certificate before looping it back to the
         // `Core` for further processing.
-        CertificateWaiter::spawn(
-            store.clone(),
-            /* rx_synchronizer */ rx_sync_certificates,
-            /* tx_core */ tx_certificates_loopback,
-        );
+        // CertificateWaiter::spawn(
+        //     store.clone(),
+        //     /* rx_synchronizer */ rx_sync_certificates,
+        //     /* tx_core */ tx_certificates_loopback,
+        // );
 
         // When the `Core` collects enough parent certificates, the `Proposer` generates a new header with new batch
         // digests from our workers and it back to the `Core`.
@@ -240,11 +240,10 @@ impl Primary {
             /* tx_core */ tx_headers,
             /* tx_core_timeout */ tx_timeout,
             rx_timeout_cert,
-            rx_no_vote_cert,
         );
 
         // The `Helper` is dedicated to reply to certificates requests from other primaries.
-        Helper::spawn(committee.clone(), store, rx_cert_requests);
+        // Helper::spawn(committee.clone(), store, rx_cert_requests);
 
         // NOTE: This log entry is used to compute performance.
         info!(

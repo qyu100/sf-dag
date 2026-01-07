@@ -1,6 +1,6 @@
 use crate::batch_maker::Transaction;
 use crate::messages::{
-    Certificate, Header, HeaderWithCertificate, NoVoteCert, NoVoteMsg, Timeout, TimeoutCert,
+    Certificate, Header, HeaderWithCertificate, Timeout, TimeoutCert,
 };
 use crate::primary::Round;
 use config::Committee;
@@ -9,9 +9,9 @@ use crypto::{PublicKey, SignatureService};
 use log::info;
 use log::{debug, warn};
 use std::cmp::Ordering;
-use std::convert::TryInto;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::time::{sleep, Duration, Instant};
+use std::convert::TryInto;
 
 // #[cfg(test)]
 // #[path = "tests/proposer_tests.rs"]
@@ -33,22 +33,19 @@ pub struct Proposer {
     consensus_only: bool,
 
     /// Receives the parents to include in the next header (along with their round number).
-    rx_core: Receiver<(Vec<Certificate>, Round)>,
+    rx_core: Receiver<Certificate>,
     /// Receives the batch digest from our workers.
     rx_workers: Receiver<Vec<Transaction>>,
     /// Sends newly created headers to the `Core`.
-    tx_core: Sender<HeaderWithCertificate>,
+    tx_core: Sender<Header>,
     /// Sends newly created timeouts to the `Core`.
     tx_core_timeout: Sender<Timeout>,
     /// Receives timeout certs from the `Core`.
     rx_timeout_cert: Receiver<(TimeoutCert, Round)>,
-    /// Receives no vote certs from the `Core`.
-    rx_no_vote_cert: Receiver<(NoVoteCert, Round)>,
-
     /// The current round of the dag.
     round: Round,
     /// Holds the certificates' ids waiting to be included in the next header.
-    last_parents: Vec<Certificate>,
+    last_parent: Vec<Certificate>,
     /// Holds the certificate of the last leader (if any).
     last_leader: Option<Certificate>,
     /// Holds the txns waiting to be included in the next header.
@@ -57,8 +54,6 @@ pub struct Proposer {
     payload_size: usize,
     /// Holds the Timeout certificate for the latest round.
     last_timeout_cert: TimeoutCert,
-    /// Holds the latest No Vote Certificate received.
-    last_no_vote_cert: NoVoteCert,
 }
 
 impl Proposer {
@@ -71,12 +66,11 @@ impl Proposer {
         tx_size: usize,
         max_header_delay: u64,
         consensus_only: bool,
-        rx_core: Receiver<(Vec<Certificate>, Round)>,
+        rx_core: Receiver<Certificate>,
         rx_workers: Receiver<Vec<Transaction>>,
-        tx_core: Sender<HeaderWithCertificate>,
+        tx_core: Sender<Header>,
         tx_core_timeout: Sender<Timeout>,
         rx_timeout_cert: Receiver<(TimeoutCert, Round)>,
-        rx_no_vote_cert: Receiver<(NoVoteCert, Round)>,
     ) {
         let genesis = Certificate::genesis(&committee);
         tokio::spawn(async move {
@@ -93,14 +87,12 @@ impl Proposer {
                 tx_core,
                 tx_core_timeout,
                 rx_timeout_cert,
-                rx_no_vote_cert,
                 round: 0,
-                last_parents: genesis,
+                last_parent: genesis,
                 last_leader: None,
                 txns: Vec::new(),
                 payload_size: 0,
                 last_timeout_cert: TimeoutCert::new(0),
-                last_no_vote_cert: NoVoteCert::new(0),
             }
             .run()
             .await;
@@ -122,20 +114,11 @@ impl Proposer {
 
     async fn make_header(&mut self) {
         // Make a new header.
-        // Prepare the timeout and no vote certificates
-        let timeout_cert = if self.last_timeout_cert.round == self.round - 1 {
-            self.last_timeout_cert.clone()
-        } else {
-            TimeoutCert::new(0) // Assuming TimeoutCert::new creates an empty certificate
-        };
-
-        let no_vote_cert = if self.committee.leader((self.round) as usize) == self.name
-            && self.last_no_vote_cert.round == self.round - 1
-        {
-            self.last_no_vote_cert.clone()
-        } else {
-            NoVoteCert::new(0) // Assuming NoVoteCert::new creates an empty certificate
-        };
+        // let timeout_cert = if self.last_timeout_cert.round == self.round - 1 {
+        //     self.last_timeout_cert.clone()
+        // } else {
+        //     TimeoutCert::new(0) // Assuming TimeoutCert::new creates an empty certificate
+        // };
 
         let limit = if self.txns.len() * self.tx_size <= self.header_size {
             self.txns.len()
@@ -145,18 +128,18 @@ impl Proposer {
 
         let mut payload;
         if self.consensus_only {
-            payload = vec![vec![0u8; self.tx_size]; (self.header_size / self.tx_size)];
+            payload = vec![vec![0u8; self.tx_size]; self.header_size / self.tx_size];
         } else {
             payload = self.txns.drain(..limit).collect();
         }
 
-        let parents: Vec<Certificate> = self.last_parents.drain(..).collect();
+        let parent = self.last_parent.pop().expect("no parent available");
 
         let header = Header::new(
             self.name,
             self.round,
             payload,
-            parents.iter().map(|x| x.header_id).collect(),
+            parent.header_id,
         )
         .await;
 
@@ -168,13 +151,11 @@ impl Proposer {
                 header.id,
                 header.payload.len() * self.tx_size
             );
-
             if !self.consensus_only {
-                let tx_ids: Vec<_> = header
+                let tx_ids: Vec<[u8; 8]> = header
                     .payload
-                    .clone()
                     .iter()
-                    .filter(|tx| tx[0] == 0u8 && tx.len() > 8)
+                    .filter(|tx| tx.len() > 8 && tx[0] == 0u8)
                     .filter_map(|tx| tx[1..9].try_into().ok())
                     .collect();
                 for id in tx_ids {
@@ -186,25 +167,25 @@ impl Proposer {
                 }
             }
             // NOTE: This log entry is used to compute performance.
-        }
-        let header_with_parents = HeaderWithCertificate { header, parents };
+        } 
+        // let header_with_parents = HeaderWithCertificate { header, parents };
 
         // Send the new header to the `Core` that will broadcast and process it.
         self.tx_core
-            .send(header_with_parents)
+            .send(header)
             .await
             .expect("Failed to send header");
     }
 
-    /// Update the last leader.
+    // Update the last leader.
     fn update_leader(&mut self) -> bool {
         let leader_name = self.committee.leader(self.round as usize);
         self.last_leader = self
-            .last_parents
+            .last_parent
             .iter()
             .find(|x| x.origin() == leader_name)
             .cloned();
-
+        debug!("Updated leader for round {}: {:?}, {:?}", self.round, self.last_leader, leader_name);
         if let Some(leader) = self.last_leader.as_ref() {
             debug!("Got leader {} for round {}", leader.origin(), self.round);
         }
@@ -214,7 +195,7 @@ impl Proposer {
 
     /// Main loop listening to incoming messages.
     pub async fn run(&mut self) {
-        debug!("Dag starting at round {}", self.round);
+        debug!("Protocol starting at round {}", self.round);
         let mut advance = true;
 
         let timer = sleep(Duration::from_millis(self.max_header_delay));
@@ -227,34 +208,29 @@ impl Proposer {
             // (i) the timer expired (we timed out on the leader or gave up gather votes for the leader),
             // (ii) we have enough digests (minimum header size) and we are on the happy path (we can vote for
             // the leader or the leader has enough votes to enable a commit).
-            let enough_parents = !self.last_parents.is_empty();
+            let enough_parents = !self.last_parent.is_empty();
             let timeout_cert_gathered = self.last_timeout_cert.round == self.round;
             let is_next_leader = self.committee.leader((self.round + 1) as usize) == self.name;
-            let no_vote_cert_gathered = self.last_no_vote_cert.round == self.round;
             let enough_digests = self.payload_size >= self.header_size;
             let timer_expired = timer.is_elapsed();
-
             // TODO: This has to be fixed by sending timeout only once.
             if timer_expired && !timeout_sent {
                 warn!("Timer expired for round {}", self.round);
                 self.make_timeout_msg().await;
                 timeout_sent = true;
             }
-
-            if ((timer_expired
-                && timeout_cert_gathered
-                && (!is_next_leader || no_vote_cert_gathered))
-                || ((enough_digests || self.consensus_only) && advance))
+            if (((enough_digests || self.consensus_only) && advance))
                 && enough_parents
             {
                 // Advance to the next round.
                 self.round += 1;
-                debug!("Dag moved to round {}", self.round);
+                debug!("Protocol moved to round {}", self.round);
 
                 // Make a new header.
-                self.make_header().await;
-                self.payload_size = 0;
-
+                if is_next_leader {
+                    self.make_header().await;
+                    self.payload_size = 0;
+                }
                 // Reschedule the timer.
                 let deadline = Instant::now() + Duration::from_millis(self.max_header_delay);
                 timer.as_mut().reset(deadline);
@@ -262,22 +238,21 @@ impl Proposer {
             }
 
             tokio::select! {
-                Some((parents, round)) = self.rx_core.recv() => {
+                Some(parent) = self.rx_core.recv() => {
+                    debug!("Received parent {:?} for round {}", parent.round(), self.round);
                     // Compare the parents' round number with our current round.
-                    match round.cmp(&self.round) {
+                    match parent.round().cmp(&self.round) {
                         Ordering::Greater => {
                             // We accept round bigger than our current round to jump ahead in case we were
                             // late (or just joined the network).
-                            self.round = round;
-                            self.last_parents = parents;
+                            self.round = parent.round();
+                            self.last_parent = vec![parent];
                         },
                         Ordering::Less => {
                             // Ignore parents from older rounds.
                         },
                         Ordering::Equal => {
-                            // The core gives us the parents the first time they are enough to form a quorum.
-                            // Then it keeps giving us all the extra parents.
-                            self.last_parents.extend(parents)
+                            self.last_parent = vec![parent];
                         }
                     }
 
@@ -306,24 +281,6 @@ impl Proposer {
                         Ordering::Equal => {
                             // TODO: Here we have to create header and include the timeout certificate in the header?
                             self.last_timeout_cert = timeout_cert.clone();
-                        }
-                    }
-                }
-                Some((no_vote_cert, round)) = self.rx_no_vote_cert.recv() => {
-                    match round.cmp(&self.last_no_vote_cert.round) {
-                        Ordering::Greater => {
-                            // We accept round bigger than our current round to jump ahead in case we were
-                            // late (or just joined the network).
-                            self.last_no_vote_cert = no_vote_cert;
-
-                            // TODO: How do we react?
-                        },
-                        Ordering::Less => {
-                            // Ignore parents from older rounds.
-                        },
-                        Ordering::Equal => {
-                            // TODO: Here we have to create header and include the timeout certificate in the header?
-                            self.last_no_vote_cert = no_vote_cert;
                         }
                     }
                 }

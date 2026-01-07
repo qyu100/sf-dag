@@ -13,6 +13,8 @@ mod primary;
 mod proposer;
 mod synchronizer;
 mod worker;
+mod merkle;
+mod coding;
 
 #[cfg(test)]
 #[path = "tests/common.rs"]

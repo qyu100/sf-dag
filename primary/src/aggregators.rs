@@ -1,50 +1,109 @@
 // Copyright(C) Facebook, Inc. and its affiliates.
 use crate::error::{DagError, DagResult};
-use crate::messages::{Certificate, NoVoteCert, NoVoteMsg, Ready, Timeout, TimeoutCert, Vote};
+use crate::merkle::Proof;
+use crate::messages::{Certificate, Ready, Timeout, TimeoutCert, Echo, Decide};
 use config::{Committee, Stake};
-use crypto::PublicKey;
+use crypto::{PublicKey, Digest};
 use crypto::Signature;
 use log::debug;
-use std::collections::HashSet;
+use std::collections::{HashSet, HashMap};
 
-/// Aggregates votes for a particular header into a certificate.
-pub struct VotesAggregator {
+pub struct EchoAggregator {
     weight: Stake,
     used: HashSet<PublicKey>,
+    // Map from root_hash -> map(author -> proof)
+    echos: HashMap<Digest, HashMap<PublicKey, Proof>>,
+    // Accumulated stake per root hash
+    weights: HashMap<Digest, Stake>,
 }
 
-impl VotesAggregator {
+impl EchoAggregator {
     pub fn new() -> Self {
         Self {
             weight: 0,
             used: HashSet::new(),
+            echos: HashMap::new(),
+            weights: HashMap::new(),
         }
     }
 
-    pub fn append(&mut self, vote: &Vote, committee: &Committee) -> DagResult<Option<Certificate>> {
-        let author = vote.author;
+    pub fn append(&mut self, echo: &Echo, committee: &Committee) -> DagResult<Option<(Digest, Vec<Option<Box<[u8]>>>)>> {
+        let author = echo.author;
         // Ensure it is the first time this authority votes.
         ensure!(self.used.insert(author), DagError::AuthorityReuse(author));
-        self.weight += committee.stake(&author);
-        if self.weight >= committee.quorum_threshold() {
-            self.weight = 0; // Ensures quorum is only reached once.
 
-            return Ok(Some(Certificate {
-                header_id: vote.id,
-                round: vote.round,
-                origin: vote.origin,
-            }));
+        let root = echo.proof.root_hash();
+        let author_map = self.echos.entry(*root).or_insert_with(HashMap::new);
+        author_map.insert(author, echo.proof.clone());
+
+
+        let w = self.weights.entry(*root).or_insert(0);
+        *w += committee.stake(&author);
+
+        // If this particular root reached quorum, build the ordered leaf vector
+        if *w >= committee.quorum_threshold() {
+
+            self.weights.remove(&root);
+            let author_map = self.echos.remove(&root).expect("author_map exists");
+            
+            let leaf_values: Vec<Option<Box<[u8]>>> = committee
+                .sorted_keys
+                .iter()
+                .map(|pk| author_map.get(pk).map(|p| p.value().clone().into_boxed_slice()))
+                .collect();
+
+            return Ok(Some((root.clone(), leaf_values)));
         }
         Ok(None)
     }
 }
 
 pub struct ReadyAggregator {
+    used: HashSet<PublicKey>,
+    // Map from root_hash -> map(author -> Ready)
+    readies: HashMap<Digest, HashMap<PublicKey, Ready>>,
+    // Accumulated stake per root hash
+    weights: HashMap<Digest, Stake>,
+}
+
+impl ReadyAggregator {
+    pub fn new() -> Self {
+        Self {
+            used: HashSet::new(),
+            readies: HashMap::new(),
+            weights: HashMap::new(),
+        }
+    }
+
+    // Return the root hash when 2f+1 Ready messages are collected for it.
+    pub fn append(
+        &mut self,
+        ready: &Ready,
+        committee: &Committee,
+    ) -> DagResult<Option<Digest>> {
+        let author = ready.author;
+        // Ensure it is the first time this authority votes.
+        ensure!(self.used.insert(author), DagError::AuthorityReuse(author));
+        let root = ready.root_hash;
+        let author_map = self.readies.entry(root).or_insert_with(HashMap::new);
+        author_map.insert(author, ready.clone());
+        let w = self.weights.entry(root).or_insert(0);
+        *w += committee.stake(&author);
+        if *w >= committee.quorum_threshold() {
+            self.weights.remove(&root);
+            let _author_map = self.readies.remove(&root).expect("author_map exists");
+            return Ok(Some(root));
+        }
+        Ok(None)
+    }
+}
+
+pub struct DecideAggregator {
     weight: Stake,
     used: HashSet<PublicKey>,
 }
 
-impl ReadyAggregator {
+impl DecideAggregator {
     pub fn new() -> Self {
         Self {
             weight: 0,
@@ -53,22 +112,17 @@ impl ReadyAggregator {
     }
 
     pub fn append(
-        &mut self,
-        ready: &Ready,
-        committee: &Committee,
-    ) -> DagResult<Option<Certificate>> {
-        let author = ready.author;
-        // Ensure it is the first time this authority votes.
+    &mut self,
+    decide: &Decide,
+    committee: &Committee,
+    ) -> DagResult<Option<bool>> {
+        let author = decide.author;
         ensure!(self.used.insert(author), DagError::AuthorityReuse(author));
         self.weight += committee.stake(&author);
-        if self.weight >= committee.quorum_threshold() {
-            self.weight = 0; // Ensures quorum is only reached once.
 
-            return Ok(Some(Certificate {
-                header_id: ready.id,
-                round: ready.round,
-                origin: ready.origin,
-            }));
+        if self.weight >= committee.quorum_threshold() {
+            self.weight = 0;
+            return Ok(Some(true));
         }
         Ok(None)
     }
@@ -154,45 +208,6 @@ impl TimeoutAggregator {
                 round: timeout.round.clone(),
                 timeouts: self.timeouts.clone(),
             })); // Return the authorities that contributed to this quorum.
-        }
-        Ok(None)
-    }
-}
-
-/// Aggregates no-vote messages for a particular round into a certification.
-pub struct NoVoteAggregator {
-    weight: Stake,
-    no_votes: Vec<(PublicKey, Signature)>,
-    used: HashSet<PublicKey>,
-}
-
-impl NoVoteAggregator {
-    pub fn new() -> Self {
-        Self {
-            weight: 0,
-            no_votes: Vec::new(),
-            used: HashSet::new(),
-        }
-    }
-
-    pub fn append(
-        &mut self,
-        no_vote_msg: NoVoteMsg,
-        committee: &Committee,
-    ) -> DagResult<Option<NoVoteCert>> {
-        let author = no_vote_msg.author;
-
-        // Ensure it is the first time this authority sends a no-vote message.
-        ensure!(self.used.insert(author), DagError::AuthorityReuse(author));
-
-        self.no_votes.push((author, no_vote_msg.signature));
-        self.weight += committee.stake(&author);
-        if self.weight >= committee.quorum_threshold() {
-            // Once quorum is reached, you might reset for the next round or use the certification as needed.
-            return Ok(Some(NoVoteCert {
-                round: no_vote_msg.round.clone(),
-                no_votes: self.no_votes.clone(),
-            })); // Return the certification that aggregates the no-votes reaching quorum.
         }
         Ok(None)
     }

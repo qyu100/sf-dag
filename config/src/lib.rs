@@ -1,7 +1,7 @@
 // Copyright(C) Facebook, Inc. and its affiliates.
 use blsttc::{PublicKeyShareG2, SecretKeyShare};
 use crypto::{generate_production_keypair, PublicKey, SecretKey};
-use log::info;
+use log::{info, debug};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
@@ -89,7 +89,7 @@ pub struct Parameters {
 impl Default for Parameters {
     fn default() -> Self {
         Self {
-            consensus_only: false,
+            consensus_only: true,
             header_size: 1_000,
             max_header_delay: 100,
             gc_depth: 50,
@@ -161,6 +161,7 @@ impl Import for Comm {}
 pub struct Committee {
     pub authorities: BTreeMap<PublicKey, Authority>,
     pub sorted_keys: Vec<PublicKey>,
+    pub index_map: HashMap<PublicKey, usize>,
     pub f_num: u32,
 }
 
@@ -170,12 +171,20 @@ impl Committee {
     pub fn new(authorities: BTreeMap<PublicKey, Authority>, f_num: u32) -> Committee {
         let mut keys: Vec<_> = authorities.keys().cloned().collect();
         keys.sort();
-        let committee = Self {
+        let mut index_map = HashMap::with_capacity(keys.len());
+        for (i, k) in keys.iter().enumerate() {
+            index_map.insert(*k, i);
+        }
+        Self {
             authorities,
             sorted_keys: keys,
+            index_map,
             f_num,
-        };
-        committee
+        }
+    }
+
+    pub fn index_of(&self, pk: &PublicKey) -> Option<usize> {
+        self.index_map.get(pk).cloned()
     }
 
     /// Returns the number of authorities.
@@ -201,13 +210,25 @@ impl Committee {
     pub fn quorum_threshold(&self) -> Stake {
         // If N = 3f + 1 + k (0 <= k < 3)
         // then (2 N + 3) / 3 = 2f + 1 + (2k + 2)/3 = 2f + 1 + k = N - f
+        self.total_stake() - self.f_num
+    }
+
+    pub fn total_stake(&self) -> Stake {
         let total_votes: Stake = self.authorities.values().map(|x| x.stake).sum();
-        2 * self.f_num + 1
+        total_votes
+    }
+
+    pub fn parity_shard_num(&self) -> Stake {
+        2 * self.f_num
+    }
+
+    pub fn data_shard_num(&self) -> Stake {
+        // N - 2f
+        self.total_stake() - self.parity_shard_num()
     }
 
     pub fn optimistic_threshold(&self) -> Stake {
-        let total_votes: Stake = self.authorities.values().map(|x| x.stake).sum();
-        let x = (total_votes + 2 * self.f_num - 2) as f64 / 2.0;
+        let x = (self.total_stake() + 2 * self.f_num - 2) as f64 / 2.0;
         let ceil_result = x.ceil() as u32;
         ceil_result
     }
@@ -216,8 +237,7 @@ impl Committee {
     pub fn validity_threshold(&self) -> Stake {
         // If N = 3f + 1 + k (0 <= k < 3)
         // then (N + 2) / 3 = f + 1 + k/3 = f + 1
-        let total_votes: Stake = self.authorities.values().map(|x| x.stake).sum();
-        (total_votes + 2) / 3
+        (self.total_stake() + 2) / 3
     }
 
     /// Returns a leader node in a round-robin fashion.
