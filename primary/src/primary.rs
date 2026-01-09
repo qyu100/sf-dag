@@ -80,13 +80,6 @@ pub enum WorkerPrimaryMessage {
     OthersBatch(Digest, WorkerId),
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub enum ProposerMessage {
-    Parents(Vec<Certificate>, /* round */ Round),
-    Blocking(Vec<Certificate>, /* round */ Round),
-    // Future variants can be added here (e.g., TimeoutCerts, Control messages, ...)
-}
-
 pub struct Primary;
 
 impl Primary {
@@ -213,7 +206,6 @@ impl Primary {
             tx_consensus_header_msg,
             sorted_keys.clone(),
             combined_key.clone(),
-            parameters.delta,
         );
 
         // Keeps track of the latest consensus round and allows other tasks to clean up their their internal state

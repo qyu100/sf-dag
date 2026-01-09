@@ -7,7 +7,7 @@ use crate::messages::{
     Certificate, HeaderInfoWithCertificate, HeaderWithCertificate, Timeout,
     TimeoutCert, Vote, Support
 };
-use crate::primary::{HeaderType, PrimaryMessage, Round, ProposerMessage};
+use crate::primary::{HeaderType, PrimaryMessage, Round};
 use crate::synchronizer::Synchronizer;
 use crate::{ConsensusMessage, HeaderInfo, HeaderMessage};
 use async_recursion::async_recursion;
@@ -24,8 +24,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use store::Store;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::sync::Mutex;
-use tokio::time::{sleep, Duration};
 
 // #[cfg(test)]
 // #[path = "tests/core_tests.rs"]
@@ -65,7 +63,7 @@ pub struct Core {
     /// Output all certificates to the consensus layer.
     tx_consensus: Sender<Certificate>,
     /// Send valid a quorum of certificates' ids to the `Proposer` (along with their round).
-    tx_proposer: Sender<crate::primary::ProposerMessage>,
+    tx_proposer: Sender<(Vec<Certificate>, Round)>,
     /// Send a valid TimeoutCertificate along with the round to the `Proposer`.
     tx_timeout_cert: Sender<(TimeoutCert, Round)>,
     /// Send a header that has voted for the prev leader to the `Consensus` logic.
@@ -83,7 +81,7 @@ pub struct Core {
     /// Aggregates certificates to use as parents for new headers.
     certificates_aggregators: HashMap<Round, Box<CertificatesAggregator>>,
     /// A network sender to send the batches to the other workers.
-    network: Arc<Mutex<ReliableSender>>,
+    network: ReliableSender,
     /// Keeps the cancel handlers of the messages we sent.
     cancel_handlers: HashMap<Round, Vec<CancelHandler>>,
     /// Aggregates timeouts to use for sending timeout certificate.
@@ -91,13 +89,9 @@ pub struct Core {
     /// Keep track of how many vertices will propose in each round.
     header_proposers: HashMap<Round, HashSet<PublicKey>>,
 
-    /// Record rounds for which we've already forwarded a Blocking message to the proposer.
-    blocking_sent: HashSet<Round>,
-
     sorted_keys: Vec<PublicKeyShareG2>,
     combined_pubkey: PublicKeyShareG2,
     processing_vote_aggregators: HashMap<Digest, VotesAggregator>,
-    delta: u64,
 }
 
 impl Core {
@@ -119,12 +113,11 @@ impl Core {
         rx_timeout: Receiver<Timeout>,
         rx_support: Receiver<Support>,
         tx_consensus: Sender<Certificate>,
-        tx_proposer: Sender<ProposerMessage>,
+        tx_proposer: Sender<(Vec<Certificate>, Round)>,
         tx_timeout_cert: Sender<(TimeoutCert, Round)>,
         tx_consensus_header_msg: Sender<ConsensusMessage>,
         sorted_keys: Vec<PublicKeyShareG2>,
         combined_pubkey: PublicKeyShareG2,
-        delta: u64,
     ) {
         tokio::spawn(async move {
             Self {
@@ -153,15 +146,13 @@ impl Core {
                 //processing_vote_aggregators: HashMap::new(),
                 certificates_aggregators: HashMap::with_capacity(2 * gc_depth as usize),
                 processed_certs: HashMap::with_capacity(2 * gc_depth as usize),
-                network: Arc::new(Mutex::new(ReliableSender::new())),
+                network: ReliableSender::new(),
                 cancel_handlers: HashMap::with_capacity(2 * gc_depth as usize),
                 timeouts_aggregators: HashMap::with_capacity(2 * gc_depth as usize),
                 header_proposers: HashMap::with_capacity(2 * gc_depth as usize),
-                blocking_sent: HashSet::new(),
                 sorted_keys,
                 combined_pubkey,
                 processing_vote_aggregators: HashMap::with_capacity(2 * gc_depth as usize),
-                delta
             }
             .run()
             .await;
@@ -182,7 +173,7 @@ impl Core {
             .collect();
 
         // Send the Timeout to each address.
-        let handlers = self.network.lock().await.broadcast(addresses, Bytes::from(bytes)).await;
+        let handlers = self.network.broadcast(addresses, Bytes::from(bytes)).await;
 
         self.cancel_handlers
             .entry(timeout.round)
@@ -219,7 +210,7 @@ impl Core {
         let header_msg = HeaderMessage::HeaderWithCertificate(header_with_certificates);
         let bytes = bincode::serialize(&PrimaryMessage::HeaderMsg(header_msg))
             .expect("Failed to serialize our own header");
-        let handlers = self.network.lock().await.broadcast(addresses, Bytes::from(bytes)).await;
+        let handlers = self.network.broadcast(addresses, Bytes::from(bytes)).await;
         self.cancel_handlers
             .entry(h_round)
             .or_insert_with(Vec::new)
@@ -247,33 +238,17 @@ impl Core {
                 .or_insert_with(HashSet::new)
                 .insert(certificate.origin())
             {
-                if let Some(msgs) = self
+                if let Some(parents) = self
                     .certificates_aggregators
                     .entry(certificate.round())
                     .or_insert_with(|| Box::new(CertificatesAggregator::new()))
                     .append_certificate(&certificate, &self.committee, self.header_proposers.get(&(certificate.round-1)).map(|set| set.len()).unwrap_or(0))?
                 {
-                    for msg in msgs {
-                        // If this is a Blocking message for a round we've already sent, skip it.
-                        let should_send = match &msg {
-                            ProposerMessage::Blocking(_, round) => {
-                                let r = *round;
-                                if self.blocking_sent.contains(&r) {
-                                    false
-                                } else {
-                                    self.blocking_sent.insert(r);
-                                    true
-                                }
-                            }
-                            _ => true,
-                        };
-                        if should_send {
-                            self.tx_proposer
-                                .send(msg)
-                                .await
-                                .expect("Failed to send certificate");
-                        }
-                    }
+                    // Send it to the `Proposer`.
+                    self.tx_proposer
+                        .send((parents, certificate.round()))
+                        .await
+                        .expect("Failed to send certificate");
                 }
 
                 let id = certificate.header_id;
@@ -345,27 +320,23 @@ impl Core {
             )
             .await;
 
-            self.process_vote(&vote)
-                .await
-                .expect("Failed to process our own vote");
-
-            // Always broadcast immediately and record handlers (no longer delay for non-proposers).
             let addresses = self
                 .committee
                 .others_primaries(&self.name)
                 .iter()
                 .map(|(_, x)| x.primary_to_primary)
-                .collect::<Vec<_>>();
-
-            let bytes_vec = bincode::serialize(&PrimaryMessage::Vote(vote.clone()))
+                .collect();
+            let bytes = bincode::serialize(&PrimaryMessage::Vote(vote.clone()))
                 .expect("Failed to serialize our own vote");
-            let bytes = Bytes::from(bytes_vec);
-
-            let handlers = self.network.lock().await.broadcast(addresses, bytes).await;
+            let handlers = self.network.broadcast(addresses, Bytes::from(bytes)).await;
             self.cancel_handlers
                 .entry(header_info.round)
                 .or_insert_with(Vec::new)
                 .extend(handlers);
+
+            self.process_vote(&vote)
+                .await
+                .expect("Failed to process our own vote");
         }
 
         // Ensure we have the parents. If at least one parent is missing, the synchronizer returns an empty
@@ -401,43 +372,21 @@ impl Core {
     async fn process_own_support(&mut self, support: Support) -> DagResult<()> {
         debug!("Processing own support {:?}", support);
 
-        self.process_support_msg(support.clone()).await;
-                
-        // Broadcast support. If we're not a header proposer, perform the broadcast in a
-        // spawned task after sleeping for `delta` ms so the core task can continue
-        // processing. If we are a proposer, broadcast immediately and record handlers.
         let addresses = self
             .committee
             .others_primaries(&self.name)
             .iter()
             .map(|(_, x)| x.primary_to_primary)
-            .collect::<Vec<_>>();
-
-        let bytes_vec = bincode::serialize(&PrimaryMessage::Support(support.clone()))
+            .collect();
+        let bytes = bincode::serialize(&PrimaryMessage::Support(support.clone()))
             .expect("Failed to serialize our own support");
-        let bytes = Bytes::from(bytes_vec);
+        let handlers = self.network.broadcast(addresses, Bytes::from(bytes)).await;
+        self.cancel_handlers
+            .entry(support.round)
+            .or_insert_with(Vec::new)
+            .extend(handlers);
 
-        if !self.committee.header_proposers().contains(&self.name) {
-            // Delay the broadcast off the core task so core can continue processing.
-            let network = self.network.clone();
-            let addresses = addresses.clone();
-            let bytes = bytes.clone();
-            let delta = self.delta;
-            tokio::spawn(async move {
-                sleep(Duration::from_millis(delta)).await;
-                debug!("Sleeping for {} ms", delta);
-                let mut net = network.lock().await;
-                let _ = net.broadcast(addresses, bytes).await;
-            });
-        } else {
-            let mut net = self.network.lock().await;
-            let handlers = net.broadcast(addresses, bytes).await;
-            self.cancel_handlers
-                .entry(support.round)
-                .or_insert_with(Vec::new)
-                .extend(handlers);
-        }
-
+        self.process_support_msg(support).await;
         Ok(())
     }
 
@@ -451,34 +400,20 @@ impl Core {
             .expect("failed to send Support to consensus");
 
         // Check if we have enough certificates to enter a new dag round and propose a header.
-        if let Some(msgs) = self
+        if let Some(parents) = self
             .certificates_aggregators
             .entry(support.round)
             .or_insert_with(|| Box::new(CertificatesAggregator::new()))
-            .append_support(&support, &self.committee,
-                self.header_proposers.get(&(support.round-1)).map(|set| set.len()).unwrap_or(0))?
-        {
-            for msg in msgs {
-                let should_send = match &msg {
-                    ProposerMessage::Blocking(_, round) => {
-                        let r = *round;
-                        if self.blocking_sent.contains(&r) {
-                            false
-                        } else {
-                            self.blocking_sent.insert(r);
-                            true
-                        }
-                    }
-                    _ => true,
-                };
-                if should_send {
-                    self.tx_proposer
-                        .send(msg)
-                        .await
-                        .expect("Failed to send certificate");
-                }
-            }
-         }
+            .append_support(&support, 
+                &self.committee, 
+            self.header_proposers.get(&(support.round-1)).map(|set| set.len()).unwrap_or(0))?
+        {   
+            // Send it to the `Proposer`.
+            self.tx_proposer
+                .send((parents, support.round))
+                .await
+                .expect("Failed to send certificate");
+        }
 
         Ok(())
     }
@@ -572,10 +507,8 @@ impl Core {
         let bytes = bincode::serialize(&certificate).expect("Failed to serialize certificate");
         self.store.write(certificate.digest().to_vec(), bytes).await;
 
-        // Check if we can jump to a new round.
-
         // Check if we have enough certificates to enter a new dag round and propose a header.
-        if let Some(msgs) = self
+        if let Some(parents) = self
             .certificates_aggregators
             .entry(certificate.round())
             .or_insert_with(|| Box::new(CertificatesAggregator::new()))
@@ -583,28 +516,12 @@ impl Core {
                 &self.committee, 
             self.header_proposers.get(&(certificate.round-1)).map(|set| set.len()).unwrap_or(0))?
         {   
-            // Send it to the `Proposer`, but ensure Blocking messages are only forwarded once per round.
-            for msg in msgs {
-                let should_send = match &msg {
-                    ProposerMessage::Blocking(_, round) => {
-                        let r = *round;
-                        if self.blocking_sent.contains(&r) {
-                            false
-                        } else {
-                            self.blocking_sent.insert(r);
-                            true
-                        }
-                    }
-                    _ => true,
-                };
-                if should_send {
-                    self.tx_proposer
-                        .send(msg)
-                        .await
-                        .expect("Failed to send certificate");
-                }
-            }
-         }
+            // Send it to the `Proposer`.
+            self.tx_proposer
+                .send((parents, certificate.round()))
+                .await
+                .expect("Failed to send certificate");
+        }
 
         if self
             .processed_certs

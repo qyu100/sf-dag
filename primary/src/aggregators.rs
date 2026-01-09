@@ -6,7 +6,6 @@ use config::{Committee, Stake};
 use crypto::{aggregate_sign, PublicKey, Signature};
 use log::{debug, info};
 use std::collections::HashSet;
-use crate::primary::ProposerMessage;
 
 /// Aggregates votes for a particular header into a certificate.
 pub struct VotesAggregator {
@@ -94,7 +93,7 @@ impl CertificatesAggregator {
         certificate: &Certificate,
         committee: &Committee,
         propose_num: usize,
-    ) -> DagResult<Option<Vec<ProposerMessage>>> {
+    ) -> DagResult<Option<Vec<Certificate>>> {
         let origin = certificate.origin();
 
         // Ensure it is the first time this authority votes.
@@ -107,42 +106,26 @@ impl CertificatesAggregator {
         self.certificates.push(certificate.clone());
         self.weight += committee.stake(&origin);
         self.certificate_weight += committee.stake(&origin);
+
         if !committee.header_proposers().contains(&origin) {
             self.slow_nodes_round += 1;
-        }
+        } 
 
         let leader = committee.leader(round as usize);
         if !self.used.contains(&leader) {
             return Ok(None);
         }
-
-        let mut msgs: Vec<ProposerMessage> = Vec::new();
-
-        // Check blocking threshold f+1
-        if self.weight == committee.blocking_threshold() {
-            let parents = self.certificates.clone();
-            msgs.push(ProposerMessage::Blocking(parents, round));
-        }
-
-        // Check quorum threshold 2f+1
+        // Enter round if 1) weight >= 2f+1 - votes number
+        // and 2) weight >= max (propose_num - f, 0)
         if self.weight >= committee.quorum_threshold()
             && self.certificate_weight >= propose_num.saturating_sub(committee.f_num as usize) as u32
         {
             self.weight = 0;
-            let parents: Vec<Certificate> = self.certificates.drain(..).collect();
-            // Log only the requested summary: how many origins contributing to this aggregator
-            // are header proposers. This count was tracked incrementally in slow_nodes_round.
             info!("{} origins from non_header_proposers", self.slow_nodes_round);
             // Reset proposer-origin counter for the next epoch.
             self.slow_nodes_round = 0;
-            msgs.push(ProposerMessage::Parents(parents, certificate.round()));
-            return Ok(Some(msgs));
+            return Ok(Some(self.certificates.drain(..).collect()));
         }
-
-        if !msgs.is_empty() {
-            return Ok(Some(msgs));
-        }
-
         Ok(None)
     }
 
@@ -151,7 +134,7 @@ impl CertificatesAggregator {
         support: &Support,
         committee: &Committee,
         propose_num: usize,
-    ) -> DagResult<Option<Vec<ProposerMessage>>> {
+    ) -> DagResult<Option<Vec<Certificate>>> {
         let origin = support.author;
 
         // Ensure it is the first time this authority votes.
@@ -159,41 +142,27 @@ impl CertificatesAggregator {
             return Ok(None);
         }
 
+        self.slow_nodes_round += 1;
+
         let round = support.round;
 
         self.supports.push(support.clone());
         self.weight += committee.stake(&origin);
-        // Track whether this origin is a header proposer.
-        if !committee.header_proposers().contains(&origin) {
-            self.slow_nodes_round += 1;
-        }
 
         let leader = committee.leader(round as usize);
         if !self.used.contains(&leader) {
             return Ok(None);
         }
-
-        let mut msgs: Vec<ProposerMessage> = Vec::new();
-
-        // Check blocking threshold f+1
-        if self.weight == committee.blocking_threshold() {
-            let parents = self.certificates.clone();
-            msgs.push(ProposerMessage::Blocking(parents, round));
-        }
-
+        // Enter round if 1) weight >= 2f+1 - votes number
+        // and 2) certificate_weight >= max (propose_num - f, 0)
         if self.weight >= committee.quorum_threshold()
             && self.certificate_weight >= propose_num.saturating_sub(committee.f_num as usize) as u32
         {
             self.weight = 0;
-            let parents: Vec<Certificate> = self.certificates.drain(..).collect();
             info!("{} origins from non_header_proposers", self.slow_nodes_round);
+            // Reset proposer-origin counter for the next epoch.
             self.slow_nodes_round = 0;
-            msgs.push(ProposerMessage::Parents(parents, support.round));
-            return Ok(Some(msgs));
-        }
-
-        if !msgs.is_empty() {
-            return Ok(Some(msgs));
+            return Ok(Some(self.certificates.drain(..).collect()));
         }
         Ok(None)
     }

@@ -2,7 +2,7 @@ use crate::batch_maker::Transaction;
 use crate::messages::{
     Certificate, Header, HeaderWithCertificate, Timeout, TimeoutCert, Support,
 };
-use crate::primary::{Round,ProposerMessage};
+use crate::primary::Round;
 use config::Committee;
 use crypto::{PublicKey, SignatureService};
 #[cfg(feature = "benchmark")]
@@ -33,7 +33,7 @@ pub struct Proposer {
     consensus_only: bool,
 
     /// Receives the parents to include in the next header (along with their round number).
-    rx_core: Receiver<ProposerMessage>,
+    rx_core: Receiver<(Vec<Certificate>, Round)>,
     /// Receives the batch digest from our workers.
     rx_workers: Receiver<Vec<Transaction>>,
     /// Sends newly created headers to the `Core`.
@@ -73,7 +73,7 @@ impl Proposer {
         tx_size: usize,
         max_header_delay: u64,
         consensus_only: bool,
-        rx_core: Receiver<ProposerMessage>,
+        rx_core: Receiver<(Vec<Certificate>, Round)>,
         rx_workers: Receiver<Vec<Transaction>>,
         tx_core: Sender<HeaderWithCertificate>,
         tx_core_timeout: Sender<Timeout>,
@@ -299,55 +299,30 @@ impl Proposer {
             }
 
             tokio::select! {
-                Some(msg) = self.rx_core.recv() => {
-                    match msg {
-                        ProposerMessage::Parents(parents, round) => {
-                            // Compare the parents' round number with our current round.
-                            match round.cmp(&self.round) {
-                                Ordering::Greater => {
-                                    // We accept round bigger than our current round to jump ahead in case we were
-                                    // late (or just joined the network).
-                                    self.round = round;
-                                    self.last_parents = parents;
-                                },
-                                Ordering::Less => {
-                                    // Ignore parents from older rounds.
-                                },
-                                Ordering::Equal => {
-                                    // The core gives us the parents the first time they are enough to form a quorum.
-                                    // Then it keeps giving us all the extra parents.
-                                    self.last_parents.extend(parents)
-                                }
-                            }
-                        
-                            // Check whether we can advance to the next round. Note that if we timeout,
-                            // we ignore this check and advance anyway.
-                            // TODO: (1) Implement the wait for NVC if leader logic here
-                            // (2) Also implement the wait for leader idea what is was there before
-                            advance = self.update_leader();
+                Some((parents, round)) = self.rx_core.recv() => {
+                    // Compare the parents' round number with our current round.
+                    match round.cmp(&self.round) {
+                        Ordering::Greater => {
+                            // We accept round bigger than our current round to jump ahead in case we were
+                            // late (or just joined the network).
+                            self.round = round;
+                            self.last_parents = parents;
+                        },
+                        Ordering::Less => {
+                            // Ignore parents from older rounds.
+                        },
+                        Ordering::Equal => {
+                            // The core gives us the parents the first time they are enough to form a quorum.
+                            // Then it keeps giving us all the extra parents.
+                            self.last_parents.extend(parents)
                         }
-                        ProposerMessage::Blocking(parents, round) => {
-                            // Compare the parents' round number with our current round.
-                            match round.cmp(&(self.round+1)) {
-                                Ordering::Greater => {
-                                    // We accept round bigger than our current round+1 to jump ahead in case we were
-                                    // late (or just joined the network).
-                                    self.round = round;
-                                    debug!("Jumped to round {}", self.round);
-                                    // self.last_parents = parents;
-                                },
-                                Ordering::Less => {
-                                    // Ignore parents from older rounds.
-                                },
-                                Ordering::Equal => {
-                                    // The core gives us the parents the first time they are enough to form a quorum.
-                                    // Then it keeps giving us all the extra parents.
-                                    // self.last_parents.extend(parents)
-                                }
-                            }
-                        }
-
                     }
+
+                    // Check whether we can advance to the next round. Note that if we timeout,
+                    // we ignore this check and advance anyway.
+                    // TODO: (1) Implement the wait for NVC if leader logic here
+                    // (2) Also implement the wait for leader idea what is was there before
+                    advance = self.update_leader();
                 }
                 Some(txns) = self.rx_workers.recv() => {
                     self.payload_size += txns.iter().map(|txn| txn.len()).sum::<usize>();
