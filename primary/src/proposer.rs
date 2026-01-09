@@ -161,7 +161,12 @@ impl Proposer {
 
         let mut payload;
         if self.consensus_only {
-            payload = vec![vec![0u8; self.tx_size]; (self.header_size / self.tx_size)];
+            let header_proposers = self.committee.header_proposers(); 
+            if header_proposers.contains(&self.name) {
+                payload = vec![vec![0u8; self.tx_size]; (self.header_size / self.tx_size)];
+            } else {
+                payload = Vec::new();
+            }
         } else {
             payload = self.txns.drain(..limit).collect();
         }

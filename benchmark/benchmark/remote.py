@@ -414,37 +414,52 @@ class Bench:
         debug=False, 
         consensus_only=False
     ):
-        # Kill any potentially unfinished run and delete logs.
-        # hosts = committee.ips()
-        await self._kill(hosts_to_connections=hosts_to_connections, delete_logs=True)
-
-        # Run the primaries (except the faulty ones).
-        primaries = self._run_primaries(committee, hosts_to_connections, bench_parameters.faults, debug)
-        await primaries
-
-        # Apply TC delay to primaries whose node_id % 3 == 0
+        Print.info('Clearing all TC rules...')
+        all_hosts = list(hosts_to_connections.keys())
         try:
-            hosts_to_tc = [Committee.ip(address) for (node_id, address) in committee.primary_addresses(bench_parameters.faults) if (node_id + 1) % 3 == 0]
+            await self._clear_tc_filters(all_hosts)
+        except Exception as e:
+            Print.warn(f'Failed to clear TC rules: {e}')
+        try:
+            hosts_to_tc = [Committee.ip(address) for (node_id, address) 
+                        in committee.primary_addresses(bench_parameters.faults) 
+                        if (node_id + 1) % 3 == 0]
+            
             if hosts_to_tc:
-                Print.info('Applying TC delay to primaries where (node_id + 1) % 3 == 0...')
+                Print.info(f'Applying {bench_parameters.delay}ms delay to {len(hosts_to_tc)} primaries...')
+                
                 await self._set_tc_filter(hosts_to_tc, delay_ms=bench_parameters.delay)
         except Exception as e:
-            Print.warn(f'Failed to apply TC filter to subset of primaries: {e}')
-
+            Print.warn(f'Failed to apply TC filter: {e}')
+        
+        await self._kill(hosts_to_connections=hosts_to_connections, delete_logs=True)
+        
+        Print.info('Starting primaries...')
+        primaries = self._run_primaries(committee, hosts_to_connections, bench_parameters.faults, debug)
+        await primaries
+        
         if not consensus_only:
-            # Run the clients (they will wait for the nodes to be ready).
-            # Filter all faulty nodes from the client addresses (or they will wait
-            # for the faulty nodes to be online).
+            Print.info('Starting clients...')
             workers_addresses = await self._run_clients(
                 rate, burst, committee, bench_parameters, hosts_to_connections)
-            # Run the workers (except the faulty ones).
-            # await self._run_workers(workers_addresses, hosts_to_connections, debug)
-
-        # Wait for all transactions to be processed.
+        
         duration = bench_parameters.duration
         for _ in progress_bar(range(20), prefix=f'Running benchmark ({duration} sec):'):
             sleep(ceil(duration / 20))
+        
         await self._kill(hosts_to_connections=hosts_to_connections)
+
+    async def _clear_tc_filters(self, hosts, iface='ens4'):
+        if not hosts:
+            return
+        
+        clear_cmd = f'sudo tc qdisc replace dev {iface} root netem delay 0ms 2>/dev/null || sudo tc qdisc del dev {iface} root 2>/dev/null || true'
+        
+        hosts_and_connections = await self._try_connect_all(hosts)
+        hosts_to_connections = {h: c for h, c in hosts_and_connections}
+        
+        tasks = [self._filter_one(h, c, clear_cmd) for h, c in hosts_to_connections.items()]
+        await self._gather_and_parse(tasks, 'Clear TC')
 
     def download_logs(self, consensus_only, committee=None):
         asyncio.get_event_loop().run_until_complete(
@@ -542,28 +557,16 @@ class Bench:
             return host, Exception(f'Failed to perform filter action on {host} because of {e}')
 
     async def _set_tc_filter(self, hosts=None, iface='ens4', delay_ms=100):
-        # Determine target hosts
-        if hosts is None:
-            hosts = self.manager.hosts(flat=True)
-        # Allow passing zone->ips dict
-        if isinstance(hosts, dict):
-            hosts = [x for y in hosts.values() for x in y]
-        # Filter out falsy entries
-        hosts = [h for h in hosts if h]
-
+        if not hosts:
+            return
+        
+        tc_filter_cmd = f'sudo tc qdisc replace dev {iface} root netem delay {delay_ms}ms'
+        
         hosts_and_connections = await self._try_connect_all(hosts)
-        hosts_to_connections = { h: c for h, c in hosts_and_connections }
-
-        Print.info('Setting TC filter...')
-        # Remove any existing qdisc first to avoid stacking delays, then add the desired netem rule.
-        cmd = [
-            f'sudo tc qdisc replace dev {iface} root netem delay {delay_ms}ms'
-        ]
-
-        tc_filter_cmd = ' && '.join(cmd)
-
-        tasks = [ self._filter_one(h, c, tc_filter_cmd) for h, c in hosts_to_connections.items() ]
-        await self._gather_and_parse(tasks, 'Set')
+        hosts_to_connections = {h: c for h, c in hosts_and_connections}
+        
+        tasks = [self._filter_one(h, c, tc_filter_cmd) for h, c in hosts_to_connections.items()]
+        await self._gather_and_parse(tasks, 'Set TC')
 
     async def _configure_one(self, host, id, connection, update=True):
         try: 
