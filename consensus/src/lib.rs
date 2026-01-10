@@ -175,10 +175,13 @@ impl Consensus {
                                     
                                     if certificate.round == leader_round {
                                         info!("Committed {:?} Leader", certificate.header_id);
+                                        info!("Round {}", certificate.round);
                                     }else if certificate.round == leader_round-1 {
                                         info!("Committed {:?} NonLeader", certificate.header_id);
+                                        info!("Round {}", certificate.round);
                                     }else{
                                         info!("Committed {:?} ", certificate.header_id);
+                                        info!("Round {}", certificate.round);
                                     }
 
                                     self.tx_primary
@@ -241,10 +244,13 @@ impl Consensus {
 
                                     if certificate.round == leader_round {
                                         info!("Committed {:?} Leader", certificate.header_id);
+                                        info!("Round {}", certificate.round);
                                     }else if certificate.round == leader_round-1 {
                                         info!("Committed {:?} NonLeader", certificate.header_id);
+                                        info!("Round {}", certificate.round);
                                     }else{
                                         info!("Committed {:?} ", certificate.header_id);
+                                        info!("Round {}", certificate.round);
                                     }
 
                                     self.tx_primary

@@ -52,7 +52,8 @@ class LogParser:
         except (ValueError, IndexError, AttributeError) as e:
             raise ParseError(f'Failed to parse nodes\' logs: {e}')
         
-        proposals, commits, self.configs, primary_ips, leader_commits, non_leader_commits, self.received_samples, sizes = zip(*results)
+        # _parse_primaries now also returns (round_log_count, max_round) per primary.
+        proposals, commits, self.configs, primary_ips, leader_commits, non_leader_commits, self.received_samples, sizes, round_logs, max_rounds = zip(*results)
         self.proposals = self._merge_results([x.items() for x in proposals])
         self.commits = self._merge_results([x.items() for x in commits])
         self.leader_commits = self._merge_results([x.items() for x in leader_commits])
@@ -61,6 +62,13 @@ class LogParser:
         self.sizes = {
             k: v for x in sizes for k, v in x.items() if k in self.commits
         }
+        
+        # Aggregate round-log information: total round-log lines and the global max round.
+        total_round_log_lines = sum(int(x) for x in round_logs)
+        global_max_round = max((int(x) for x in max_rounds), default=0)
+        # Average number of 'Round' log entries per round across the experiment.
+        self.avg_round_logs_per_round = (total_round_log_lines / global_max_round) if global_max_round > 0 else 0
+
         # # Parse the workers logs.
         # try:
         #     with Pool() as p:
@@ -166,7 +174,12 @@ class LogParser:
 
         ip = search(r'booted on (\d+.\d+.\d+.\d+)', log).group(1)
 
-        return proposals, commits, configs, ip, leader_commits, non_leader_commits, samples, sizes
+        # Count occurrences of 'Round <n>' log lines and detect the maximum round seen in this primary.
+        round_matches = findall(r'Round (\d+)', log)
+        round_log_count = len(round_matches)
+        max_round = max((int(r) for r in round_matches), default=0)
+
+        return proposals, commits, configs, ip, leader_commits, non_leader_commits, samples, sizes, round_log_count, max_round
 
     # def _parse_workers(self, log):
     #     if search(r'(?:panic|Error)', log) is not None:
@@ -316,6 +329,7 @@ class LogParser:
                 f' Consensus latency: {round(consensus_latency):,} ms\n'
                 f' Consensus leader latency: {round(leader_consensus_latency):,} ms\n'
                 f' Consensus non leader latency: {round(non_leader_consensus_latency):,} ms\n'
+                f" Avg 'Round' logs per round: {self.avg_round_logs_per_round:.2f}\n"
                 '-----------------------------------------\n'
             )
         else:
