@@ -241,10 +241,13 @@ impl Consensus {
 
                                     if certificate.round == leader_round {
                                         info!("Committed {:?} Leader", certificate.header_id);
+                                        debug!("Commit round {:?} Leader", certificate.round());
                                     }else if certificate.round == leader_round-1 {
                                         info!("Committed {:?} NonLeader", certificate.header_id);
+                                        debug!("Commit round {:?} NonLeader", certificate.round());
                                     }else{
                                         info!("Committed {:?} ", certificate.header_id);
+                                        debug!("Commit round {:?} More", certificate.round());
                                     }
 
                                     self.tx_primary

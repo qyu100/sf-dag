@@ -97,7 +97,7 @@ impl Proposer {
                 tx_core_timeout,
                 rx_timeout_cert,
                 tx_core_support,
-                round: 0,
+                round: 1,
                 last_parents: genesis,
                 last_leader: None,
                 txns: Vec::new(),
@@ -122,30 +122,6 @@ impl Proposer {
             .send(timeout_cert_msg)
             .await
             .expect("Failed to send timeout");
-    }
-
-    async fn make_support_msg(
-        &mut self,
-        vote: bool,
-        propose_next_round: bool, 
-    ) {
-        self.last_parents.clear();
-        let support = Support::new(
-            self.name,
-            self.round,
-            &mut self.signature_service,
-            vote,
-            propose_next_round,
-        )
-        .await;
-
-        debug!("Created support {:?}", support);
-
-        // Send the new support to the `Core` that will broadcast and process it.
-        self.tx_core_support
-            .send(support)
-            .await
-            .expect("Failed to send support message");
     }
 
     async fn make_header(&mut self, propose_next_round: bool) {
@@ -243,7 +219,20 @@ impl Proposer {
         let timer = sleep(Duration::from_millis(self.max_header_delay));
         let mut timeout_sent = false;
         tokio::pin!(timer);
-
+        if self.round == 1 && self.committee.leader(1) != self.name {
+            let support = Support::new(
+                self.name,
+                self.round,
+                &mut self.signature_service,
+                true,
+                false,
+                )
+                .await;
+            self.tx_core_support
+                .send(support)
+                .await
+                .expect("Failed to send support message");
+        }
         loop {
             // Check if we can propose a new header. We propose a new header when we have a quorum of parents
             // and one of the following conditions is met:
@@ -287,7 +276,7 @@ impl Proposer {
                     } else {
                         true
                     };
-                    self.make_support_msg(vote, propose_next_round).await;
+                    // self.make_support_msg(vote, propose_next_round).await;
                 }
                 self.propose_this_round = propose_next_round;
                 self.payload_size = 0;

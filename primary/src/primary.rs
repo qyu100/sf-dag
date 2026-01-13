@@ -35,13 +35,13 @@ pub type Round = u64;
 #[derive(Debug, Serialize, Deserialize)]
 pub enum PrimaryMessage {
     HeaderMsg(HeaderMessage),
-    Support(Support),
     Timeout(Timeout),
     Vote(Vote),
     Certificate(Certificate),
     VerifiedCertificate(Certificate),
     CertificatesRequest(Vec<Digest>, /* requestor */ PublicKey),
     PayloadRequest(Digest, PublicKey),
+    Support(Support),
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

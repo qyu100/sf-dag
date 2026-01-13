@@ -371,22 +371,22 @@ impl Core {
     #[async_recursion]
     async fn process_own_support(&mut self, support: Support) -> DagResult<()> {
         debug!("Processing own support {:?}", support);
-
-        let addresses = self
-            .committee
-            .others_primaries(&self.name)
-            .iter()
-            .map(|(_, x)| x.primary_to_primary)
-            .collect();
-        let bytes = bincode::serialize(&PrimaryMessage::Support(support.clone()))
-            .expect("Failed to serialize our own support");
-        let handlers = self.network.broadcast(addresses, Bytes::from(bytes)).await;
-        self.cancel_handlers
-            .entry(support.round)
-            .or_insert_with(Vec::new)
-            .extend(handlers);
-
-        self.process_support_msg(support).await;
+        if support.round > 1 {
+            let addresses = self
+                .committee
+                .others_primaries(&self.name)
+                .iter()
+                .map(|(_, x)| x.primary_to_primary)
+                .collect();
+            let bytes = bincode::serialize(&PrimaryMessage::Support(support.clone()))
+                .expect("Failed to serialize our own support");
+            let handlers = self.network.broadcast(addresses, Bytes::from(bytes)).await;
+            self.cancel_handlers
+                .entry(support.round)
+                .or_insert_with(Vec::new)
+                .extend(handlers);
+        }
+            self.process_support_msg(support).await;
         Ok(())
     }
 
@@ -506,6 +506,28 @@ impl Core {
         // Store the certificate.
         let bytes = bincode::serialize(&certificate).expect("Failed to serialize certificate");
         self.store.write(certificate.digest().to_vec(), bytes).await;
+        if self.name != self.committee.leader(certificate.round() as usize + 1) {
+            let support = Support::new(
+            self.name,
+                certificate.round(),
+                &mut self.signature_service,
+                true,
+                false,
+                )
+                .await;
+            
+            let addresses = self
+                .committee
+                .others_primaries(&self.name)
+                .iter()
+                .map(|(_, x)| x.primary_to_primary)
+                .collect();
+            let bytes = bincode::serialize(&PrimaryMessage::Support(support.clone()))
+                .expect("Failed to serialize our own vote");
+            let handlers = self.network.broadcast(addresses, Bytes::from(bytes)).await;
+            let _ = self.process_own_support(support).await;
+        }
+
 
         // Check if we have enough certificates to enter a new dag round and propose a header.
         if let Some(parents) = self
