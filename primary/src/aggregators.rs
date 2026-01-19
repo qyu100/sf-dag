@@ -36,7 +36,6 @@ impl EchoAggregator {
         let author_map = self.echos.entry(*root).or_insert_with(HashMap::new);
         author_map.insert(author, echo.proof.clone());
 
-
         let w = self.weights.entry(*root).or_insert(0);
         *w += committee.stake(&author);
 
@@ -51,7 +50,6 @@ impl EchoAggregator {
                 .iter()
                 .map(|pk| author_map.get(pk).map(|p| p.value().clone().into_boxed_slice()))
                 .collect();
-
             return Ok(Some((root.clone(), leaf_values)));
         }
         Ok(None)
@@ -90,7 +88,7 @@ impl ReadyAggregator {
         let w = self.weights.entry(root).or_insert(0);
         *w += committee.stake(&author);
         if *w >= committee.quorum_threshold() {
-            self.weights.remove(&root);
+            // self.weights.remove(&root);
             let _author_map = self.readies.remove(&root).expect("author_map exists");
             return Ok(Some(root));
         }

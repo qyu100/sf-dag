@@ -44,6 +44,11 @@ pub enum PrimaryMessage {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+pub enum HeaderType {
+    HeaderInfoWithProof(HeaderInfoWithProof),
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum HeaderMessage {
     HeaderWithCertificate(HeaderWithCertificate),
     HeaderInfoWithCertificate(HeaderInfoWithCertificate),
@@ -54,11 +59,6 @@ pub enum ConsensusMessage {
     HeaderInfo(HeaderInfo),
     Certificate(Certificate),
     HeaderInfoWithProof(HeaderInfoWithProof),
-}
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub enum HeaderType {
-    Header(Header),
-    HeaderInfo(HeaderInfo),
 }
 
 /// The messages sent by the primary to its workers.
@@ -205,25 +205,25 @@ impl Primary {
         // Whenever the `Synchronizer` does not manage to validate a header due to missing parent certificates of
         // batch digests, it commands the `HeaderWaiter` to synchronizer with other nodes, wait for their reply, and
         // re-schedule execution of the header once we have all missing data.
-        // HeaderWaiter::spawn(
-        //     name,
-        //     committee.clone(),
-        //     store.clone(),
-        //     consensus_round,
-        //     parameters.gc_depth,
-        //     parameters.sync_retry_delay,
-        //     parameters.sync_retry_nodes,
-        //     /* rx_synchronizer */ rx_sync_headers,
-        //     /* tx_core */ tx_headers_loopback,
-        // );
+        HeaderWaiter::spawn(
+            name,
+            committee.clone(),
+            store.clone(),
+            consensus_round,
+            parameters.gc_depth,
+            parameters.sync_retry_delay,
+            parameters.sync_retry_nodes,
+            /* rx_synchronizer */ rx_sync_headers,
+            /* tx_core */ tx_headers_loopback,
+        );
 
         // The `CertificateWaiter` waits to receive all the ancestors of a certificate before looping it back to the
         // `Core` for further processing.
-        // CertificateWaiter::spawn(
-        //     store.clone(),
-        //     /* rx_synchronizer */ rx_sync_certificates,
-        //     /* tx_core */ tx_certificates_loopback,
-        // );
+        CertificateWaiter::spawn(
+            store.clone(),
+            /* rx_synchronizer */ rx_sync_certificates,
+            /* tx_core */ tx_certificates_loopback,
+        );
 
         // When the `Core` collects enough parent certificates, the `Proposer` generates a new header with new batch
         // digests from our workers and it back to the `Core`.
@@ -243,7 +243,7 @@ impl Primary {
         );
 
         // The `Helper` is dedicated to reply to certificates requests from other primaries.
-        // Helper::spawn(committee.clone(), store, rx_cert_requests);
+        Helper::spawn(committee.clone(), store, rx_cert_requests);
 
         // NOTE: This log entry is used to compute performance.
         info!(

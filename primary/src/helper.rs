@@ -3,7 +3,7 @@ use crate::primary::{HeaderMessage, HeaderType, PrimaryMessage};
 use bytes::Bytes;
 use config::Committee;
 use crypto::{Digest, PublicKey};
-use log::{error, warn};
+use log::{error, warn, debug};
 use network::SimpleSender;
 use store::Store;
 use tokio::sync::mpsc::Receiver;
@@ -20,55 +20,53 @@ pub struct Helper {
     network: SimpleSender,
 }
 
-// impl Helper {
-//     pub fn spawn(
-//         committee: Committee,
-//         store: Store,
-//         rx_primaries: Receiver<(Vec<Digest>, PublicKey)>,
-//     ) {
-//         tokio::spawn(async move {
-//             Self {
-//                 committee,
-//                 store,
-//                 rx_primaries,
-//                 network: SimpleSender::new(),
-//             }
-//             .run()
-//             .await;
-//         });
-//     }
+impl Helper {
+    pub fn spawn(
+        committee: Committee,
+        store: Store,
+        rx_primaries: Receiver<(Vec<Digest>, PublicKey)>,
+    ) {
+        tokio::spawn(async move {
+            Self {
+                committee,
+                store,
+                rx_primaries,
+                network: SimpleSender::new(),
+            }
+            .run()
+            .await;
+        });
+    }
 
-//     async fn run(&mut self) {
-//         while let Some((digests, origin)) = self.rx_primaries.recv().await {
-//             // TODO [issue #195]: Do some accounting to prevent bad nodes from monopolizing our resources.
+    async fn run(&mut self) {
+        while let Some((digests, origin)) = self.rx_primaries.recv().await {
+            // TODO [issue #195]: Do some accounting to prevent bad nodes from monopolizing our resources.
 
-//             // get the requestors address.
-//             let address = match self.committee.primary(&origin) {
-//                 Ok(x) => x.primary_to_primary,
-//                 Err(e) => {
-//                     warn!("Unexpected certificate request: {}", e);
-//                     continue;
-//                 }
-//             };
+            // get the requestors address.
+            let address = match self.committee.primary(&origin) {
+                Ok(x) => x.primary_to_primary,
+                Err(e) => {
+                    warn!("Unexpected certificate request: {}", e);
+                    continue;
+                }
+            };
 
-//             // Reply to the request (the best we can).
-//             for digest in digests {
-//                 match self.store.read(digest.to_vec()).await {
-//                     Ok(Some(data)) => {
-//                         // TODO: Remove this deserialization-serialization in the critical path.
-//                         let header_msg = bincode::deserialize(&data).unwrap();
-//                         if let HeaderType::HeaderInfo(header_info) = header_msg {
-//                             let bytes = bincode::serialize(&PrimaryMessage::HeaderMsg(
-//                                 HeaderMessage::HeaderInfo(header_info),
-//                             ))
-//                             .expect("Failed to serialize our own certificate");
-//                             self.network.send(address, Bytes::from(bytes)).await;
-//                         }
-//                     }
-//                     Ok(None) => (),
-//                     Err(e) => error!("{}", e),
-//                 }
-//             }
-//         }
-//     }
-// }
+            // Reply to the request (the best we can).
+            for digest in digests {
+                match self.store.read(digest.to_vec()).await {
+                    Ok(Some(data)) => {
+                        // TODO: Remove this deserialization-serialization in the critical path.
+                        let header_info_with_proof = bincode::deserialize(&data).unwrap();
+                        let bytes = bincode::serialize(&PrimaryMessage::HeaderInfoWithProof(header_info_with_proof))
+                            .expect("Failed to serialize our own certificate");
+
+                        self.network.send(address, Bytes::from(bytes)).await;
+                        
+                    }
+                    Ok(None) => (),
+                    Err(e) => error!("{}", e),
+                }
+            }
+        }
+    }
+}

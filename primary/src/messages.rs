@@ -456,7 +456,7 @@ impl fmt::Debug for Decide {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         write!(
             f,
-            "{}: R{}({}, {})",
+            "{}: D{}({}, {})",
             self.id,
             self.round,
             self.author,
@@ -521,7 +521,7 @@ pub struct Certificate {
     pub header_id: Digest,
     pub round: Round,
     pub origin: PublicKey,
-    // pub transaction: Vec<Transaction>,
+    pub transaction: Vec<Transaction>,
 }
 
 impl Certificate {
