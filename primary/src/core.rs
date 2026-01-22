@@ -21,6 +21,7 @@ use crypto::{Digest, PublicKey, SignatureService};
 use log::{debug, error, info, warn};
 use network::{CancelHandler, ReliableSender};
 use std::collections::{HashMap, HashSet};
+use rayon::prelude::*; // parallel iterator for hashing reconstructed shards
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use store::Store;
@@ -28,6 +29,7 @@ use tokio::sync::mpsc::{Receiver, Sender};
 use std::collections::VecDeque;
 use std::hash::{Hash, Hasher};
 use std::collections::hash_map::DefaultHasher;
+use std::time::Instant;
 
 // #[cfg(test)]
 // #[path = "tests/core_tests.rs"]
@@ -93,13 +95,11 @@ pub struct Core {
     /// Aggregates timeouts to use for sending timeout certificate.
     timeouts_aggregators: HashMap<Round, Box<TimeoutAggregator>>,
     /// The Reed-Solomon erasure coding configuration.
-    coding: Coding,
+    coding: Arc<Coding>,
     /// Stored Merkle trees for reconstructed data
     mtrees: HashMap<Digest, MerkleTree>,
     /// Stored leaf shards collected from Echo quorum (keyed by (round, root) -> leaf values)
     echo_shards: HashMap<(Round, Digest), Vec<Option<Box<[u8]>>>>,
-    /// Reconstructed payloads keyed by merkle root
-    reconstructed_payloads: HashMap<Digest, Vec<Transaction>>,
     /// Pending reconstructions waiting for HeaderInfoWithProof (keyed by header id): (root, shards)
     pending_reconstructions: HashMap<Digest, (Digest, Vec<Vec<u8>>)>,
     // certificates to commit
@@ -166,14 +166,13 @@ impl Core {
                 network: ReliableSender::new(),
                 cancel_handlers: HashMap::with_capacity(2 * gc_depth as usize),
                 timeouts_aggregators: HashMap::with_capacity(2 * gc_depth as usize),
-                coding: Coding::new(data_shard_num, parity_shard_num)
+                coding: Arc::new(Coding::new(data_shard_num, parity_shard_num)
                 .unwrap_or_else(|e| {
                     warn!("Failed to create Reed-Solomon coding (falling back to trivial): {:?}", e);
                     Coding::Trivial(data_shard_num)
-                }),
+                })),
                 mtrees: HashMap::new(),
                 echo_shards: HashMap::new(),
-                reconstructed_payloads: HashMap::new(),
                 pending_reconstructions: HashMap::new(),
                 pending_commit_rounds: HashSet::new(),
                 certificates: HashMap::new(),
@@ -217,8 +216,7 @@ impl Core {
         header: Header,
     ) -> DagResult<()> {
         debug!("Processing own header: {:?}", header);
-        // let h_round = header.round;
-        // let parent = header.parent;
+        let start_total = Instant::now();
 
         let mut header_info = HeaderInfo::create_from(&header);
         self.processing_header_infos
@@ -227,12 +225,17 @@ impl Core {
 
         let data_shard_num = self.coding.data_shard_count();
         let parity_shard_num = self.coding.parity_shard_count();
+        debug!("data_shard_num: {}", data_shard_num);
+        debug!("parity_shard_num: {}", parity_shard_num);
         let payload = header.payload;
+
+        let t_ser = Instant::now();
         let payload_bytes = bincode::serialize(&payload).map_err(DagError::SerializationError)?;
+        debug!("serialize time: {:?}", t_ser.elapsed());
         let mut payload_bytes = payload_bytes; 
 
         let payload_len = payload_bytes.len();
-
+        debug!("Original payload length: {}", payload_len);
         // record payload_len in header_info so HeaderInfoWithProof carries it
         header_info.payload_len = payload_len;
         // update stored header_info with the correct payload_len
@@ -240,18 +243,21 @@ impl Core {
             *h = header_info.clone();
         }
 
+        let t_pad = Instant::now();
         // Size of a Merkle tree leaf value: the value size divided by the number of data shards,
         // and rounded up, so that the full value always fits in the data shards. Always at least 1.
         let shard_len = (payload_len + data_shard_num - 1) / data_shard_num;
         // Pad the last data shard with zeros. Fill the parity shards with zeros.
         payload_bytes.resize(shard_len * (data_shard_num + parity_shard_num), 0);
+        debug!("pad time: {:?}", t_pad.elapsed());
 
         // Divide the vector into chunks/shards.
         let mut shards_vec: Vec<&mut [u8]> = payload_bytes.chunks_mut(shard_len).collect();
 
-        // Construct the parity chunks/shards. This only fails if a shard is empty or the shards
-        // have different sizes. Our shards all have size `shard_len`, which is at least 1.
+        let t_encode = Instant::now();
+        // Construct the parity chunks/shards.
         self.coding.encode(&mut shards_vec).expect("wrong shard size");
+        debug!("encode time: {:?}", t_encode.elapsed());
 
         debug!(
             "Payload: {} bytes, {} per shard. Shards: {:0.10}",
@@ -260,19 +266,26 @@ impl Core {
             HexList(&shards_vec)
         );
 
+        let t_mtree = Instant::now();
         // Create a Merkle tree from the shards.
         let mtree = MerkleTree::from_vec(shards_vec.into_iter().map(|shard| shard.to_vec()).collect());
+        debug!("merkle build time: {:?}", t_mtree.elapsed());
 
         assert_eq!(self.committee.total_stake() as usize, mtree.values().len());
 
         let sorted_keys = self.committee.sorted_keys.clone();
         for (index, pk) in sorted_keys.iter().enumerate() {
-             let proof = mtree.proof(index).ok_or(DagError::ProofConstructionFailed)?;
+             let t_proof = Instant::now();
+             // Use proof_with_leaf to construct the proof from the leaf value provided here.
+             // This keeps the code explicit about which leaf value is used for the proof.
+             let leaf = mtree.values().get(index).cloned().ok_or(DagError::ProofConstructionFailed)?;
+             let proof = mtree.proof_with_leaf(index, leaf).ok_or(DagError::ProofConstructionFailed)?;
              let header_info_with_proof = HeaderInfoWithProof::new(&header_info, &proof);
              if pk == &self.name {
                  self.process_header_proof(&header_info_with_proof)
                      .await
                      .expect("Failed to process our own proof");
+                 debug!("local proof processed index={} time={:?}", index, t_proof.elapsed());
              } else {
                  let address = self
                      .committee
@@ -288,12 +301,17 @@ impl Core {
                      .push(handler);
               }
           }
+        debug!("process_own_header total time: {:?}", start_total.elapsed());
          Ok(())
     }
 
     async fn process_header_proof(&mut self, header_info_with_proof: &HeaderInfoWithProof) -> DagResult<()> {
-        debug!("Processing proof: {:?}", header_info_with_proof);
-
+        let start = Instant::now();
+        // debug!("Processing proof: {:?}", header_info_with_proof);
+        debug!(
+            "Header info with proof payload len: {}",
+            header_info_with_proof.proof.value().len()
+        );
         self.parent_info.entry(header_info_with_proof.id).or_insert((header_info_with_proof.round, header_info_with_proof.parent));
 
         self.processing_header_proofs
@@ -301,32 +319,40 @@ impl Core {
              .or_insert(header_info_with_proof.clone());
 
         if self.last_voted.entry(header_info_with_proof.round).or_insert_with(HashSet::new).insert(header_info_with_proof.author) {
-            // Make an echo and send it to all nodes
-            let echo = Echo::new(&header_info_with_proof, &self.name).await;
-            let addresses = self
-                .committee
-                .others_primaries(&self.name)
-                .iter()
-                .map(|(_, x)| x.primary_to_primary)
-                .collect();
-            let bytes = bincode::serialize(&PrimaryMessage::Echo(echo.clone()))
-                .expect("Failed to serialize our own echo");
-            let handlers = self.network.broadcast(addresses, Bytes::from(bytes)).await;
-            self.cancel_handlers
-                .entry(header_info_with_proof.round)
-                .or_insert_with(Vec::new)
-                .extend(handlers);
+             // Make an echo and send it to all nodes
+             let t_echo = Instant::now();
+             let echo = Echo::new(&header_info_with_proof, &self.name).await;
+             let addresses = self
+                 .committee
+                 .others_primaries(&self.name)
+                 .iter()
+                 .map(|(_, x)| x.primary_to_primary)
+                 .collect();
+                // Serialize a clone for the network but keep the original to process locally (move into process_echo).
+                let bytes = bincode::serialize(&PrimaryMessage::Echo(echo.clone()))
+                    .expect("Failed to serialize our own echo");
 
-            self.process_echo(&echo)
-                .await
-                .expect("Failed to process our own echo");
-        }
+                let handlers = self.network.broadcast(addresses, Bytes::from(bytes)).await;
+
+                self.cancel_handlers
+                     .entry(header_info_with_proof.round)
+                     .or_insert_with(Vec::new)
+                     .extend(handlers);
+ 
+                debug!("echo broadcast time: {:?}", t_echo.elapsed());
+
+                self.process_echo(echo)
+                   .await
+                    .expect("Failed to process our own echo");
+             }
         
+        let t_parent = Instant::now();
         if header_info_with_proof.round != 1 {
             let parent = self
                 .synchronizer
                 .get_parent(&header_info_with_proof.clone())
                 .await?;
+            debug!("get_parent time: {:?}", t_parent.elapsed());
             if parent.is_none() {
                 debug!(
                     "Processing of {} suspended: missing parent",
@@ -337,9 +363,11 @@ impl Core {
         }
 
         let hid = header_info_with_proof.id;
+        let t_store = Instant::now();
         let bytes = bincode::serialize(header_info_with_proof).expect("Failed to serialize header");
         // Store the header.
         self.store.write(hid.to_vec(), bytes).await;
+        debug!("store write time: {:?}", t_store.elapsed());
 
         // If a reconstruction was waiting for this header's info, resume it now.
         if let Some((root, shards)) = self.pending_reconstructions.remove(&header_info_with_proof.id) {
@@ -347,50 +375,34 @@ impl Core {
             if let Err(e) = self.finalize_reconstruction(root, shards, header_info_with_proof.clone()).await {
                 warn!("Failed to finalize pending reconstruction for {:?}: {}", header_info_with_proof.id, e);
             }
+            debug!("process_header_proof total time: {:?}", start.elapsed());
             return Ok(());
         }
+        debug!("process_header_proof total time: {:?}", start.elapsed());
         Ok(())
     }
 
-    // #[async_recursion]
-    // async fn process_timeout(&mut self, timeout: Timeout) -> DagResult<()> {
-    //     debug!("Processing {:?}", timeout);
-
-    //     // Check if we have enough timeout messages to create a timeout cert to propose next header.
-    //     if let Some(timeout_cert) = self
-    //         .timeouts_aggregators
-    //         .entry(timeout.round)
-    //         .or_insert_with(|| Box::new(TimeoutAggregator::new()))
-    //         .append(timeout.clone(), &self.committee)?
-    //     {
-    //         debug!("Aggregated timeout cert {:?}", timeout);
-    //         // Send it to the `Proposer`.
-    //         self.tx_timeout_cert
-    //             .send((timeout_cert, timeout.round))
-    //             .await
-    //             .expect("Failed to send timeout");
-    //     }
-    //     Ok(())
-    // }
-
-    async fn process_echo(&mut self, echo: &Echo) -> DagResult<()> {
-        debug!("Processing {:?}", echo);
-        let proof = &echo.proof;
+    async fn process_echo(&mut self, echo: Echo) -> DagResult<()> {
+        // debug!("Processing {:?}", echo);
+        let proof = echo.proof;
+        let author = echo.author;
+        let id = echo.id;
+        let round = echo.round;
+        let origin = echo.origin;
         // Validate the proof
-        if self.committee.index_of(&echo.author) == Some(proof.index()) && proof.validate(self.committee.total_stake() as usize) {
-            if !self.processing_echo_aggregators.contains_key(&echo.id) {
+        if self.committee.index_of(&author) == Some(proof.index()) && proof.validate(self.committee.total_stake() as usize) {
+            if !self.processing_echo_aggregators.contains_key(&id) {
                 self.processing_echo_aggregators
-                    .entry(echo.id.clone())
+                    .entry(id.clone())
                     .or_insert(EchoAggregator::new());
             }
-            if let Some(echo_aggregator) = self.processing_echo_aggregators.get_mut(&echo.id) {
-                if let Some((root_hash, leaf_values)) = echo_aggregator.append(&echo, &self.committee)? {
+            if let Some(echo_aggregator) = self.processing_echo_aggregators.get_mut(&id) {
+                if let Some((root_hash, leaf_values)) = echo_aggregator.append(author, proof, &self.committee)? {
                     // Store the collected leaf values for this root so we can reconstruct later
                     // key by (round, root_hash)
-                    self.echo_shards.entry((echo.round, root_hash)).or_insert(leaf_values.clone());
+                    self.echo_shards.entry((round, root_hash)).or_insert(leaf_values.clone());
 
-                    // Make a ready and send it to all nodes (do not reconstruct here)
-                    let ready = Ready::new(echo.id, echo.round, &echo.origin, &self.name, root_hash).await;
+                    let ready = Ready::new(id, round, &origin, &self.name, root_hash).await;
 
                     let addresses = self
                         .committee
@@ -402,7 +414,7 @@ impl Core {
                         .expect("Failed to serialize our own ready");
                     let handlers = self.network.broadcast(addresses, Bytes::from(bytes)).await;
                     self.cancel_handlers
-                        .entry(echo.round)
+                        .entry(round)
                         .or_insert_with(Vec::new)
                         .extend(handlers);
 
@@ -415,7 +427,8 @@ impl Core {
 
     #[async_recursion]
     async fn process_ready(&mut self, ready: &Ready) -> DagResult<()> {
-        debug!("Processing {:?}", ready);
+        let start = Instant::now();
+        // debug!("Processing {:?}", ready);
 
         if !self.processing_ready_aggregators.contains_key(&ready.id) {
             self.processing_ready_aggregators
@@ -426,23 +439,37 @@ impl Core {
         if let Some(ready_aggregator) = self.processing_ready_aggregators.get_mut(&ready.id) {
             // ReadyAggregator now returns the root Digest when 2f+1 Ready messages are collected.
             if let Some(root) = ready_aggregator.append(&ready, &self.committee)? {
-                // Try to reconstruct only now (after Ready quorum). Prefer stored leafs from Echo phase.
-                if let Some(mut shard_opts) = self.echo_shards.remove(&(ready.round, root)) {
-                    debug!("round {:?} - reconstructing for root", ready.round);
-                    // Attempt reconstruction
-                    self.coding
-                        .reconstruct_shards(&mut shard_opts[..])
-                        .map_err(|_| DagError::ProofConstructionFailed)?;
+                if let Some(mut leaf_values) = self.echo_shards.remove(&(ready.round, root)) {
+                    let t_reconstruct = Instant::now();
+                    // debug!("round {:?} - reconstructing for root", ready.round);
+                    // debug!("leaf_values {}", leaf_values.len());
 
-                    let shards: Vec<Vec<u8>> = shard_opts
-                        .iter()
-                        .filter_map(|l| l.as_ref().map(|v| v.to_vec()))
+                    // Move the coding handle and the leaf_values into a blocking task so the
+                    // async runtime threads are not blocked by the CPU-heavy reconstruction.
+                    let coding = Arc::clone(&self.coding);
+                    let leaf_values = tokio::task::spawn_blocking(move || {
+                        coding.reconstruct_shards(&mut leaf_values[..])?;
+                        Ok::<_, DagError>(leaf_values)
+                    })
+                    .await
+                    .map_err(|_| DagError::ProofConstructionFailed)??;
+
+                    debug!("reconstruct_shards time: {:?}", t_reconstruct.elapsed());
+
+                    let shards: Vec<Vec<u8>> = leaf_values
+                        .into_iter()
+                        .map(|opt| opt.expect("reconstruct_shards produced all shards").into_vec())
                         .collect();
 
-                    debug!("Reconstructed shards: {:0.10}", HexList(&shards));
-
+                    // debug!("Reconstructed shards: {:0.10}", HexList(&shards));
+                    debug!("rayon threads: {}", rayon::current_num_threads());
                     // Construct the Merkle tree.
-                    let mtree = MerkleTree::from_vec(shards.clone());
+                    let t_mtree = Instant::now();
+                    // Compute leaf digests in parallel and build tree from hashes to avoid cloning all shards.
+                    let hashes: Vec<Digest> = shards.par_iter().map(|s| MerkleTree::digest(s)).collect();
+                    debug!("hashes compute time: {:?}", t_mtree.elapsed());
+                    let mtree = MerkleTree::from_hashes(hashes);
+                    // debug!("mtree rebuild time: {:?}", t_mtree.elapsed());
                     // If the root hash of the reconstructed tree does not match the one
                     // received with proofs then abort.
                     if *mtree.root_hash() != root {
@@ -459,12 +486,15 @@ impl Core {
                             // Store pending reconstruction to be resumed when HeaderInfoWithProof arrives.
                             debug!("Missing HeaderInfoWithProof for ready id {:?}, storing pending reconstruction", rid);
                             self.pending_reconstructions.insert(rid, (root, shards));
+                            debug!("process_ready total time (pending): {:?}", start.elapsed());
                             return Ok(());
                         }
                     };
 
                     // Move shards into helper that rebuilds the payload and submits the certificate.
+                    let t_finalize = Instant::now();
                     self.finalize_reconstruction(root, shards, header_clone).await?;
+                    debug!("finalize_reconstruction time: {:?}", t_finalize.elapsed());
                 } else {
                     // We don't have the echo-collected shards locally yet. Wait — other nodes
                     // that did collect ECHO quorum will reconstruct and the mtree will eventually
@@ -483,51 +513,64 @@ impl Core {
         shards: Vec<Vec<u8>>,
         header_info_with_proof: HeaderInfoWithProof,
     ) -> DagResult<()> {
+        let start = Instant::now();
         let payload_len = header_info_with_proof.payload_len;
 
-        let data_count = self.coding.data_shard_count() as usize;
-        let mut payload_bytes: Vec<u8> = shards
-            .into_iter()
-            .take(data_count)
-            .flat_map(|s| s.into_iter())
-            .collect();
-        payload_bytes.truncate(payload_len);
 
-        let payload: Vec<Transaction> = bincode::deserialize(&payload_bytes)
-            .map_err(DagError::SerializationError)?;
+        // let data_count = self.coding.data_shard_count() as usize;
+        // let t_concat = Instant::now();
+        // let mut payload_bytes: Vec<u8> = shards
+        //     .into_iter()
+        //     .take(data_count)
+        //     .flat_map(|s| s.into_iter())
+        //     .collect();
+        // debug!("concat data shards time: {:?}", t_concat.elapsed());
+        // payload_bytes.truncate(payload_len);
+
+        // let payload: Vec<Transaction> = bincode::deserialize(&payload_bytes)
+        //     .map_err(DagError::SerializationError)?;
 
         // store reconstructed payload for later use
-        self.reconstructed_payloads.insert(root, payload.clone());
+        // self.reconstructed_payloads.insert(root, payload.clone());
 
         let certificate = Certificate {
             header_id: header_info_with_proof.id,
             round: header_info_with_proof.round,
             origin: header_info_with_proof.author,
-            transaction: payload,
         };
 
+        let t_proc_cert = Instant::now();
         self.process_certificate(certificate).await?;
+        debug!("process_certificate time: {:?}", t_proc_cert.elapsed());
+        debug!("finalize_reconstruction total time: {:?}", start.elapsed());
         Ok(())
     }
 
     #[async_recursion]
     async fn process_certificate(&mut self, certificate: Certificate) -> DagResult<()> {
+        let start = Instant::now();
         debug!("Processing cert {:?}", certificate);
 
         // Ensure we have all the ancestor of this certificate yet. If we don't, the synchronizer will gather it and trigger re-processing of this certificate.
+        // let t_deliver = Instant::now();
         if !self.synchronizer.deliver_certificate(&certificate).await? {
+            // debug!("deliver_certificate time: {:?}", t_deliver.elapsed());
             debug!(
                 "Processing of {:?} suspended: missing parent",
                 certificate
             );
             return Ok(());
         }
+        // debug!("deliver_certificate time: {:?}", t_deliver.elapsed());
 
         self.commit(certificate.round).await?;
         
         // Store the certificate.
-        let bytes = bincode::serialize(&certificate).expect("Failed to serialize certificate");
-        self.store.write(certificate.digest().to_vec(), bytes).await;
+        // let t_store = Instant::now();
+        // let bytes = bincode::serialize(&certificate).expect("Failed to serialize certificate");
+        // self.store.write(certificate.digest().to_vec(), bytes).await;
+        // debug!("certificate length: {}", bytes.len());
+        // debug!("store certificate time: {:?}", t_store.elapsed());
 
         // Send it to the `Proposer`.
         self.tx_proposer
@@ -552,13 +595,15 @@ impl Core {
             .entry(certificate.round)
             .or_insert_with(Vec::new)
             .extend(handlers);
+
+        debug!("process_certificate total time: {:?}", start.elapsed());
         Ok(())
     }
 
 
     #[async_recursion]
     async fn process_decide(&mut self, decide: &Decide) -> DagResult<()> {
-        debug!("Processing {:?}", decide);
+        // debug!("Processing {:?}", decide);
 
         if !self.processing_decide_aggregators.contains_key(&decide.id) {
             self.processing_decide_aggregators
@@ -617,7 +662,7 @@ impl Core {
         // If parent is missing, to do.
         while let Some(header_id) = to_commit.pop_back() {
             info!("Committed {:?} ", header_id);
-            debug!("round {:?} committed", round);
+            // debug!("round {:?} committed", round);
         }
         Ok(())
     }
@@ -674,7 +719,7 @@ impl Core {
                         // },
                         PrimaryMessage::Echo(echo) => {
                             match self.sanitize_echo(&echo) {
-                                Ok(()) => self.process_echo(&echo).await,
+                                Ok(()) => self.process_echo(echo).await,
                                 error => error
                             }
                         },

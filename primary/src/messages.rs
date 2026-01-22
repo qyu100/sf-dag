@@ -521,7 +521,6 @@ pub struct Certificate {
     pub header_id: Digest,
     pub round: Round,
     pub origin: PublicKey,
-    pub transaction: Vec<Transaction>,
 }
 
 impl Certificate {

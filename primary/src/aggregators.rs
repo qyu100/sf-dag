@@ -1,11 +1,12 @@
 // Copyright(C) Facebook, Inc. and its affiliates.
 use crate::error::{DagError, DagResult};
 use crate::merkle::Proof;
-use crate::messages::{Certificate, Ready, Timeout, TimeoutCert, Echo, Decide};
+use crate::messages::{Certificate, Ready, Timeout, TimeoutCert, Decide};
 use config::{Committee, Stake};
 use crypto::{PublicKey, Digest};
 use crypto::Signature;
 use log::debug;
+use std::time::Instant;
 use std::collections::{HashSet, HashMap};
 
 pub struct EchoAggregator {
@@ -27,28 +28,27 @@ impl EchoAggregator {
         }
     }
 
-    pub fn append(&mut self, echo: &Echo, committee: &Committee) -> DagResult<Option<(Digest, Vec<Option<Box<[u8]>>>)>> {
-        let author = echo.author;
+    pub fn append(&mut self, author: PublicKey, proof: Proof, committee: &Committee) -> DagResult<Option<(Digest, Vec<Option<Box<[u8]>>>)>> {
         // Ensure it is the first time this authority votes.
         ensure!(self.used.insert(author), DagError::AuthorityReuse(author));
 
-        let root = echo.proof.root_hash();
-        let author_map = self.echos.entry(*root).or_insert_with(HashMap::new);
-        author_map.insert(author, echo.proof.clone());
+        // Clone the root digest first (avoids borrowing `proof`), then move the proof into the map.
+        let root = proof.root_hash().clone();
+        let author_map = self.echos.entry(root.clone()).or_insert_with(HashMap::new);
+        // Move proof into the map to avoid cloning large leaf data.
+        author_map.insert(author, proof);
 
-        let w = self.weights.entry(*root).or_insert(0);
+        let w = self.weights.entry(root.clone()).or_insert(0);
         *w += committee.stake(&author);
-
         // If this particular root reached quorum, build the ordered leaf vector
         if *w >= committee.quorum_threshold() {
-
             self.weights.remove(&root);
             let author_map = self.echos.remove(&root).expect("author_map exists");
-            
+            let mut owned_map = author_map;
             let leaf_values: Vec<Option<Box<[u8]>>> = committee
                 .sorted_keys
                 .iter()
-                .map(|pk| author_map.get(pk).map(|p| p.value().clone().into_boxed_slice()))
+                .map(|pk| owned_map.remove(pk).map(|p| p.into_value()))
                 .collect();
             return Ok(Some((root.clone(), leaf_values)));
         }
@@ -110,9 +110,9 @@ impl DecideAggregator {
     }
 
     pub fn append(
-    &mut self,
-    decide: &Decide,
-    committee: &Committee,
+        &mut self,
+        decide: &Decide,
+        committee: &Committee,
     ) -> DagResult<Option<bool>> {
         let author = decide.author;
         ensure!(self.used.insert(author), DagError::AuthorityReuse(author));
