@@ -7,7 +7,7 @@ use crate::header_waiter::HeaderWaiter;
 use crate::helper::Helper;
 use crate::messages::{
     Certificate, Header, HeaderInfo, HeaderInfoWithCertificate, HeaderWithCertificate,
-    Ready, Timeout, Echo, HeaderInfoWithProof, Decide
+    Ready, Timeout, Echo, Decide
 };
 use crate::proposer::Proposer;
 use crate::synchronizer::Synchronizer;
@@ -39,13 +39,8 @@ pub enum PrimaryMessage {
     Echo(Echo),
     Ready(Ready),
     CertificatesRequest(Vec<Digest>, /* requestor */ PublicKey),
-    HeaderInfoWithProof(HeaderInfoWithProof),
+    Header(Header),
     Decide(Decide),
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub enum HeaderType {
-    HeaderInfoWithProof(HeaderInfoWithProof),
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -53,12 +48,10 @@ pub enum HeaderMessage {
     HeaderWithCertificate(HeaderWithCertificate),
     HeaderInfoWithCertificate(HeaderInfoWithCertificate),
     Header(Header),
-    HeaderInfo(HeaderInfo),
 }
 pub enum ConsensusMessage {
     HeaderInfo(HeaderInfo),
     Certificate(Certificate),
-    HeaderInfoWithProof(HeaderInfoWithProof),
 }
 
 /// The messages sent by the primary to its workers.

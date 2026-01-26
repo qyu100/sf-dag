@@ -1,7 +1,7 @@
 // Copyright(C) Facebook, Inc. and its affiliates.
 use crate::error::{DagError, DagResult};
-use crate::messages::HeaderInfoWithProof;
-use crate::primary::{HeaderMessage, HeaderType, PrimaryMessage, Round};
+use crate::primary::{HeaderMessage, PrimaryMessage, Round};
+use crate::messages::Header;
 use bytes::Bytes;
 use config::Committee;
 use crypto::{Digest, PublicKey};
@@ -26,7 +26,7 @@ const TIMER_RESOLUTION: u64 = 1_000;
 #[derive(Debug)]
 pub enum WaiterMessage {
     // SyncPayload(Digest, Header),
-    SyncParents(Vec<Digest>, HeaderInfoWithProof),
+    SyncParents(Vec<Digest>, Header),
 }
 
 /// Waits for missing parent certificates and batches' digests.
@@ -49,7 +49,7 @@ pub struct HeaderWaiter {
     /// Receives sync commands from the `Synchronizer`.
     rx_synchronizer: Receiver<WaiterMessage>,
     /// Loops back to the core headers for which we got all parents and batches.
-    tx_core: Sender<HeaderInfoWithProof>,
+    tx_core: Sender<Header>,
 
     /// Network driver allowing to send messages.
     network: SimpleSender,
@@ -75,7 +75,7 @@ impl HeaderWaiter {
         sync_retry_delay: u64,
         sync_retry_nodes: usize,
         rx_synchronizer: Receiver<WaiterMessage>,
-        tx_core: Sender<HeaderInfoWithProof>,
+        tx_core: Sender<Header>,
     ) {
         tokio::spawn(async move {
             Self {
@@ -102,9 +102,9 @@ impl HeaderWaiter {
     /// and then delivers the specified header.
     async fn waiter(
         mut missing: Vec<(Vec<u8>, Store)>,
-        deliver: HeaderInfoWithProof,
+        deliver: Header,
         mut handler: Receiver<()>,
-    ) -> DagResult<Option<HeaderInfoWithProof>> {
+    ) -> DagResult<Option<Header>> {
         let waiting: Vec<_> = missing
             .iter_mut()
             .map(|(x, y)| y.notify_read(x.to_vec()))
@@ -129,10 +129,10 @@ impl HeaderWaiter {
                 Some(message) = self.rx_synchronizer.recv() => {
                     match message {
 
-                        WaiterMessage::SyncParents(missing, header_info_with_proof) => {
-                            let id = header_info_with_proof.id.clone();
-                            let round = header_info_with_proof.round;
-                            let author = header_info_with_proof.author;
+                        WaiterMessage::SyncParents(missing, header) => {
+                            let id = header.id.clone();
+                            let round = header.round;
+                            let author = header.author;
 
                             debug!("Synching the parents of {}", id);
 
@@ -151,7 +151,7 @@ impl HeaderWaiter {
                                 .collect();
                             let (tx_cancel, rx_cancel) = channel(1);
                             self.pending.insert(id, (round, tx_cancel));
-                            let fut = Self::waiter(wait_for, header_info_with_proof, rx_cancel);
+                            let fut = Self::waiter(wait_for, header, rx_cancel);
                             waiting.push(fut);
 
                             // Ensure we didn't already sent a sync request for these parents.
@@ -183,12 +183,12 @@ impl HeaderWaiter {
                 },
 
                 Some(result) = waiting.next() => match result {
-                    Ok(Some(header_info_with_proof)) => {
-                        let id = header_info_with_proof.id;
-                        let parent = header_info_with_proof.parent.clone();
+                    Ok(Some(header)) => {
+                        let id = header.id;
+                        let parent = header.parent.clone();
                         let _ = self.pending.remove(&id);
                         let _ = self.parent_requests.remove(&parent);
-                        self.tx_core.send(header_info_with_proof).await.expect("Failed to send header");
+                        self.tx_core.send(header).await.expect("Failed to send header");
                     },
                     Ok(None) => {
                         // This request has been canceled.

@@ -13,12 +13,10 @@ mod primary;
 mod proposer;
 mod synchronizer;
 mod worker;
-mod merkle;
-mod coding;
 
-#[cfg(test)]
-#[path = "tests/common.rs"]
-mod common;
+// #[cfg(test)]
+// #[path = "tests/common.rs"]
+// mod common;
 
 pub use crate::messages::{Certificate, Header, HeaderInfo};
 pub use crate::primary::{

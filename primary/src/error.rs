@@ -57,9 +57,6 @@ pub enum DagError {
     #[error("Message {0} (round {1}) too old")]
     TooOld(Digest, Round),
 
-    #[error("Proof construction failed")]
-    ProofConstructionFailed,
-
     #[error("Certificate for round {0} not found")]
     CertificateNotFound(Round),
 }

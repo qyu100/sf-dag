@@ -2,7 +2,6 @@ use crate::batch_maker::Transaction;
 // Copyright(C) Facebook, Inc. and its affiliates.
 use crate::error::{DagError, DagResult};
 use crate::primary::Round;
-use crate::merkle::Proof;
 use config::Committee;
 use crypto::{Digest, Hash, PublicKey, Signature, SignatureService};
 use ed25519_dalek::Digest as _;
@@ -128,45 +127,6 @@ impl fmt::Display for HeaderInfoWithCertificate {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize)]
-pub struct HeaderInfoWithProof {
-    pub author: PublicKey,
-    pub round: Round,
-    pub parent: Digest,
-    pub id: Digest,
-    pub proof: Proof,
-    pub payload_len: usize,
-}
-impl HeaderInfoWithProof {
-    pub fn new(header_info: &HeaderInfo, proof: &Proof) -> Self {
-        let header_info_with_proof = Self {
-            author: header_info.author,
-            round: header_info.round,
-            parent: header_info.parent.clone(),
-            id: header_info.id,
-            proof: proof.clone(),
-            payload_len: header_info.payload_len,
-        };
-        header_info_with_proof
-    }
-    pub fn verify(&self, committee: &Committee) -> DagResult<()> {
-        // Ensure the authority has voting rights.
-        let voting_rights = committee.stake(&self.author);
-        ensure!(voting_rights > 0, DagError::UnknownAuthority(self.author));
-        Ok(())
-    }
-}
-
-impl fmt::Debug for HeaderInfoWithProof {
-    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
-        write!(f, "{}: B{}({})", self.id, self.round, self.author,)
-    }
-}
-impl fmt::Display for HeaderInfoWithProof {
-    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
-        write!(f, "B{}({})", self.round, self.author)
-    }
-}
 
 #[derive(Clone, Serialize, Deserialize, Default)]
 pub struct HeaderInfo {
@@ -175,7 +135,6 @@ pub struct HeaderInfo {
     pub payload: Digest,
     pub parent: Digest,
     pub id: Digest,
-    pub payload_len: usize,
 }
 impl HeaderInfo {
     pub fn create_from(header: &Header) -> Self {
@@ -185,7 +144,6 @@ impl HeaderInfo {
             payload: payload_digest(&header),
             parent: header.parent.clone(),
             id: header.id,
-            payload_len: 0,
         };
         header_info
     }
@@ -281,17 +239,15 @@ pub struct Echo {
     pub round: Round,
     pub origin: PublicKey,
     pub author: PublicKey,
-    pub proof: Proof
 }
 
 impl Echo {
-    pub async fn new(header_info_with_proof: &HeaderInfoWithProof, author: &PublicKey) -> Self {
+    pub async fn new(header: &Header, author: &PublicKey) -> Self {
         Self {
-            id: header_info_with_proof.id.clone(),
-            round: header_info_with_proof.round,
-            origin: header_info_with_proof.author,
+            id: header.id.clone(),
+            round: header.round,
+            origin: header.author,
             author: *author,
-            proof: header_info_with_proof.proof.clone(),
         }
     }
 
@@ -318,64 +274,12 @@ impl fmt::Debug for Echo {
     }
 }
 
-// #[derive(Clone, Serialize, Deserialize)]
-// pub struct Vote {
-//     pub id: Digest,
-//     pub round: Round,
-//     pub origin: PublicKey,
-//     pub author: PublicKey,
-// }
-
-// impl Vote {
-//     pub async fn new_for_header_info(header_info: &HeaderInfo, author: &PublicKey) -> Self {
-//         Self {
-//             id: header_info.id.clone(),
-//             round: header_info.round,
-//             origin: header_info.author,
-//             author: *author,
-//         }
-//     }
-
-//     pub fn verify(&self, committee: &Committee) -> DagResult<()> {
-//         // Ensure the authority has voting rights.
-//         ensure!(
-//             committee.stake(&self.author) > 0,
-//             DagError::UnknownAuthority(self.author)
-//         );
-//         Ok(())
-//     }
-// }
-
-// impl Hash for Vote {
-//     fn digest(&self) -> Digest {
-//         let mut hasher = Sha512::new();
-//         hasher.update(&self.id);
-//         hasher.update(self.round.to_le_bytes());
-//         hasher.update(&self.origin);
-//         Digest(hasher.finalize().as_slice()[..32].try_into().unwrap())
-//     }
-// }
-
-// impl fmt::Debug for Vote {
-//     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
-//         write!(
-//             f,
-//             "{}: V{}({}, {})",
-//             self.digest(),
-//             self.round,
-//             self.author,
-//             self.id
-//         )
-//     }
-// }
-
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Ready {
     pub id: Digest,
     pub round: Round,
     pub origin: PublicKey,
     pub author: PublicKey,
-    pub root_hash: Digest,
 }
 
 impl Ready {
@@ -384,14 +288,12 @@ impl Ready {
         round: Round,
         origin: &PublicKey,
         author: &PublicKey,
-        root_hash: Digest,
     ) -> Self {
         Self {
             id: header_id,
             round,
             origin: *origin,
             author: *author,
-            root_hash,
         }
     }
 
@@ -521,7 +423,6 @@ pub struct Certificate {
     pub header_id: Digest,
     pub round: Round,
     pub origin: PublicKey,
-    pub transaction: Vec<Transaction>,
 }
 
 impl Certificate {
