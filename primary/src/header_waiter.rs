@@ -1,9 +1,9 @@
 // Copyright(C) Facebook, Inc. and its affiliates.
 use crate::error::{DagError, DagResult};
-use crate::primary::{HeaderMessage, PrimaryMessage, Round};
+use crate::primary::{HeaderMessage, PrimaryMessage, Round, PrimaryWorkerMessage};
 use crate::messages::Header;
 use bytes::Bytes;
-use config::Committee;
+use config::{Committee, WorkerId};
 use crypto::{Digest, PublicKey};
 use futures::future::try_join_all;
 use futures::stream::futures_unordered::FuturesUnordered;
@@ -25,7 +25,7 @@ const TIMER_RESOLUTION: u64 = 1_000;
 /// The commands that can be sent to the `Waiter`.
 #[derive(Debug)]
 pub enum WaiterMessage {
-    // SyncPayload(Digest, Header),
+    SyncBatches(HashMap<Digest, WorkerId>, Header),
     SyncParents(Vec<Digest>, Header),
 }
 
@@ -58,7 +58,7 @@ pub struct HeaderWaiter {
     parent_requests: HashMap<Digest, (Round, u128)>,
     /// Keeps the digests of the all tx batches for which we sent a sync request,
     /// similarly to `header_requests`.
-    // payload_requests: HashMap<Digest, Round>,
+    batch_requests: HashMap<Digest, Round>,
     /// List of digests (either certificates, headers or tx batch) that are waiting
     /// to be processed. Their processing will resume when we get all their dependencies.
     pending: HashMap<Digest, (Round, Sender<()>)>,
@@ -90,7 +90,7 @@ impl HeaderWaiter {
                 tx_core,
                 network: SimpleSender::new(),
                 parent_requests: HashMap::new(),
-                // payload_requests: HashMap::new(),
+                batch_requests: HashMap::new(),
                 pending: HashMap::new(),
             }
             .run()
@@ -128,6 +128,52 @@ impl HeaderWaiter {
             tokio::select! {
                 Some(message) = self.rx_synchronizer.recv() => {
                     match message {
+                        WaiterMessage::SyncBatches(missing, header) => {
+                            debug!("Synching the payload of {}", header);
+                            let header_id = header.id.clone();
+                            let round = header.round;
+                            let author = header.author;
+
+                            // Ensure we sync only once per header.
+                            if self.pending.contains_key(&header_id) {
+                                continue;
+                            }
+
+                            // Add the header to the waiter pool. The waiter will return it to when all
+                            // its parents are in the store.
+                            let wait_for = missing
+                                .iter()
+                                .map(|(digest, worker_id)| {
+                                    let key = [digest.as_ref(), &worker_id.to_le_bytes()].concat();
+                                    (key.to_vec(), self.store.clone())
+                                })
+                                .collect();
+                            let (tx_cancel, rx_cancel) = channel(1);
+                            self.pending.insert(header_id, (round, tx_cancel));
+                            let fut = Self::waiter(wait_for, header, rx_cancel);
+                            waiting.push(fut);
+
+                            // Ensure we didn't already send a sync request for these parents.
+                            let mut requires_sync = HashMap::new();
+                            for (digest, worker_id) in missing.into_iter() {
+                                self.batch_requests.entry(digest.clone()).or_insert_with(|| {
+                                    requires_sync.entry(worker_id).or_insert_with(Vec::new).push(digest);
+                                    round
+                                });
+                            }
+                            for (worker_id, digests) in requires_sync {
+                                let address = self.committee
+                                    .worker(&self.name, &worker_id)
+                                    .expect("Author of valid header is not in the committee")
+                                    .primary_to_worker;
+                                debug!("Sent syncbatches message for height {}", round);
+                                let message = PrimaryWorkerMessage::Synchronize(digests, author);
+                                let bytes = bincode::serialize(&message)
+                                    .expect("Failed to serialize batch sync request");
+                                self.network.send(address, Bytes::from(bytes)).await;
+                            }
+                            
+                        }
 
                         WaiterMessage::SyncParents(missing, header) => {
                             let id = header.id.clone();
@@ -187,6 +233,9 @@ impl HeaderWaiter {
                         let id = header.id;
                         let parent = header.parent.clone();
                         let _ = self.pending.remove(&id);
+                        for x in header.payload.keys() {
+                            let _ = self.batch_requests.remove(x);
+                        }
                         let _ = self.parent_requests.remove(&parent);
                         self.tx_core.send(header).await.expect("Failed to send header");
                     },
@@ -240,8 +289,8 @@ impl HeaderWaiter {
                         let _ = handler.send(()).await;
                     }
                 }
+                self.batch_requests.retain(|_, r| r > &mut gc_round);
                 self.pending.retain(|_, (r, _)| r > &mut gc_round);
-                // self.payload_requests.retain(|_, r| r > &mut gc_round);
                 self.parent_requests.retain(|_, (r, _)| r > &mut gc_round);
             }
         }

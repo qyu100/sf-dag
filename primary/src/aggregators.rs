@@ -151,7 +151,7 @@ impl CertificatesAggregator {
 /// Aggregates timeouts for a particular round into an action or trigger.
 pub struct TimeoutAggregator {
     weight: Stake,
-    timeouts: Vec<(PublicKey, Signature)>,
+    timeouts: Vec<PublicKey>,
     used: HashSet<PublicKey>,
 }
 
@@ -174,7 +174,7 @@ impl TimeoutAggregator {
         // Ensure it is the first time this authority sends a timeout.
         ensure!(self.used.insert(author), DagError::AuthorityReuse(author));
 
-        self.timeouts.push((author, timeout.signature));
+        self.timeouts.push((author));
         self.weight += committee.stake(&author);
         if self.weight >= committee.quorum_threshold() {
             // Once quorum is reached, you might want to reset for the next round or trigger an action.

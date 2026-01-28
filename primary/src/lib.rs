@@ -12,13 +12,14 @@ mod messages;
 mod primary;
 mod proposer;
 mod synchronizer;
-mod worker;
+// mod worker;
+mod payload_receiver;
 
 // #[cfg(test)]
 // #[path = "tests/common.rs"]
 // mod common;
 
-pub use crate::messages::{Certificate, Header, HeaderInfo};
+pub use crate::messages::{Certificate, Header};
 pub use crate::primary::{
     ConsensusMessage, HeaderMessage, Primary, PrimaryWorkerMessage, Round, WorkerPrimaryMessage,
 };

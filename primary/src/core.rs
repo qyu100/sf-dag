@@ -39,8 +39,6 @@ pub struct Core {
     store: Store,
     /// Handles synchronization with other nodes and our workers.
     synchronizer: Synchronizer,
-    /// Service to sign headers.
-    signature_service: SignatureService,
     /// The current consensus round (used for cleanup).
     consensus_round: Arc<AtomicU64>,
     /// The depth of the garbage collector.
@@ -92,7 +90,7 @@ pub struct Core {
     /// last committed round
     last_committed_round: Round,
     // Stored parent info
-    parent_info: HashMap<Digest, (Round,Digest)>,
+    parent_info: HashMap<Digest, Header>,
     // // payload_lens
     // reconstructed_lens: HashMap<Digest, usize>,
 }
@@ -104,7 +102,6 @@ impl Core {
         committee: Arc<Committee>,
         store: Store,
         synchronizer: Synchronizer,
-        signature_service: SignatureService,
         consensus_round: Arc<AtomicU64>,
         gc_depth: Round,
         tx_primary: Sender<PrimaryMessage>,
@@ -127,7 +124,6 @@ impl Core {
                 committee: committee.clone(),
                 store,
                 synchronizer,
-                signature_service,
                 consensus_round,
                 gc_depth,
                 tx_primary,
@@ -193,8 +189,6 @@ impl Core {
     ) -> DagResult<()> {
         debug!("Processing own header: {:?}", header);
 
-        // let mut header_info = HeaderInfo::create_from(&header);
-
         let addresses = self
             .committee
             .others_primaries(&self.name)
@@ -217,7 +211,13 @@ impl Core {
     async fn process_header_msg(&mut self, header: &Header) -> DagResult<()> {
         debug!("Processing header: {:?}", header);
 
-        self.parent_info.entry(header.id).or_insert((header.round, header.parent));
+        // store the full Header for later parent lookups
+        self.parent_info.entry(header.id).or_insert(header.clone());
+
+        if self.synchronizer.missing_payload(header).await? {
+                debug!("Downloading the payload of {header}");
+            return Ok(());
+        }
 
         self.processing_headers
              .entry(header.id)
@@ -355,7 +355,9 @@ impl Core {
             return Ok(());
         }
 
-        self.commit(certificate.round).await?;
+        if self.pending_commit_rounds.contains(&certificate.round) {
+            self.commit(certificate.round).await?;
+        }
         
         // Store the certificate.
         let bytes = bincode::serialize(&certificate).expect("Failed to serialize certificate");
@@ -425,30 +427,45 @@ impl Core {
         };
 
         let mut to_commit = VecDeque::new();
+        // Collect full Header objects to commit (starting from the certificate's header)
         let mut cur = certificate.header_id;
-        to_commit.push_front(cur.clone());
-        for r in (self.last_committed_round + 1..=round - 1).rev() {
-            
-            let cur_info = match self.parent_info.get(&cur).cloned() {
+        // Try to get the Header for the certificate's header_id. If missing, abort collection.
+        let first_header = match self.parent_info.get(&cur).cloned() {
+            Some(h) => h,
+            None => {
+                // Missing header info: record pending and return.
+                self.pending_commit_rounds.insert(round);
+                return Ok(());
+            }
+        };
+        to_commit.push_front(first_header.clone());
+        // We were able to collect the header to commit: clear any pending marker for this round.
+        self.pending_commit_rounds.remove(&round);
+
+        for _r in (self.last_committed_round + 1..=round - 1).rev() {
+            let header = match self.parent_info.get(&cur).cloned() {
                 Some(info) => info,
-                None => break, // To do.
+                None => break, // Missing ancestor -> stop collecting
             };
-            let (_cur_round, parent_digest) = cur_info;
+            let parent_digest = header.parent;
 
-            let parent_info = match self.parent_info.get(&parent_digest).cloned() {
+            let parent_header = match self.parent_info.get(&parent_digest).cloned() {
                 Some(info) => info,
-                None => break, // To do.
+                None => break, // Missing parent header -> stop collecting
             };
-            let (parent_round, _) = parent_info;
-
-            to_commit.push_front(parent_digest.clone());
-
+            // push the parent Header to the front so deque orders from earliest->latest
+            to_commit.push_front(parent_header.clone());
+            self.pending_commit_rounds.remove(&parent_header.round);
             cur = parent_digest;
         }
         self.last_committed_round = round;
         // If parent is missing, to do.
-        while let Some(header_id) = to_commit.pop_back() {
-            info!("Committed {:?} ", header_id);
+        while let Some(header) = to_commit.pop_front() {
+            for digest in header.payload.keys() {
+                    // NOTE: This log entry is used to compute performance.
+                    info!("Committed {} -> {:?}", header, digest);
+            }
+            info!("Committed {:?} ", header.id);
             debug!("round {:?} committed", round);
         }
         Ok(())

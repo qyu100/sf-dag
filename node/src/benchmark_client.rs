@@ -64,7 +64,7 @@ async fn main() -> Result<()> {
     info!("Transactions size: {} B", size);
 
     // NOTE: This log entry is used to compute performance.
-    info!("Transactions rate: {} tx/s", rate * (1000 / burst_duration));
+    info!("Transactions rate: {} tx/s", rate);
 
     let client = Client {
         target,
@@ -92,7 +92,7 @@ struct Client {
 impl Client {
     pub async fn send(&self) -> Result<()> {
         const PRECISION: u64 = 20; // Sample precision.
-        info!("Burst duration {:?}", self.burst_duration);
+        const BURST_DURATION: u64 = 1000 / PRECISION;
 
         // The transaction size must be at least 16 bytes to ensure all txs are different.
         if self.size < 9 {
@@ -112,7 +112,7 @@ impl Client {
         let mut counter = 0;
         let mut r = rand::thread_rng().gen();
         let mut transport = Framed::new(stream, LengthDelimitedCodec::new());
-        let interval = interval(Duration::from_millis(self.burst_duration));
+        let interval = interval(Duration::from_millis(BURST_DURATION));
         tokio::pin!(interval);
 
         // NOTE: This log entry is used to compute performance.
@@ -142,7 +142,7 @@ impl Client {
                     break 'main;
                 }
             }
-            if now.elapsed().as_millis() > self.burst_duration as u128 {
+            if now.elapsed().as_millis() > BURST_DURATION as u128 {
                 // NOTE: This log entry is used to compute performance.
                 warn!("Transaction rate too high for this client");
             }

@@ -10,13 +10,13 @@ from benchmark.remote import Bench, BenchError
 
 
 @task
-def local(ctx, debug=True, consensus_only=True, header_size=512_0):
+def local(ctx, debug=True, consensus_only=False, header_size=512):
     ''' Run benchmarks on localhost '''
     bench_params = {
         'faults': 0,
         'nodes': 10,
         'workers': 1,
-        'rate': 100_000,
+        'rate': 10_000,
         'tx_size': 512,
         'duration': 60,
         "burst" : 50
@@ -28,9 +28,9 @@ def local(ctx, debug=True, consensus_only=True, header_size=512_0):
         'gc_depth': 50,  # rounds
         'sync_retry_delay': 10_000,  # ms
         'sync_retry_nodes': 3,  # number of nodes
-        'batch_size': header_size,  # bytescd
+        'batch_size': 500_000,  # bytescd
         'tx_size': bench_params['tx_size'],
-        'max_batch_delay': 200,  # ms
+        'max_batch_delay': 20,  # ms
         'f_num': 3
     }
     try:
@@ -95,23 +95,23 @@ def install(ctx):
 
 
 @task
-def remote(ctx, burst = 50, debug=False, consensus_only=False, header_size=512):
+def remote(ctx, burst = 50, debug=False, consensus_only=False, header_size=32):
     ''' Run benchmarks on GCP '''
     bench_params = {
         'faults': 0,
         'nodes': 50,
         'workers': 1,
         'collocate': True,
-        'rate': [100000],
+        'rate': [100_000],
         'tx_size': 512,
         'duration': 60,
         'runs': 1,
         'burst' : [burst],
     }
 
-    nodes = bench_params['nodes']
-    rate =  1000 * nodes * 20
-    bench_params['rate'] = [rate]
+    # nodes = bench_params['nodes']
+    # rate =  1000 * nodes * 20
+    # bench_params['rate'] = [rate]
 
     node_params = {
         'consensus_only': consensus_only,
@@ -120,9 +120,9 @@ def remote(ctx, burst = 50, debug=False, consensus_only=False, header_size=512):
         'gc_depth': 50,  # rounds
         'sync_retry_delay': 10_000,  # ms
         'sync_retry_nodes': 3,  # number of nodes
-        'batch_size': header_size,
+        'batch_size': 500_000,
         'tx_size': bench_params['tx_size'],  # bytes
-        'max_batch_delay': 200,  # ms
+        'max_batch_delay': 20,  # ms
         'leaders_per_round': 67,
         'f_num': 16
     }

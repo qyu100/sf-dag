@@ -3,8 +3,8 @@ use crate::messages::{
     Certificate, Header, HeaderWithCertificate, Timeout, TimeoutCert,
 };
 use crate::primary::Round;
-use config::Committee;
-use crypto::{PublicKey, SignatureService};
+use config::{Committee, WorkerId};
+use crypto::{Digest, PublicKey, SignatureService};
 #[cfg(feature = "benchmark")]
 use log::info;
 use log::{debug, warn};
@@ -23,8 +23,6 @@ pub struct Proposer {
     name: PublicKey,
     /// The committee information.
     committee: Committee,
-    /// Service to sign headers.
-    signature_service: SignatureService,
     /// The size of the headers' payload.
     header_size: usize,
     tx_size: usize,
@@ -35,7 +33,7 @@ pub struct Proposer {
     /// Receives the parents to include in the next header (along with their round number).
     rx_core: Receiver<Certificate>,
     /// Receives the batch digest from our workers.
-    rx_workers: Receiver<Vec<Transaction>>,
+    rx_workers: Receiver<(Digest, WorkerId)>,
     /// Sends newly created headers to the `Core`.
     tx_core: Sender<Header>,
     /// Sends newly created timeouts to the `Core`.
@@ -54,6 +52,7 @@ pub struct Proposer {
     payload_size: usize,
     /// Holds the Timeout certificate for the latest round.
     last_timeout_cert: TimeoutCert,
+    digests: Vec<(Digest, WorkerId)>,
 }
 
 impl Proposer {
@@ -61,13 +60,12 @@ impl Proposer {
     pub fn spawn(
         name: PublicKey,
         committee: Committee,
-        signature_service: SignatureService,
         header_size: usize,
         tx_size: usize,
         max_header_delay: u64,
         consensus_only: bool,
         rx_core: Receiver<Certificate>,
-        rx_workers: Receiver<Vec<Transaction>>,
+        rx_workers: Receiver<(Digest, WorkerId)>,
         tx_core: Sender<Header>,
         tx_core_timeout: Sender<Timeout>,
         rx_timeout_cert: Receiver<(TimeoutCert, Round)>,
@@ -77,7 +75,6 @@ impl Proposer {
             Self {
                 name,
                 committee,
-                signature_service,
                 header_size,
                 tx_size,
                 max_header_delay,
@@ -93,6 +90,7 @@ impl Proposer {
                 txns: Vec::new(),
                 payload_size: 0,
                 last_timeout_cert: TimeoutCert::new(0),
+                digests: Vec::new(),
             }
             .run()
             .await;
@@ -101,7 +99,7 @@ impl Proposer {
 
     async fn make_timeout_msg(&mut self) {
         let timeout_cert_msg =
-            Timeout::new(self.round, self.name, &mut self.signature_service).await;
+            Timeout::new(self.round, self.name).await;
 
         debug!("Created {:?}", timeout_cert_msg);
 
@@ -126,12 +124,7 @@ impl Proposer {
             self.header_size / self.tx_size
         };
 
-        let mut payload;
-        if self.consensus_only {
-            payload = vec![vec![0u8; self.tx_size]; self.header_size / self.tx_size];
-        } else {
-            payload = self.txns.drain(..limit).collect();
-        }
+        let mut payload = self.digests.drain(..).collect(); //remove limit?
 
         let parent = self.last_parent.pop().expect("no parent available");
 
@@ -144,30 +137,11 @@ impl Proposer {
         .await;
 
         #[cfg(feature = "benchmark")]
-        {
-            info!("Created {:?}", header.id);
-            info!(
-                "Header {:?} contains {} B",
-                header.id,
-                header.payload.len() * self.tx_size
-            );
-            if !self.consensus_only {
-                let tx_ids: Vec<[u8; 8]> = header
-                    .payload
-                    .iter()
-                    .filter(|tx| tx.len() > 8 && tx[0] == 0u8)
-                    .filter_map(|tx| tx[1..9].try_into().ok())
-                    .collect();
-                for id in tx_ids {
-                    info!(
-                        "Header {:?} contains sample tx {}",
-                        header.id,
-                        u64::from_be_bytes(id)
-                    );
-                }
-            }
-            // NOTE: This log entry is used to compute performance.
-        } 
+        info!("Created {:?}", header.id);
+        for digest in header.payload.keys() {
+        // NOTE: This log entry is used to compute performance.
+            info!("Created {} -> {:?}", header, digest);
+        }
         // let header_with_parents = HeaderWithCertificate { header, parents };
 
         // Send the new header to the `Core` that will broadcast and process it.
@@ -225,6 +199,8 @@ impl Proposer {
                 // Advance to the next round.
                 self.round += 1;
                 debug!("Protocol moved to round {}", self.round);
+                // Prevent immediately advancing again in the same conditions.
+                advance = false;
 
                 // Make a new header.
                 if is_next_leader {
@@ -262,9 +238,10 @@ impl Proposer {
                     // (2) Also implement the wait for leader idea what is was there before
                     advance = self.update_leader();
                 }
-                Some(txns) = self.rx_workers.recv() => {
-                    self.payload_size += txns.iter().map(|txn| txn.len()).sum::<usize>();
-                    self.txns.extend(txns);
+                Some((digest, worker_id)) = self.rx_workers.recv() => {
+                    //println!("received payload from worker {}", worker_id);
+                    self.payload_size += digest.size();
+                    self.digests.push((digest, worker_id));
                 }
                 Some((timeout_cert, round)) = self.rx_timeout_cert.recv() => {
                     match round.cmp(&self.last_timeout_cert.round) {
