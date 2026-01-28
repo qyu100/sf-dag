@@ -563,7 +563,9 @@ impl Core {
         }
         // debug!("deliver_certificate time: {:?}", t_deliver.elapsed());
 
-        self.commit(certificate.round).await?;
+        if self.pending_commit_rounds.contains(&certificate.round) {
+            self.commit(certificate.round).await?;
+        }
         
         // Store the certificate.
         // let t_store = Instant::now();
@@ -660,7 +662,7 @@ impl Core {
         }
         self.last_committed_round = round;
         // If parent is missing, to do.
-        while let Some(header_id) = to_commit.pop_back() {
+        while let Some(header_id) = to_commit.pop_front() {
             info!("Committed {:?} ", header_id);
             // debug!("round {:?} committed", round);
         }

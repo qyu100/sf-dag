@@ -1,0 +1,7 @@
+# Enable CPU-specific optimizations for local benchmarking and maximum SIMD performance.
+# WARNING: Binaries built with this flag are optimized for the build machine's CPU
+# and may not run or may perform worse on older/different CPUs. Remove this file
+# or override CI builds if you need portable binaries.
+
+[build]
+rustflags = ["-C", "target-cpu=native"]

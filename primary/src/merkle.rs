@@ -4,7 +4,7 @@ use std::time::Instant;
 use log::debug;
 use rayon::prelude::*; // parallel iterator for hashing leaves
 use serde::{Deserialize, Serialize};
-use tiny_keccak::{Hasher, Sha3};
+use blake3;
 use crypto::{Digest};
 
 use crate::batch_maker::Transaction;
@@ -211,20 +211,22 @@ fn hash_chunk(chunk: &[Digest]) -> Digest {
     }
 }
 
-/// Returns the hash of the concatenated bytes of `d0` and `d1`.
-fn hash_pair<T0: AsRef<[u8]>, T1: AsRef<[u8]>>(v0: &T0, v1: &T1) -> Digest {
-    let bytes: Vec<u8> = v0.as_ref().iter().chain(v1.as_ref()).cloned().collect();
-    hash(&bytes)
+
+#[inline]
+pub fn hash_pair<T0, T1>(v0: &T0, v1: &T1) -> Digest 
+where 
+    T0: AsRef<[u8]>, 
+    T1: AsRef<[u8]> 
+{
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(v0.as_ref());
+    hasher.update(v1.as_ref());
+    crypto::Digest(*hasher.finalize().as_bytes())
 }
 
-/// Returns the SHA-256 hash of the value's `[u8]` representation.
 fn hash<T: AsRef<[u8]>>(value: &T) -> Digest {
-    let mut sha3 = Sha3::v256();
-    sha3.update(value.as_ref());
-
-    let mut out = [0u8; 32];
-    sha3.finalize(&mut out);
-    crypto::Digest(out)
+    let out = blake3::hash(value.as_ref());
+    crypto::Digest(*out.as_bytes())
 }
 
 #[cfg(test)]
