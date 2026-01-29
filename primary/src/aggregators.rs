@@ -61,7 +61,7 @@ impl ReadyAggregator {
         ensure!(self.used.insert(author), DagError::AuthorityReuse(author));
         self.weight += committee.stake(&author);
         if self.weight >= committee.quorum_threshold() {
-
+            self.weight = 0;
             return Ok(Some(Certificate {
                 header_id: ready.id,
                 round: ready.round,
