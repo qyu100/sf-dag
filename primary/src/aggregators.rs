@@ -25,7 +25,7 @@ impl EchoAggregator {
         // Ensure it is the first time this authority votes.
         ensure!(self.used.insert(author), DagError::AuthorityReuse(author));
         self.weight += committee.stake(&author);
-        if self.weight >= committee.quorum_threshold() {
+        if self.weight >= committee.optimistic_threshold() {
             self.weight = 0; // Ensures quorum is only reached once.
 
             return Ok(Some(Certificate {

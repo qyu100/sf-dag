@@ -298,47 +298,9 @@ impl Core {
         }
         if let Some(echo_aggregator) = self.processing_echo_aggregators.get_mut(&echo.id) {
             if let Some(certificate) = echo_aggregator.append(&echo, &self.committee)? {
-                let ready = Ready::new(echo.id, echo.round, &echo.origin, &self.name).await;
-
-                let addresses = self
-                    .committee
-                    .others_primaries(&self.name)
-                    .iter()
-                    .map(|(_, x)| x.primary_to_primary)
-                    .collect();
-                let bytes = bincode::serialize(&PrimaryMessage::Ready(ready.clone()))
-                    .expect("Failed to serialize our own ready");
-                let handlers = self.network.broadcast(addresses, Bytes::from(bytes)).await;
-                self.cancel_handlers
-                    .entry(echo.round)
-                    .or_insert_with(Vec::new)
-                    .extend(handlers);
-
-                let _ = self.process_ready(&ready).await;
-            }
-        }     
-        Ok(())
-    }
-
-    #[async_recursion]
-    async fn process_ready(&mut self, ready: &Ready) -> DagResult<()> {
-        debug!("Processing {:?}", ready);
-
-        if !self.processing_ready_aggregators.contains_key(&ready.id) {
-            self.processing_ready_aggregators
-                .entry(ready.id.clone())
-                .or_insert(ReadyAggregator::new());
-        }
-
-        // // Add it to the votes' aggregator and try to make a new certificate.
-        if let Some(ready_aggregator) = self.processing_ready_aggregators.get_mut(&ready.id) {
-            // Add it to the votes' aggregator and try to make a new certificate.
-            if let Some(certificate) = ready_aggregator.append(&ready, &self.committee)? {
-                // Process the new certificate.
                 let _ = self.process_certificate(certificate).await;
             }
-        }
-
+        }     
         Ok(())
     }
 
@@ -526,9 +488,6 @@ impl Core {
                                 Ok(()) => self.process_echo(&echo).await,
                                 error => error
                             }
-                        },
-                        PrimaryMessage::Ready(ready) => {
-                            self.process_ready(&ready).await
                         },
                         PrimaryMessage::Decide(decide) => {
                             self.process_decide(&decide).await
