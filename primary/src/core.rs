@@ -478,49 +478,9 @@ impl Core {
                     .or_insert(EchoAggregator::new());
             }
             if let Some(echo_aggregator) = self.processing_echo_aggregators.get_mut(&id) {
-                if let Some((root_hash, leaf_values)) = echo_aggregator.append(author, proof, &self.committee)? {
+                if let Some((root, mut leaf_values)) = echo_aggregator.append(author, proof, &self.committee)? {
                     // Store the collected leaf values for this root so we can reconstruct later
                     // key by (round, root_hash)
-                    self.echo_shards.entry((round, root_hash)).or_insert(leaf_values.clone());
-
-                    let ready = Ready::new(id, round, &origin, &self.name, root_hash).await;
-
-                    let addresses = self
-                        .committee
-                        .others_primaries(&self.name)
-                        .iter()
-                        .map(|(_, x)| x.primary_to_primary)
-                        .collect();
-                    let bytes = bincode::serialize(&PrimaryMessage::Ready(ready.clone()))
-                        .expect("Failed to serialize our own ready");
-                    let handlers = self.network.broadcast(addresses, Bytes::from(bytes)).await;
-                    self.cancel_handlers
-                        .entry(round)
-                        .or_insert_with(Vec::new)
-                        .extend(handlers);
-
-                    let _ = self.process_ready(&ready).await;
-                }
-            }
-        }
-        Ok(())
-    }
-
-    #[async_recursion]
-    async fn process_ready(&mut self, ready: &Ready) -> DagResult<()> {
-        let start = Instant::now();
-        // debug!("Processing {:?}", ready);
-
-        if !self.processing_ready_aggregators.contains_key(&ready.id) {
-            self.processing_ready_aggregators
-                .entry(ready.id.clone())
-                .or_insert(ReadyAggregator::new());
-        }
-
-        if let Some(ready_aggregator) = self.processing_ready_aggregators.get_mut(&ready.id) {
-            // ReadyAggregator now returns the root Digest when 2f+1 Ready messages are collected.
-            if let Some(root) = ready_aggregator.append(&ready, &self.committee)? {
-                if let Some(mut leaf_values) = self.echo_shards.remove(&(ready.round, root)) {
                     let t_reconstruct = Instant::now();
                     // debug!("round {:?} - reconstructing for root", ready.round);
                     // debug!("leaf_values {}", leaf_values.len());
@@ -559,15 +519,14 @@ impl Core {
                     self.mtrees.entry(root).or_insert(mtree);
 
                     // Reconstruct and process the payload only if we have the corresponding header info with proof.
-                    let rid = ready.id;
+                    let rid = echo.id;
                     // Clone header info to avoid holding an immutable borrow across an await.
                     let header_clone = match self.processing_header_proofs.get(&rid) {
                         Some(h) => h.clone(),
                         None => {
                             // Store pending reconstruction to be resumed when HeaderInfoWithProof arrives.
-                            debug!("Missing HeaderInfoWithProof for ready id {:?}, storing pending reconstruction", rid);
+                            debug!("Missing HeaderInfoWithProof for echo id {:?}, storing pending reconstruction", rid);
                             self.pending_reconstructions.insert(rid, (root, shards));
-                            debug!("process_ready total time (pending): {:?}", start.elapsed());
                             return Ok(());
                         }
                     };
@@ -576,15 +535,12 @@ impl Core {
                     let t_finalize = Instant::now();
                     self.finalize_reconstruction(root, shards, header_clone).await?;
                     debug!("finalize_reconstruction time: {:?}", t_finalize.elapsed());
-                } else {
-                    // We don't have the echo-collected shards locally yet. Wait — other nodes
-                    // that did collect ECHO quorum will reconstruct and the mtree will eventually
-                    // be available through normal message flow. Do nothing for now.
                 }
             }
         }
         Ok(())
     }
+
 
     // Helper to finalize reconstruction: rebuild payload bytes from shards, deserialize,
     // store reconstructed payload and create/process the Certificate.
@@ -805,9 +761,6 @@ impl Core {
                                 Ok(()) => self.process_echo(echo).await,
                                 error => error
                             }
-                        },
-                        PrimaryMessage::Ready(ready) => {
-                            self.process_ready(&ready).await
                         },
                         PrimaryMessage::Decide(decide) => {
                             self.process_decide(&decide).await

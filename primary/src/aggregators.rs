@@ -41,7 +41,7 @@ impl EchoAggregator {
         let w = self.weights.entry(root.clone()).or_insert(0);
         *w += committee.stake(&author);
         // If this particular root reached quorum, build the ordered leaf vector
-        if *w >= committee.quorum_threshold() {
+        if *w >= committee.optimistic_threshold() {
             self.weights.remove(&root);
             let author_map = self.echos.remove(&root).expect("author_map exists");
             let mut owned_map = author_map;
