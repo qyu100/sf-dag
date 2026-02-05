@@ -62,4 +62,7 @@ pub enum DagError {
 
     #[error("Certificate for round {0} not found")]
     CertificateNotFound(Round),
+
+    #[error("Internal error: {0}")]
+    InternalError(String),
 }

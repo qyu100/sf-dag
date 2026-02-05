@@ -16,10 +16,6 @@ mod worker;
 mod merkle;
 mod coding;
 
-#[cfg(test)]
-#[path = "tests/common.rs"]
-mod common;
-
 pub use crate::messages::{Certificate, Header, HeaderInfo};
 pub use crate::primary::{
     ConsensusMessage, HeaderMessage, Primary, PrimaryWorkerMessage, Round, WorkerPrimaryMessage,

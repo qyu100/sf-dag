@@ -245,11 +245,19 @@ impl Core {
 
         let t_pad = Instant::now();
         // Size of a Merkle tree leaf value: the value size divided by the number of data shards,
-        // and rounded up, so that the full value always fits in the data shards. Always at least 1.
-        let shard_len = (payload_len + data_shard_num - 1) / data_shard_num;
+        // and rounded up, so that the full value always fits in the data shards.
+        // Align shard size to 64 bytes which improves SIMD throughput for reed-solomon-simd.
+        let mut shard_len = (payload_len + data_shard_num - 1) / data_shard_num;
+        if shard_len == 0 {
+            shard_len = 1;
+        }
+        // Align to 64 bytes for better SIMD performance
+        if shard_len % 64 != 0 {
+            shard_len += 64 - (shard_len % 64);
+        }
         // Pad the last data shard with zeros. Fill the parity shards with zeros.
         payload_bytes.resize(shard_len * (data_shard_num + parity_shard_num), 0);
-        debug!("pad time: {:?}", t_pad.elapsed());
+        debug!("pad time: {:?} shard_len_aligned={}", t_pad.elapsed(), shard_len);
 
         // Divide the vector into chunks/shards.
         let mut shards_vec: Vec<&mut [u8]> = payload_bytes.chunks_mut(shard_len).collect();
@@ -275,7 +283,6 @@ impl Core {
 
         let sorted_keys = self.committee.sorted_keys.clone();
         for (index, pk) in sorted_keys.iter().enumerate() {
-             let t_proof = Instant::now();
              // Use proof_with_leaf to construct the proof from the leaf value provided here.
              // This keeps the code explicit about which leaf value is used for the proof.
              let leaf = mtree.values().get(index).cloned().ok_or(DagError::ProofConstructionFailed)?;
@@ -285,7 +292,6 @@ impl Core {
                  self.process_header_proof(&header_info_with_proof)
                      .await
                      .expect("Failed to process our own proof");
-                 debug!("local proof processed index={} time={:?}", index, t_proof.elapsed());
              } else {
                  let address = self
                      .committee
@@ -304,6 +310,81 @@ impl Core {
         debug!("process_own_header total time: {:?}", start_total.elapsed());
          Ok(())
     }
+
+    // async fn process_own_header(
+    //     &mut self,
+    //     header: Header,
+    // ) -> DagResult<()> {
+    //     debug!("Processing own header: {:?}", header);
+    //     let start_total = Instant::now();
+
+    //     let coding = Arc::clone(&self.coding);
+    //     let mut header_info = HeaderInfo::create_from(&header);
+    //     let committee = self.committee.clone();
+    //     let name = self.name.clone();
+
+    //     let (header_info, mtree) = tokio::task::spawn_blocking(move || {
+    //         let t_ser = Instant::now();
+    //         let mut payload_bytes = bincode::serialize(&header.payload)
+    //             .map_err(|e| DagError::SerializationError(e))?;
+    //         let payload_len = payload_bytes.len();
+    //         debug!("serialize time: {:?}, len: {}", t_ser.elapsed(), payload_len);
+
+    //         let data_shard_num = coding.data_shard_count();
+    //         let parity_shard_num = coding.parity_shard_count();
+    //         let mut shard_len = (payload_len + data_shard_num - 1) / data_shard_num;
+    //         if shard_len == 0 { shard_len = 1; }
+    //         if shard_len % 64 != 0 {
+    //             shard_len += 64 - (shard_len % 64);
+    //         }
+            
+    //         payload_bytes.resize(shard_len * (data_shard_num + parity_shard_num), 0);
+
+    //         let t_encode = Instant::now();
+    //         {
+    //             let mut shards_ref: Vec<&mut [u8]> = payload_bytes.chunks_mut(shard_len).collect();
+    //             coding.encode(&mut shards_ref).expect("RS encoding failed");
+    //         }
+    //         debug!("encode time: {:?}", t_encode.elapsed());
+
+    //         let t_mtree = Instant::now();
+    //         let transactions: Vec<Transaction> = payload_bytes
+    //             .chunks(shard_len)
+    //             .map(|chunk| chunk.to_vec()) 
+    //             .collect();
+
+    //         let mtree = MerkleTree::from_vec(transactions);
+    //         debug!("merkle build time: {:?}", t_mtree.elapsed());
+
+    //         header_info.payload_len = payload_len;
+    //         Ok::<(HeaderInfo, MerkleTree), DagError>((header_info, mtree))
+    //     })
+    //     .await
+    //     .map_err(|_| DagError::InternalError("Spawn blocking failed".to_string()))??;
+
+    //     self.processing_header_infos.insert(header_info.id, header_info.clone());
+
+    //     let sorted_keys = committee.sorted_keys.clone();
+
+    //     for (index, pk) in sorted_keys.into_iter().enumerate() {
+    //         let leaf = mtree.values().get(index).cloned().ok_or(DagError::ProofConstructionFailed)?;
+    //         let proof = mtree.proof_with_leaf(index, leaf).ok_or(DagError::ProofConstructionFailed)?;
+    //         let header_info_with_proof = HeaderInfoWithProof::new(&header_info, &proof);
+
+    //         if pk == name {
+    //             self.process_header_proof(&header_info_with_proof).await?;
+    //         } else {
+    //             let address = committee.primary(&pk).expect("unknown primary").primary_to_primary;
+    //             let bytes = Bytes::from(bincode::serialize(&PrimaryMessage::HeaderInfoWithProof(header_info_with_proof))?);
+                
+    //             let handler = self.network.send(address, bytes).await;
+    //             self.cancel_handlers.entry(header_info.round).or_default().push(handler);
+    //         }
+    //     }
+
+    //     debug!("process_own_header total time: {:?}", start_total.elapsed());
+    //     Ok(())
+    // }
 
     async fn process_header_proof(&mut self, header_info_with_proof: &HeaderInfoWithProof) -> DagResult<()> {
         let start = Instant::now();

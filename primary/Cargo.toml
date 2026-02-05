@@ -27,8 +27,8 @@ crypto = { path = "../crypto" }
 store = { path = "../store" }
 config = { path = "../config" }
 network = { path = "../network" }
-reed-solomon-erasure = "6.0.0"
 reed-solomon-simd = "3.1"
+rs_merkle = "1.4.2"
 hex_fmt = "0.3.0"
 
 [dev-dependencies]

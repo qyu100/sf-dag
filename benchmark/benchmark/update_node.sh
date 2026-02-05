@@ -27,7 +27,7 @@ git pull -f
 
 source "$HOME"/.cargo/env
 cd /home/ubuntu/"$REPO_NAME"/node
-cargo build --quiet --release --features benchmark
+RUSTFLAGS='-C target-cpu=native' cargo build --quiet --release --features benchmark
 
 cd /home/ubuntu
 rm -f node

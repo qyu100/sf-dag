@@ -52,9 +52,11 @@ class LocalBench:
             subprocess.run([cmd], shell=True, stderr=subprocess.DEVNULL)
             sleep(0.5)  # Removing the store may take time.
 
-            # Recompile the latest code.
-            cmd = CommandMaker.compile().split()
-            subprocess.run(cmd, check=True, cwd=PathMaker.node_crate_path())
+            # Recompile the latest code. Keep the full command string and run it through
+            # the shell so environment variable prefixes (e.g. RUSTFLAGS=...) are handled
+            # correctly instead of being treated as the executable name.
+            cmd = CommandMaker.compile()
+            subprocess.run(cmd, shell=True, check=True, cwd=PathMaker.node_crate_path())
 
             # Create alias for the client and nodes binary.
             cmd = CommandMaker.alias_binaries(PathMaker.binary_path())

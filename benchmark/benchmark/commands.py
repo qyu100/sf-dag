@@ -18,7 +18,7 @@ class CommandMaker:
 
     @staticmethod
     def compile():
-        return 'cargo build --quiet --release --features benchmark'
+        return "RUSTFLAGS='-C target-cpu=native' cargo build --quiet --release --features benchmark"
 
     @staticmethod
     def generate_ed_key(filename):

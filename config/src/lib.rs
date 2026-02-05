@@ -1,7 +1,7 @@
 // Copyright(C) Facebook, Inc. and its affiliates.
 use blsttc::{PublicKeyShareG2, SecretKeyShare};
 use crypto::{generate_production_keypair, PublicKey, SecretKey};
-use log::{info, debug};
+use log::info;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
