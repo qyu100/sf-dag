@@ -216,6 +216,8 @@ class NodeParameters:
             inputs += [json['max_batch_delay']]
             inputs += [json['tx_size']]
             inputs += [json['f_num']]
+            inputs += [json['rs_block_size']]
+            inputs += [json['rs_block_threads']]
         except KeyError as e:
             raise ConfigError(f'Malformed parameters: missing key {e}')
 

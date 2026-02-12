@@ -101,15 +101,15 @@ pub struct Core {
     /// Stored leaf shards collected from Echo quorum (keyed by (round, root) -> leaf values)
     echo_shards: HashMap<(Round, Digest), Vec<Option<Box<[u8]>>>>,
     /// Pending reconstructions waiting for HeaderInfoWithProof (keyed by header id): (root, shards)
-    pending_reconstructions: HashMap<Digest, (Digest, Vec<Vec<u8>>)>,
+    pending_reconstructions: HashMap<Digest, Digest>,
     // certificates to commit
     certificates: HashMap<Round, Certificate>,
     /// last committed round
     last_committed_round: Round,
     // Stored parent info
     parent_info: HashMap<Digest, (Round,Digest)>,
-    // // payload_lens
-    // reconstructed_lens: HashMap<Digest, usize>,
+    rs_block_size: usize,
+    rs_block_threads: usize,
 }
 
 impl Core {
@@ -132,6 +132,8 @@ impl Core {
         tx_proposer: Sender<Certificate>,
         tx_timeout_cert: Sender<(TimeoutCert, Round)>,
         tx_consensus_header_msg: Sender<ConsensusMessage>,
+        rs_block_size: usize,
+        rs_block_threads: usize,
     ) {
         tokio::spawn(async move {
             // Precompute shard counts so we don't move `committee` before using it.
@@ -178,6 +180,8 @@ impl Core {
                 certificates: HashMap::new(),
                 last_committed_round: 0,
                 parent_info: HashMap::new(),
+                rs_block_size: rs_block_size,
+                rs_block_threads: rs_block_threads,
             }
             .run()
             .await;
@@ -264,127 +268,55 @@ impl Core {
 
         let t_encode = Instant::now();
         // Construct the parity chunks/shards.
-        self.coding.encode(&mut shards_vec).expect("wrong shard size");
+        self.coding.encode(&mut shards_vec, self.rs_block_size, self.rs_block_threads).expect("wrong shard size");
         debug!("encode time: {:?}", t_encode.elapsed());
-
-        debug!(
-            "Payload: {} bytes, {} per shard. Shards: {:0.10}",
-            payload_len,
-            shard_len,
-            HexList(&shards_vec)
-        );
 
         let t_mtree = Instant::now();
         // Create a Merkle tree from the shards.
-        let mtree = MerkleTree::from_vec(shards_vec.into_iter().map(|shard| shard.to_vec()).collect());
+        let hashes: Vec<Digest> = shards_vec
+            .par_iter()
+            .map(|s| MerkleTree::digest(&**s))
+            .collect();
+        let mtree = MerkleTree::from_hashes(hashes);
         debug!("merkle build time: {:?}", t_mtree.elapsed());
 
-        assert_eq!(self.committee.total_stake() as usize, mtree.values().len());
+        assert_eq!(self.committee.total_stake() as usize, mtree.leaf_count());
 
+        let t = Instant::now();
         let sorted_keys = self.committee.sorted_keys.clone();
         for (index, pk) in sorted_keys.iter().enumerate() {
              // Use proof_with_leaf to construct the proof from the leaf value provided here.
              // This keeps the code explicit about which leaf value is used for the proof.
-             let leaf = mtree.values().get(index).cloned().ok_or(DagError::ProofConstructionFailed)?;
-             let proof = mtree.proof_with_leaf(index, leaf).ok_or(DagError::ProofConstructionFailed)?;
+             let leaf = shards_vec
+                 .get(index)
+                 .ok_or(DagError::ProofConstructionFailed)?;
+             let proof = mtree
+                 .proof_with_leaf(index, &**leaf)
+                 .ok_or(DagError::ProofConstructionFailed)?;
              let header_info_with_proof = HeaderInfoWithProof::new(&header_info, &proof);
              if pk == &self.name {
                  self.process_header_proof(&header_info_with_proof)
                      .await
                      .expect("Failed to process our own proof");
              } else {
-                 let address = self
-                     .committee
-                     .primary(&pk)
-                     .expect("unknown primary")
-                     .primary_to_primary;
-                 let bytes = bincode::serialize(&PrimaryMessage::HeaderInfoWithProof(header_info_with_proof.clone()))
-                 .expect("Failed to serialize our own proof");
-                 let handler = self.network.send(address, Bytes::from(bytes)).await;
-                 self.cancel_handlers
-                     .entry(header_info.round)
-                     .or_insert_with(Vec::new)
-                     .push(handler);
+                let address = self
+                    .committee
+                    .primary(&pk)
+                    .expect("unknown primary")
+                    .primary_to_primary;
+                let bytes = bincode::serialize(&PrimaryMessage::HeaderInfoWithProof(header_info_with_proof.clone()))
+                .expect("Failed to serialize our own proof");
+                let handler = self.network.send(address, Bytes::from(bytes)).await;
+                self.cancel_handlers
+                    .entry(header_info.round)
+                    .or_insert_with(Vec::new)
+                    .push(handler);
               }
-          }
+            }
+        debug!("process_own_header proof construction and sending time: {:?}", t.elapsed());
         debug!("process_own_header total time: {:?}", start_total.elapsed());
-         Ok(())
+        Ok(())
     }
-
-    // async fn process_own_header(
-    //     &mut self,
-    //     header: Header,
-    // ) -> DagResult<()> {
-    //     debug!("Processing own header: {:?}", header);
-    //     let start_total = Instant::now();
-
-    //     let coding = Arc::clone(&self.coding);
-    //     let mut header_info = HeaderInfo::create_from(&header);
-    //     let committee = self.committee.clone();
-    //     let name = self.name.clone();
-
-    //     let (header_info, mtree) = tokio::task::spawn_blocking(move || {
-    //         let t_ser = Instant::now();
-    //         let mut payload_bytes = bincode::serialize(&header.payload)
-    //             .map_err(|e| DagError::SerializationError(e))?;
-    //         let payload_len = payload_bytes.len();
-    //         debug!("serialize time: {:?}, len: {}", t_ser.elapsed(), payload_len);
-
-    //         let data_shard_num = coding.data_shard_count();
-    //         let parity_shard_num = coding.parity_shard_count();
-    //         let mut shard_len = (payload_len + data_shard_num - 1) / data_shard_num;
-    //         if shard_len == 0 { shard_len = 1; }
-    //         if shard_len % 64 != 0 {
-    //             shard_len += 64 - (shard_len % 64);
-    //         }
-            
-    //         payload_bytes.resize(shard_len * (data_shard_num + parity_shard_num), 0);
-
-    //         let t_encode = Instant::now();
-    //         {
-    //             let mut shards_ref: Vec<&mut [u8]> = payload_bytes.chunks_mut(shard_len).collect();
-    //             coding.encode(&mut shards_ref).expect("RS encoding failed");
-    //         }
-    //         debug!("encode time: {:?}", t_encode.elapsed());
-
-    //         let t_mtree = Instant::now();
-    //         let transactions: Vec<Transaction> = payload_bytes
-    //             .chunks(shard_len)
-    //             .map(|chunk| chunk.to_vec()) 
-    //             .collect();
-
-    //         let mtree = MerkleTree::from_vec(transactions);
-    //         debug!("merkle build time: {:?}", t_mtree.elapsed());
-
-    //         header_info.payload_len = payload_len;
-    //         Ok::<(HeaderInfo, MerkleTree), DagError>((header_info, mtree))
-    //     })
-    //     .await
-    //     .map_err(|_| DagError::InternalError("Spawn blocking failed".to_string()))??;
-
-    //     self.processing_header_infos.insert(header_info.id, header_info.clone());
-
-    //     let sorted_keys = committee.sorted_keys.clone();
-
-    //     for (index, pk) in sorted_keys.into_iter().enumerate() {
-    //         let leaf = mtree.values().get(index).cloned().ok_or(DagError::ProofConstructionFailed)?;
-    //         let proof = mtree.proof_with_leaf(index, leaf).ok_or(DagError::ProofConstructionFailed)?;
-    //         let header_info_with_proof = HeaderInfoWithProof::new(&header_info, &proof);
-
-    //         if pk == name {
-    //             self.process_header_proof(&header_info_with_proof).await?;
-    //         } else {
-    //             let address = committee.primary(&pk).expect("unknown primary").primary_to_primary;
-    //             let bytes = Bytes::from(bincode::serialize(&PrimaryMessage::HeaderInfoWithProof(header_info_with_proof))?);
-                
-    //             let handler = self.network.send(address, bytes).await;
-    //             self.cancel_handlers.entry(header_info.round).or_default().push(handler);
-    //         }
-    //     }
-
-    //     debug!("process_own_header total time: {:?}", start_total.elapsed());
-    //     Ok(())
-    // }
 
     async fn process_header_proof(&mut self, header_info_with_proof: &HeaderInfoWithProof) -> DagResult<()> {
         let start = Instant::now();
@@ -401,7 +333,6 @@ impl Core {
 
         if self.last_voted.entry(header_info_with_proof.round).or_insert_with(HashSet::new).insert(header_info_with_proof.author) {
              // Make an echo and send it to all nodes
-             let t_echo = Instant::now();
              let echo = Echo::new(&header_info_with_proof, &self.name).await;
              let addresses = self
                  .committee
@@ -419,8 +350,6 @@ impl Core {
                      .entry(header_info_with_proof.round)
                      .or_insert_with(Vec::new)
                      .extend(handlers);
- 
-                debug!("echo broadcast time: {:?}", t_echo.elapsed());
 
                 self.process_echo(echo)
                    .await
@@ -444,16 +373,14 @@ impl Core {
         }
 
         let hid = header_info_with_proof.id;
-        let t_store = Instant::now();
         let bytes = bincode::serialize(header_info_with_proof).expect("Failed to serialize header");
         // Store the header.
         self.store.write(hid.to_vec(), bytes).await;
-        debug!("store write time: {:?}", t_store.elapsed());
 
         // If a reconstruction was waiting for this header's info, resume it now.
-        if let Some((root, shards)) = self.pending_reconstructions.remove(&header_info_with_proof.id) {
+        if let Some(root) = self.pending_reconstructions.remove(&header_info_with_proof.id) {
             // clone header info to pass ownership into the async helper
-            if let Err(e) = self.finalize_reconstruction(root, shards, header_info_with_proof.clone()).await {
+            if let Err(e) = self.finalize_reconstruction(header_info_with_proof.clone()).await {
                 warn!("Failed to finalize pending reconstruction for {:?}: {}", header_info_with_proof.id, e);
             }
             debug!("process_header_proof total time: {:?}", start.elapsed());
@@ -468,8 +395,6 @@ impl Core {
         let proof = echo.proof;
         let author = echo.author;
         let id = echo.id;
-        let round = echo.round;
-        let origin = echo.origin;
         // Validate the proof
         if self.committee.index_of(&author) == Some(proof.index()) && proof.validate(self.committee.total_stake() as usize) {
             if !self.processing_echo_aggregators.contains_key(&id) {
@@ -488,8 +413,10 @@ impl Core {
                     // Move the coding handle and the leaf_values into a blocking task so the
                     // async runtime threads are not blocked by the CPU-heavy reconstruction.
                     let coding = Arc::clone(&self.coding);
+                    let rs_block_size = self.rs_block_size;
+                    let rs_block_threads = self.rs_block_threads;
                     let leaf_values = tokio::task::spawn_blocking(move || {
-                        coding.reconstruct_shards(&mut leaf_values[..])?;
+                        coding.reconstruct_shards(&mut leaf_values[..], rs_block_size, rs_block_threads)?;
                         Ok::<_, DagError>(leaf_values)
                     })
                     .await
@@ -507,16 +434,19 @@ impl Core {
                     // Construct the Merkle tree.
                     let t_mtree = Instant::now();
                     // Compute leaf digests in parallel and build tree from hashes to avoid cloning all shards.
-                    let hashes: Vec<Digest> = shards.par_iter().map(|s| MerkleTree::digest(s)).collect();
+                    let hashes: Vec<Digest> = shards
+                        .par_iter()
+                        .map(|s| MerkleTree::digest(s.as_slice()))
+                        .collect();
                     debug!("hashes compute time: {:?}", t_mtree.elapsed());
                     let mtree = MerkleTree::from_hashes(hashes);
-                    // debug!("mtree rebuild time: {:?}", t_mtree.elapsed());
+                    debug!("mtree rebuild time: {:?}", t_mtree.elapsed());
                     // If the root hash of the reconstructed tree does not match the one
                     // received with proofs then abort.
                     if *mtree.root_hash() != root {
                         return Err(DagError::ProofConstructionFailed);
                     }
-                    self.mtrees.entry(root).or_insert(mtree);
+                    // self.mtrees.entry(root).or_insert(mtree);
 
                     // Reconstruct and process the payload only if we have the corresponding header info with proof.
                     let rid = echo.id;
@@ -526,14 +456,14 @@ impl Core {
                         None => {
                             // Store pending reconstruction to be resumed when HeaderInfoWithProof arrives.
                             debug!("Missing HeaderInfoWithProof for echo id {:?}, storing pending reconstruction", rid);
-                            self.pending_reconstructions.insert(rid, (root, shards));
+                            self.pending_reconstructions.insert(rid, root);
                             return Ok(());
                         }
                     };
 
                     // Move shards into helper that rebuilds the payload and submits the certificate.
                     let t_finalize = Instant::now();
-                    self.finalize_reconstruction(root, shards, header_clone).await?;
+                    self.finalize_reconstruction(header_clone).await?;
                     debug!("finalize_reconstruction time: {:?}", t_finalize.elapsed());
                 }
             }
@@ -546,12 +476,12 @@ impl Core {
     // store reconstructed payload and create/process the Certificate.
     async fn finalize_reconstruction(
         &mut self,
-        root: Digest,
-        shards: Vec<Vec<u8>>,
+        // root: Digest,
+        // shards: Vec<Vec<u8>>,
         header_info_with_proof: HeaderInfoWithProof,
     ) -> DagResult<()> {
         let start = Instant::now();
-        let payload_len = header_info_with_proof.payload_len;
+        // let payload_len = header_info_with_proof.payload_len;
 
 
         // let data_count = self.coding.data_shard_count() as usize;
@@ -576,16 +506,13 @@ impl Core {
             origin: header_info_with_proof.author,
         };
 
-        let t_proc_cert = Instant::now();
         self.process_certificate(certificate).await?;
-        debug!("process_certificate time: {:?}", t_proc_cert.elapsed());
         debug!("finalize_reconstruction total time: {:?}", start.elapsed());
         Ok(())
     }
 
     #[async_recursion]
     async fn process_certificate(&mut self, certificate: Certificate) -> DagResult<()> {
-        let start = Instant::now();
         debug!("Processing cert {:?}", certificate);
 
         // Ensure we have all the ancestor of this certificate yet. If we don't, the synchronizer will gather it and trigger re-processing of this certificate.
@@ -635,7 +562,6 @@ impl Core {
             .or_insert_with(Vec::new)
             .extend(handlers);
 
-        debug!("process_certificate total time: {:?}", start.elapsed());
         Ok(())
     }
 
@@ -743,7 +669,6 @@ impl Core {
 
     // Main loop listening to incoming messages.
     pub async fn run(&mut self) {
-        let tx_primary = Arc::new(self.tx_primary.clone());
 
         loop {
             let result = tokio::select! {

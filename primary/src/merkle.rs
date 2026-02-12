@@ -1,4 +1,5 @@
 use std::time::Instant;
+use bincode::de;
 use serde::{Deserialize, Serialize};
 use log::debug;
 use rayon::prelude::*;
@@ -46,10 +47,13 @@ impl MerkleTree {
         debug!("merkle.from_vec: hashed {} leaves in {:?}", leaf_hashes.len(), t_start.elapsed());
 
         let inner = RsMerkleTree::<Blake3Hasher>::from_leaves(&leaf_hashes);
-        
+        debug!("merkle.from_vec: built rs_merkle tree in {:?}", t_start.elapsed());
+
         let root_hash = inner.root()
             .map(|r| Digest(r))
             .expect("merkle has a root");
+
+        debug!("merkle.from_vec: obtained root hash in {:?}", t_start.elapsed());
 
         MerkleTree { 
             inner, 
@@ -92,12 +96,12 @@ impl MerkleTree {
         }
         // value must come from our owned values if present
         let vec = self.values.get(index).cloned()?;
-        let value_hash = MerkleTree::digest(&vec);
+        let value_hash = MerkleTree::digest(vec.as_slice());
         let value_box = vec.into_boxed_slice();
         Some(Proof { value: value_box, index, digests, root_hash: self.root_hash, value_hash })
     }
 
-    pub fn proof_with_leaf(&self, index: usize, leaf: Transaction) -> Option<Proof> {
+    pub fn proof_with_leaf(&self, index: usize, leaf: &[u8]) -> Option<Proof> {
         if index >= self.leaf_count() {
             return None;
         }
@@ -120,25 +124,13 @@ impl MerkleTree {
 
         // Step 3: compute value hash (blake3)
         let hash_start = Instant::now();
-        let value_hash = MerkleTree::digest(&leaf);
+        let value_hash = MerkleTree::digest(leaf);
         let t_after_hash = Instant::now();
 
         // Step 4: convert leaf into boxed slice (this moves leaf)
         let box_start = Instant::now();
-        let value_box = leaf.into_boxed_slice();
+        let value_box = leaf.to_vec().into_boxed_slice();
         let t_after_box = Instant::now();
-
-        // log per-step timings
-        debug!(
-            "merkle.proof_with_leaf: index={} leaf_len={} timings: total={:?} proof={:?} digests={:?} hash={:?} box={:?}",
-            index,
-            value_box.len(),
-            t_after_box.duration_since(t_start),
-            t_after_proof.duration_since(proof_start),
-            t_after_digests.duration_since(digests_start),
-            t_after_hash.duration_since(hash_start),
-            t_after_box.duration_since(box_start),
-        );
 
         Some(Proof { value: value_box, index, digests, root_hash: self.root_hash, value_hash })
     }
@@ -155,8 +147,8 @@ impl MerkleTree {
         self.values
     }
 
-    pub fn digest(value: &Transaction) -> Digest {
-        let out = blake3::hash(value.as_ref());
+    pub fn digest(value: &[u8]) -> Digest {
+        let out = blake3::hash(value);
         let bytes = out.as_bytes();
         let mut arr = [0u8; 32];
         arr.copy_from_slice(bytes);

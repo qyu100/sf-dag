@@ -84,6 +84,8 @@ pub struct Parameters {
     /// is not reached. Denominated in ms.
     pub max_batch_delay: u64,
     pub f_num: u32,
+    pub rs_block_size: usize,
+    pub rs_block_threads: usize,
 }
 
 impl Default for Parameters {
@@ -99,6 +101,8 @@ impl Default for Parameters {
             tx_size: 512,
             max_batch_delay: 100,
             f_num: 3,
+            rs_block_size: 16 * 1024,
+            rs_block_threads: 4,
         }
     }
 }
@@ -119,6 +123,8 @@ impl Parameters {
         info!("Max batch delay set to {} ms", self.max_batch_delay);
         info!("Transaction size set to {} B", self.tx_size);
         info!("F  set to {} B", self.f_num);
+        info!("Reed-Solomon block size set to {} B", self.rs_block_size);
+        info!("Reed-Solomon block threads set to {}", self.rs_block_threads);
     }
 }
 

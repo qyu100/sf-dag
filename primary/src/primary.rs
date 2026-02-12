@@ -194,6 +194,8 @@ impl Primary {
             /* tx_proposer */ tx_parents.clone(),
             tx_timeout_cert,
             tx_consensus_header_msg,
+            parameters.rs_block_size,
+            parameters.rs_block_threads,
         );
 
         // Keeps track of the latest consensus round and allows other tasks to clean up their their internal state

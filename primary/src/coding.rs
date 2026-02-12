@@ -1,7 +1,10 @@
 use crate::error::{DagError, DagResult};
-use reed_solomon_simd::{ReedSolomonDecoder, ReedSolomonEncoder, encode as rs_encode};
+use reed_solomon_simd::{ReedSolomonDecoder, ReedSolomonEncoder};
+use rayon::prelude::*;
+use rayon::{ThreadPool, ThreadPoolBuilder};
+use std::collections::HashMap;
 use std::cell::RefCell;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 use log::debug;
 
@@ -11,6 +14,24 @@ thread_local! {
     static SIMD_CACHE_TLS: RefCell<Option<(ReedSolomonEncoder, ReedSolomonDecoder, usize)>> = RefCell::new(None);
 }
 
+static RS_BLOCK_POOLS: OnceLock<Mutex<HashMap<usize, Arc<ThreadPool>>>> = OnceLock::new();
+
+fn rs_block_pool(rs_block_threads: usize) -> Arc<ThreadPool> {
+    let pools = RS_BLOCK_POOLS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = pools.lock().expect("failed to lock RS block pool map");
+    if let Some(pool) = guard.get(&rs_block_threads) {
+        return Arc::clone(pool);
+    }
+
+    let pool = Arc::new(
+        ThreadPoolBuilder::new()
+            .num_threads(rs_block_threads)
+            .build()
+            .expect("failed to build RS block thread pool"),
+    );
+    guard.insert(rs_block_threads, Arc::clone(&pool));
+    pool
+}
 /// A wrapper for `ReedSolomon` that doesn't panic if there are no parity shards.
 pub enum Coding {
     /// A `ReedSolomon` instance with at least one parity shard.
@@ -50,7 +71,7 @@ impl Coding {
     }
 
     /// Constructs (and overwrites) the parity shards.
-    pub fn encode(&self, slices: &mut [&mut [u8]]) -> DagResult<()> {
+    pub fn encode(&self, slices: &mut [&mut [u8]], rs_block_size: usize, rs_block_threads: usize) -> DagResult<()> {
         match *self {
             Coding::ReedSolomon { data_shards, parity_shards, .. } => {
                 let total_shards = data_shards + parity_shards;
@@ -66,53 +87,63 @@ impl Coding {
                     }
                 }
 
-                // Try to reuse a thread-local encoder/decoder to avoid repeated
-                // initialization. Keep decoder too so we can put a full pair back.
-                let mut maybe: Option<(ReedSolomonEncoder, ReedSolomonDecoder, usize)> = None;
-                SIMD_CACHE_TLS.with(|cell| {
-                    maybe = cell.borrow_mut().take();
-                });
-
-                let (mut encoder, mut decoder) = if let Some((e, d, len)) = maybe {
-                    if len == shard_size {
-                        (e, d)
-                    } else {
-                        // Put back the mismatched cached pair and create new ones.
-                        SIMD_CACHE_TLS.with(|cell| {
-                            *cell.borrow_mut() = Some((e, d, len));
-                        });
-                        (
-                            ReedSolomonEncoder::new(data_shards, parity_shards, shard_size).map_err(|_| DagError::ProofConstructionFailed)?,
-                            ReedSolomonDecoder::new(data_shards, parity_shards, shard_size).map_err(|_| DagError::ProofConstructionFailed)?,
-                        )
-                    }
-                } else {
-                    (
-                        ReedSolomonEncoder::new(data_shards, parity_shards, shard_size).map_err(|_| DagError::ProofConstructionFailed)?,
-                        ReedSolomonDecoder::new(data_shards, parity_shards, shard_size).map_err(|_| DagError::ProofConstructionFailed)?,
-                    )
-                };
-
-                // Reset encoder state for these shard params (safe for both new and reused).
-                encoder.reset(data_shards, parity_shards, shard_size).map_err(|_| DagError::ProofConstructionFailed)?;
-
-                // Feed original data shards into encoder.
-                for i in 0..data_shards {
-                    encoder.add_original_shard(&slices[i][..]).map_err(|_| DagError::ProofConstructionFailed)?;
+                if shard_size % 64 != 0 {
+                    return Err(DagError::ProofConstructionFailed);
                 }
 
-                // Encode parity shards and write them into provided parity slices.
-                let enc_result = encoder.encode().map_err(|_| DagError::ProofConstructionFailed)?;
-                for (ridx, recovery) in enc_result.recovery_iter().enumerate() {
+                let mut parity_ptrs: Vec<usize> = vec![0; parity_shards];
+                for ridx in 0..parity_shards {
                     let abs_idx = data_shards + ridx;
-                    slices[abs_idx].copy_from_slice(recovery);
+                    parity_ptrs[ridx] = slices[abs_idx].as_mut_ptr() as usize;
                 }
-                drop(enc_result);
 
-                // Put encoder/decoder back into thread-local cache.
-                SIMD_CACHE_TLS.with(|cell| {
-                    *cell.borrow_mut() = Some((encoder, decoder, shard_size));
-                });
+                let mut originals_slices: Vec<&[u8]> = Vec::with_capacity(data_shards);
+                for i in 0..data_shards {
+                    originals_slices.push(&slices[i][..]);
+                }
+
+                let block_size = rs_block_size;
+                let num_blocks = (shard_size + block_size - 1) / block_size;
+                debug!(
+                    "encode: block params block_size={} num_blocks={} pool_threads={}",
+                    block_size,
+                    num_blocks,
+                    rs_block_threads
+                );
+                let t_encode = Instant::now();
+                rs_block_pool(rs_block_threads)
+                    .install(|| {
+                        (0..num_blocks).into_par_iter().try_for_each(|block_idx| -> DagResult<()> {
+                            let offset = block_idx * block_size;
+                            let block_len = std::cmp::min(block_size, shard_size - offset);
+                            if block_len % 64 != 0 {
+                                return Err(DagError::ProofConstructionFailed);
+                            }
+
+                            let mut block_encoder = ReedSolomonEncoder::new(data_shards, parity_shards, block_len)
+                                .map_err(|_| DagError::ProofConstructionFailed)?;
+                            for i in 0..data_shards {
+                                block_encoder
+                                    .add_original_shard(&originals_slices[i][offset..offset + block_len])
+                                    .map_err(|_| DagError::ProofConstructionFailed)?;
+                            }
+
+                            let block_result = block_encoder.encode().map_err(|_| DagError::ProofConstructionFailed)?;
+                            for (ridx, recovery) in block_result.recovery_iter().enumerate() {
+                                let ptr = parity_ptrs[ridx] as *mut u8;
+                                unsafe {
+                                    std::ptr::copy_nonoverlapping(
+                                        recovery.as_ptr(),
+                                        ptr.add(offset),
+                                        block_len,
+                                    );
+                                }
+                            }
+                            Ok(())
+                        })
+                    })
+                    .map_err(|_| DagError::ProofConstructionFailed)?;
+                debug!("encode: parity encode (block) took {:?}", t_encode.elapsed());
 
                 Ok(())
             }
@@ -121,11 +152,10 @@ impl Coding {
     }
 
     /// If enough shards are present, reconstructs the missing ones.
-    pub fn reconstruct_shards(&self, shards: &mut [Option<Box<[u8]>>]) -> DagResult<()> {
+    pub fn reconstruct_shards(&self, shards: &mut [Option<Box<[u8]>>], rs_block_size: usize, rs_block_threads: usize) -> DagResult<()> {
     match *self {
         Coding::ReedSolomon { data_shards, parity_shards, .. } => {
             let t_start = Instant::now();
-            let total_shards = data_shards + parity_shards;
 
             let shard_size = shards.iter()
                 .find_map(|s| s.as_ref().map(|b| b.len()))
@@ -162,61 +192,196 @@ impl Coding {
                 let current_data_count = shards.iter().take(data_shards).filter(|s| s.is_some()).count();
 
                 if current_data_count < data_shards {
-                    let t_feed = Instant::now();
-                    decoder.reset(data_shards, parity_shards, shard_size)
-                        .map_err(|_| DagError::ProofConstructionFailed)?;
-
-                    let mut fed_count = 0;
-                    for i in 0..total_shards {
-                        if let Some(ref b) = shards[i] {
-                            if i < data_shards {
-                                decoder.add_original_shard(i, b).map_err(|_| DagError::ProofConstructionFailed)?;
-                            } else {
-                                decoder.add_recovery_shard(i - data_shards, b).map_err(|_| DagError::ProofConstructionFailed)?;
-                            }
-                            fed_count += 1;
-                            if fed_count >= data_shards { break; }
-                        }
+                    let available_shards = shards.iter().filter(|s| s.is_some()).count();
+                    if available_shards < data_shards {
+                        return Err(DagError::ProofConstructionFailed);
                     }
 
-                    let t_decode = Instant::now();
-                    let decode_result = decoder.decode().map_err(|_| DagError::ProofConstructionFailed)?;
-                    
-                    for (idx, restored) in decode_result.restored_original_iter() {
+                    let mut missing_data_mask = vec![false; data_shards];
+                    for &idx in &missing_data_indices {
+                        missing_data_mask[idx] = true;
+                    }
+
+                    let mut data_ptrs: Vec<usize> = vec![0; data_shards];
+                    for &idx in &missing_data_indices {
                         if shards[idx].is_none() {
                             let mut buf = Vec::with_capacity(shard_size);
                             unsafe { buf.set_len(shard_size); }
-                            buf.copy_from_slice(restored);
                             shards[idx] = Some(buf.into_boxed_slice());
                         }
+                        let ptr = shards[idx]
+                            .as_mut()
+                            .ok_or(DagError::ProofConstructionFailed)?
+                            .as_mut_ptr();
+                        data_ptrs[idx] = ptr as usize;
                     }
-                    debug!("reconstruct: decode math took: {:?}", t_decode.elapsed());
+
+                    let mut data_slices: Vec<Option<&[u8]>> = Vec::with_capacity(data_shards);
+                    for i in 0..data_shards {
+                        if missing_data_mask[i] {
+                            data_slices.push(None);
+                        } else {
+                            data_slices.push(shards[i].as_ref().map(|b| b.as_ref()));
+                        }
+                    }
+
+                    let mut parity_slices: Vec<Option<&[u8]>> = Vec::with_capacity(parity_shards);
+                    for ridx in 0..parity_shards {
+                        parity_slices.push(shards[data_shards + ridx].as_ref().map(|b| b.as_ref()));
+                    }
+
+                    let block_size = rs_block_size;
+                    let num_blocks = (shard_size + block_size - 1) / block_size;
+                    debug!(
+                        "reconstruct: decode block params block_size={} num_blocks={} pool_threads={} available_shards={}",
+                        block_size,
+                        num_blocks,
+                        rs_block_threads,
+                        available_shards
+                    );
+
+                    let t_decode = Instant::now();
+                    rs_block_pool(rs_block_threads)
+                        .install(|| {
+                            (0..num_blocks).into_par_iter().try_for_each(|block_idx| -> DagResult<()> {
+                                let offset = block_idx * block_size;
+                                let block_len = std::cmp::min(block_size, shard_size - offset);
+                                if block_len % 64 != 0 {
+                                    return Err(DagError::ProofConstructionFailed);
+                                }
+
+                                let mut block_decoder = ReedSolomonDecoder::new(data_shards, parity_shards, block_len)
+                                    .map_err(|_| DagError::ProofConstructionFailed)?;
+                                for i in 0..data_shards {
+                                    if let Some(s) = data_slices[i] {
+                                        block_decoder
+                                            .add_original_shard(i, &s[offset..offset + block_len])
+                                            .map_err(|_| DagError::ProofConstructionFailed)?;
+                                    }
+                                }
+                                for ridx in 0..parity_shards {
+                                    if let Some(s) = parity_slices[ridx] {
+                                        block_decoder
+                                            .add_recovery_shard(ridx, &s[offset..offset + block_len])
+                                            .map_err(|_| DagError::ProofConstructionFailed)?;
+                                    }
+                                }
+
+                                let block_result = block_decoder.decode().map_err(|_| DagError::ProofConstructionFailed)?;
+                                for (idx, restored) in block_result.restored_original_iter() {
+                                    let ptr = data_ptrs[idx] as *mut u8;
+                                    if !ptr.is_null() {
+                                        unsafe {
+                                            std::ptr::copy_nonoverlapping(
+                                                restored.as_ptr(),
+                                                ptr.add(offset),
+                                                block_len,
+                                            );
+                                        }
+                                    }
+                                }
+                                Ok(())
+                            })
+                        })
+                        .map_err(|_| DagError::ProofConstructionFailed)?;
+                    debug!("reconstruct: decode (block) took: {:?}", t_decode.elapsed());
                 } else {
                     debug!("reconstruct: Data shards already complete, skipping decoder.");
                 }
             }
 
             if !missing_parity_indices.is_empty() {
-                let t_p_feed = Instant::now();
+                let t_p_total = Instant::now();
+                debug!(
+                    "reconstruct: parity params data_shards={} parity_shards={} shard_size={}",
+                    data_shards,
+                    parity_shards,
+                    shard_size
+                );
+
                 encoder.reset(data_shards, parity_shards, shard_size)
                     .map_err(|_| DagError::ProofConstructionFailed)?;
 
+                let t_add = Instant::now();
                 for i in 0..data_shards {
                     let s = shards[i].as_ref().ok_or(DagError::ProofConstructionFailed)?;
                     encoder.add_original_shard(s).map_err(|_| DagError::ProofConstructionFailed)?;
                 }
+                debug!("reconstruct: parity add_original_shard took {:?}", t_add.elapsed());
 
-                let enc_result = encoder.encode().map_err(|_| DagError::ProofConstructionFailed)?;
-                for (ridx, recovery) in enc_result.recovery_iter().enumerate() {
-                    let abs_idx = data_shards + ridx;
-                    if shards[abs_idx].is_none() {
-                        let mut buf = Vec::with_capacity(shard_size);
-                        unsafe { buf.set_len(shard_size); }
-                        buf.copy_from_slice(recovery);
-                        shards[abs_idx] = Some(buf.into_boxed_slice());
+                let t_encode = Instant::now();
+                let mut missing_parity_mask = vec![false; parity_shards];
+                for abs_idx in &missing_parity_indices {
+                    missing_parity_mask[abs_idx - data_shards] = true;
+                }
+
+                let mut parity_ptrs: Vec<usize> = vec![0; parity_shards];
+                for ridx in 0..parity_shards {
+                    if missing_parity_mask[ridx] {
+                        let abs_idx = data_shards + ridx;
+                        if shards[abs_idx].is_none() {
+                            let mut buf = Vec::with_capacity(shard_size);
+                            unsafe { buf.set_len(shard_size); }
+                            shards[abs_idx] = Some(buf.into_boxed_slice());
+                        }
+                        let ptr = shards[abs_idx]
+                            .as_mut()
+                            .ok_or(DagError::ProofConstructionFailed)?
+                            .as_mut_ptr();
+                        parity_ptrs[ridx] = ptr as usize;
                     }
                 }
-                debug!("reconstruct: parity compute took {:?}", t_p_feed.elapsed());
+
+                let mut originals_slices: Vec<&[u8]> = Vec::with_capacity(data_shards);
+                for i in 0..data_shards {
+                    let s = shards[i].as_ref().ok_or(DagError::ProofConstructionFailed)?;
+                    originals_slices.push(s);
+                }
+
+                let block_size = rs_block_size;
+                let num_blocks = (shard_size + block_size - 1) / block_size;
+                debug!(
+                    "reconstruct: parity block params block_size={} num_blocks={} pool_threads={}",
+                    block_size,
+                    num_blocks,
+                    rs_block_threads
+                );
+                rs_block_pool(rs_block_threads)
+                    .install(|| {
+                        (0..num_blocks).into_par_iter().try_for_each(|block_idx| -> DagResult<()> {
+                            let offset = block_idx * block_size;
+                            let block_len = std::cmp::min(block_size, shard_size - offset);
+                            if block_len % 64 != 0 {
+                                return Err(DagError::ProofConstructionFailed);
+                            }
+
+                            let mut block_encoder = ReedSolomonEncoder::new(data_shards, parity_shards, block_len)
+                                .map_err(|_| DagError::ProofConstructionFailed)?;
+                            for i in 0..data_shards {
+                                block_encoder
+                                    .add_original_shard(&originals_slices[i][offset..offset + block_len])
+                                    .map_err(|_| DagError::ProofConstructionFailed)?;
+                            }
+
+                            let block_result = block_encoder.encode().map_err(|_| DagError::ProofConstructionFailed)?;
+                            for (ridx, recovery) in block_result.recovery_iter().enumerate() {
+                                let ptr = parity_ptrs[ridx] as *mut u8;
+                                if !ptr.is_null() {
+                                    unsafe {
+                                        std::ptr::copy_nonoverlapping(
+                                            recovery.as_ptr(),
+                                            ptr.add(offset),
+                                            block_len,
+                                        );
+                                    }
+                                }
+                            }
+                            Ok(())
+                        })
+                    })
+                    .map_err(|_| DagError::ProofConstructionFailed)?;
+                debug!("reconstruct: parity encode (block) took {:?}", t_encode.elapsed());
+                debug!("reconstruct: parity total took {:?}", t_p_total.elapsed());
             }
 
             SIMD_CACHE_TLS.with(|cell| {
@@ -267,4 +432,32 @@ fn bench_rs_decode_real() {
     println!("Real RS Decode Time (Worst Case): {:?}", duration);
     println!("======================================");
 }
+
+    #[test]
+    fn bench_rs_encode_real() {
+        let data_shards = 18;
+        let parity_shards = 32;
+        let total_bytes = 512usize * 1024 * 1024 / 10; // 51.2 MB
+        let shard_size = (total_bytes / data_shards / 64) * 64;
+
+        use rand::RngCore;
+        let mut rng = rand::thread_rng();
+        let mut data: Vec<Vec<u8>> = vec![vec![0u8; shard_size]; data_shards];
+        for s in data.iter_mut() {
+            rng.fill_bytes(s);
+        }
+
+        let originals: Vec<&[u8]> = data.iter().map(|s| s.as_slice()).collect();
+
+        let start = Instant::now();
+        let recovery = reed_solomon_simd::encode(data_shards, parity_shards, originals)
+            .expect("encode failed");
+        let duration = start.elapsed();
+
+        println!("======================================");
+        println!("RS Encode Time (rs_encode): {:?}", duration);
+        println!("recovery shards: {}", recovery.len());
+        println!("shard_size: {} bytes", shard_size);
+        println!("======================================");
+    }
 }
