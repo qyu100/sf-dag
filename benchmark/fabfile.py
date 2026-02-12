@@ -126,7 +126,9 @@ def remote(ctx, burst = 50, debug=False, consensus_only=False, header_size=512):
         'tx_size': bench_params['tx_size'],  # bytes
         'max_batch_delay': 200,  # ms
         'leaders_per_round': 67,
-        'f_num': 16
+        'f_num': 16,
+        'rs_block_size': 4 * 1024,  # bytes
+        'rs_block_threads': 4
     }
     try:
         Bench(ctx).run(bench_params, node_params, debug, consensus_only)
