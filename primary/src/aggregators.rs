@@ -8,6 +8,7 @@ use crypto::Signature;
 use log::debug;
 use std::time::Instant;
 use std::collections::{HashSet, HashMap};
+use std::mem;
 
 pub struct EchoAggregator {
     weight: Stake,
@@ -201,11 +202,11 @@ impl TimeoutAggregator {
         self.timeouts.push((author, timeout.signature));
         self.weight += committee.stake(&author);
         if self.weight >= committee.quorum_threshold() {
-            // Once quorum is reached, you might want to reset for the next round or trigger an action.
+            // Once quorum is reached, move the accumulated timeouts out (avoids cloning the vec).
             return Ok(Some(TimeoutCert {
-                round: timeout.round.clone(),
-                timeouts: self.timeouts.clone(),
-            })); // Return the authorities that contributed to this quorum.
+                round: timeout.round,
+                timeouts: mem::take(&mut self.timeouts),
+            }));
         }
         Ok(None)
     }
