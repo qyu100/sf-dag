@@ -426,7 +426,6 @@ pub struct Header {
     pub payload: BTreeMap<Digest, WorkerId>,
     pub parent_cert: Certificate,
     pub id: Digest,
-    pub signature: Signature,
 
     // Consensus metadata
     pub consensus_messages: HashMap<Digest, ConsensusMessage>,
@@ -442,7 +441,6 @@ impl Header {
         height: Height,
         payload: BTreeMap<Digest, WorkerId>,
         parent_cert: Certificate,
-        signature_service: &mut SignatureService,
         consensus_instances: HashMap<Digest, ConsensusMessage>,
         num_active_instances: usize,
     ) -> Self {
@@ -452,16 +450,13 @@ impl Header {
             payload,
             parent_cert,
             id: Digest::default(),
-            signature: Signature::default(),
             consensus_messages: consensus_instances,
             num_active_instances,
             special: false,
         };
         let id = header.digest();
-        let signature = signature_service.request_signature(id.clone()).await;
         Self {
             id,
-            signature,
             ..header
         }
     }
@@ -530,10 +525,7 @@ impl Header {
                 .map_err(|_| DagError::MalformedHeader(self.id.clone()))?;
         }
 
-        // Check the signature.
-        self.signature
-            .verify(&self.id, &self.author)
-            .map_err(DagError::from)
+        Ok(())
     }
 
     pub fn height(&self) -> Height {
@@ -554,14 +546,11 @@ impl Header {
         let header = Header {
             author,
             height: round,
-            signature: Signature::default(),
             ..Header::default()
         };
         let id = header.digest();
-        let signature = Signature::new(&id, secret);
         Self {
             id,
-            signature,
             ..header
         }
     }
@@ -635,14 +624,12 @@ pub struct ConsensusRequest { //Signed wrapper around ONE ConsensusMessage
     // pub tc: Option<TC>
 }
 impl ConsensusRequest {
-    pub async fn new(author: PublicKey, message: ConsensusMessage, signature_service: &mut SignatureService,) -> Self {
-        let req = Self {
+    pub async fn new(author: PublicKey, message: ConsensusMessage) -> Self {
+        Self {
             author,
             message,
             sig: Signature::default(),
-        };
-        let sig= signature_service.request_signature(req.message.digest()).await;
-        Self { sig, ..req }
+        }
     }
 
     pub fn verify(&self, committee: &Committee) -> DagResult<()> {
@@ -652,8 +639,7 @@ impl ConsensusRequest {
             DagError::UnknownAuthority(self.author)
         );
 
-        // Check the signature.
-        self.sig.verify(&self.message.digest(), &self.author).map_err(DagError::from)
+        Ok(())
     }
 }
 
@@ -672,15 +658,13 @@ pub struct ConsensusVote {
     pub sig: Signature,
 }
 impl ConsensusVote {
-    pub async fn new(author: PublicKey, slot: Slot, digest: Digest, signature_service: &mut SignatureService,) -> Self {
-        let vote = Self {
+    pub async fn new(author: PublicKey, slot: Slot, digest: Digest) -> Self {
+        Self {
             author,
             slot,
             digest,
             sig: Signature::default(),
-        };
-        let sig= signature_service.request_signature(vote.digest.clone()).await;
-        Self { sig, ..vote }
+        }
     }
 
     pub fn verify(&self, committee: &Committee) -> DagResult<()> {
@@ -690,10 +674,7 @@ impl ConsensusVote {
             DagError::UnknownAuthority(self.author)
         );
 
-        // Check the signature.
-        self.sig
-            .verify(&self.digest, &self.author)
-            .map_err(DagError::from)
+        Ok(())
     }
 }
 
@@ -729,7 +710,6 @@ pub struct Vote {
     pub height: Height,
     pub origin: PublicKey,
     pub author: PublicKey,
-    pub signature: Signature,
     pub consensus_votes: Vec<(Slot, Digest, Signature)>,
     //special loopback information. PURELY LOCAL HACK
     //pub consensus_instance: Option<ConsensusMessage>,
@@ -739,20 +719,16 @@ impl Vote {
     pub async fn new(
         header: &Header,
         author: &PublicKey,
-        signature_service: &mut SignatureService,
         consensus_votes: Vec<(Slot, Digest, Signature)>,
     ) -> Self {
-        let vote = Self {
+        Self {
             id: header.id.clone(),
             height: header.height,
             origin: header.author,
             author: *author,
-            signature: Signature::default(),
             consensus_votes,
             //consensus_instance: None,
-        };
-        let signature = signature_service.request_signature(vote.digest()).await;
-        Self { signature, ..vote }
+        }
     }
 
     pub fn verify(&self, committee: &Committee) -> DagResult<()> {
@@ -762,10 +738,7 @@ impl Vote {
             DagError::UnknownAuthority(self.author)
         );
 
-        // Check the signature.
-        self.signature
-            .verify(&self.digest(), &self.author)
-            .map_err(DagError::from)
+        Ok(())
     }
 }
 
@@ -807,12 +780,10 @@ impl Vote {
             height: header.height(),
             origin: header.origin(),
             author,
-            signature: Signature::default(),
             consensus_votes,
             //consensus_instance: None,
         };
-        let signature = Signature::new(&vote.digest(), &secret);
-        Self { signature, ..vote }
+        Self {..vote }
     }
 }
 
@@ -827,7 +798,7 @@ pub struct Certificate {
     pub author: PublicKey,
     pub header_digest: Digest,
     pub height: Height,
-    pub votes: Vec<(PublicKey, Signature)>,
+    pub votes: Vec<PublicKey>,
 }
 
 impl Certificate {
@@ -886,7 +857,7 @@ impl Certificate {
         // Ensure the certificate has a quorum.
         let mut weight = 0;
         let mut used = HashSet::new();
-        for (name, _) in self.votes.iter() {
+        for name in self.votes.iter() {
             ensure!(!used.contains(name), DagError::AuthorityReuse(*name));
             let voting_rights = committee.stake(name);
             ensure!(voting_rights > 0, DagError::UnknownAuthority(*name));
@@ -898,37 +869,7 @@ impl Certificate {
             DagError::CertificateRequiresQuorum
         );
 
-        // Check the signatures.
-
-        //If all votes were special_valid or invalid ==> compute single vote digest and verify it (since it is the same for all)
-        if false {
-            //matching_valids(&self.special_valids) {
-            //DEBUG
-            // //println!("verifiable digest: {:?}", &self.verifiable_digest());
-            // for (key, sig) in &self.votes {
-            //     //println!("vote signature: {:?}", sig);
-            //     //println!("vote author: {:?}", key);
-            // }
-            Signature::verify_batch(&self.verifiable_digest(), &self.votes).map_err(DagError::from)
-        } else {
-            //compute all the individual vote digests and verify them  (TODO: Since there are only 2 possible types, 0 and 1 ==> Could compute 2 digests, and then insert them in the correct order)
-            //E.g. could re-order Votes to be first all for 0, then all for 1. And call verify_batch separately twice
-            let mut digests = Vec::new();
-            for (_i, _) in self.votes.iter().enumerate() {
-                digests.push({
-                    let mut hasher = Sha512::new();
-                    hasher.update(&self.header_digest);
-                    hasher.update(self.height().to_le_bytes());
-                    //hasher.update(&self.origin());
-                    //hasher.update(self.special_valids[i].to_le_bytes());
-                    Digest(hasher.finalize().as_slice()[..32].try_into().unwrap())
-                })
-                //Check special valid.
-                //Does one still need to check  QC? Or can one trust cert?  ==> Yes, because only invalid ones need proof => invalid = not forwarded to consensus. For Dag layer makes no difference.
-                // If a byz leader doesn't want to forward to consensus.. thats fine.. same as timing out.
-            }
-            Signature::verify_batch_multi(&digests, &self.votes).map_err(DagError::from)
-        }
+        Ok(())
     }
 
     pub fn height(&self) -> Height {
@@ -964,10 +905,7 @@ impl Certificate {
     fn valid_weight(&self, committee: &Committee) -> Stake {
         self.votes
             .iter()
-            .enumerate()
-            .map(|(_i, (author, _))| {
-                committee.stake(&author) * (1 /*self.special_valids[i]*/ as Stake)
-            })
+            .map(|author| committee.stake(author) * (1 as Stake))
             .sum()
     }
 
@@ -1026,213 +964,11 @@ impl PartialEq for Certificate {
     }
 }
 
-/*#[derive(Serialize, Deserialize, Default, Clone)]
-pub struct Block {
-    pub qc: QC, // QC is equivalent to Commit Certificate in our terminology. Certificate is equivalent to Vote-QC in our terminology
-    pub tc: Option<TC>,
-    pub author: PublicKey,
-    pub view: View,
-    pub payload: Vec<Header>, // Change this to be the payload of a header (vector of digests representing mini-batches)
-    pub signature: Signature,
-}
-
-impl Block {
-    pub async fn new(
-        qc: QC,
-        tc: Option<TC>,
-        author: PublicKey,
-        view: View,
-        payload: Vec<Header>,
-        mut signature_service: SignatureService,
-    ) -> Self {
-        let block = Self {
-            qc,
-            tc,
-            author,
-            view,
-            payload,
-            signature: Signature::default(),
-        };
-        let signature = signature_service.request_signature(block.digest()).await;
-        Self { signature, ..block }
-    }
-
-    pub fn genesis() -> Self {
-        Block::default()
-    }
-
-    pub fn parent(&self) -> &Digest {
-        &self.qc.hash
-    }
-
-    pub fn verify(&self, committee: &Committee) -> ConsensusResult<()> {
-
-        // Ensure the authority has voting rights.
-        let voting_rights = committee.stake(&self.author);
-        ensure!(
-            voting_rights > 0,
-            ConsensusError::UnknownAuthority(self.author)
-        );
-
-        // Check the signature.
-        self.signature.verify(&self.digest(), &self.author)?;
-
-        // Check the embedded QC.
-        if self.qc != QC::genesis(committee) {
-            self.qc.verify(committee)?;
-        }
-
-        // Check the TC embedded in the block (if any).
-        if let Some(ref tc) = self.tc {
-            tc.verify(committee)?;
-        }
-        Ok(())
-    }
-}
-
-impl Hash for Block {
-    fn digest(&self) -> Digest {
-        let mut hasher = Sha512::new();
-        hasher.update(self.author.0);
-        hasher.update(self.view.to_le_bytes());
-        for x in &self.payload {
-            hasher.update(&x.id);
-        }
-        hasher.update(&self.qc.hash);
-        Digest(hasher.finalize().as_slice()[..32].try_into().unwrap())
-    }
-}
-
-impl fmt::Debug for Block {
-    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
-        write!(
-            f,
-            "{}: HSB({}, {}, {:?}, {})",
-            self.digest(),
-            self.author,
-            self.view,
-            self.qc,
-            self.payload.len(),
-        )
-    }
-}
-
-impl fmt::Display for Block {
-    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
-        write!(f, "HSB{}", self.view)
-    }
-}
-
-impl PartialEq for Block {
-    fn eq(&self, other: &Self) -> bool {
-        self.digest() == other.digest()
-    }
-}
-
-impl Block {
-    pub fn new_from_key(
-        qc: QC,
-        author: PublicKey,
-        view: View,
-        payload: Vec<Header>,
-        secret: &SecretKey,
-    ) -> Block {
-        let block = Block {
-            qc,
-            tc: None,
-            author,
-            view,
-            payload,
-            signature: Signature::default(),
-        };
-        let signature = Signature::new(&block.digest(), secret);
-        Self { signature, ..block }
-    }
-}
-
-
-
-
-#[derive(Clone, Serialize, Deserialize)]
-pub struct AcceptVote {
-    pub hash: Digest,
-    pub view: View,
-    pub view_round: Height,
-    pub author: PublicKey,
-    pub signature: Signature,
-}
-
-impl AcceptVote {
-    pub async fn new(
-        header: &Header,
-        author: PublicKey,
-        mut signature_service: SignatureService,
-    ) -> Self {
-        let vote = Self {
-            hash: header.id.clone(),
-            view: header.consensus_info.clone().unwrap().view,
-            view_round: header.height,
-            author,
-            signature: Signature::default(),
-        };
-        let signature = signature_service.request_signature(vote.digest()).await;
-        Self { signature, ..vote }
-    }
-
-    pub fn verify(&self, committee: &Committee) -> ConsensusResult<()> {
-        // Ensure the authority has voting rights.
-        ensure!(
-            committee.stake(&self.author) > 0,
-            ConsensusError::UnknownAuthority(self.author)
-        );
-
-        // Check the signature.
-        self.signature.verify(&self.digest(), &self.author)?;
-        Ok(())
-    }
-}
-
-impl AcceptVote {
-    pub fn new_from_key(id: Digest, view: View, round: Height, author: PublicKey, secret: &SecretKey) -> Self {
-        let vote = AcceptVote {
-            hash: id.clone(),
-            view: view,
-            view_round: round,
-            author,
-            signature: Signature::default(),
-        };
-        let signature = Signature::new(&vote.digest(), &secret);
-        Self { signature, ..vote }
-    }
-}
-
-impl PartialEq for AcceptVote {
-    fn eq(&self, other: &Self) -> bool {
-        self.digest() == other.digest()
-    }
-}
-
-
-impl Hash for AcceptVote {
-    fn digest(&self) -> Digest {
-        let mut hasher = Sha512::new();
-        hasher.update(&self.hash);
-        hasher.update(self.view.to_le_bytes());
-        hasher.update(self.view_round.to_le_bytes());
-        Digest(hasher.finalize().as_slice()[..32].try_into().unwrap())
-    }
-}
-
-impl fmt::Debug for AcceptVote {
-    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
-        write!(f, "V({}, {}, {})", self.author, self.view, self.hash)
-    }
-}*/
 
 #[derive(Clone, Serialize, Deserialize, Default)]
 pub struct QC {
     pub id: Digest,
-    pub votes: Vec<(PublicKey, Signature)>,
+    pub votes: Vec<PublicKey>,
 }
 
 impl QC {
@@ -1250,7 +986,7 @@ impl QC {
         // Ensure the QC has a quorum.
         let mut weight = 0;
         let mut used = HashSet::new();
-        for (name, _) in self.votes.iter() {
+        for name in self.votes.iter() {
             ensure!(!used.contains(name), ConsensusError::AuthorityReuse(*name));
             let voting_rights = committee.stake(name);
             ensure!(voting_rights > 0, ConsensusError::UnknownAuthority(*name));
@@ -1262,9 +998,7 @@ impl QC {
             ConsensusError::QCRequiresQuorum
         );
 
-        //let verifiable_digest = self.digest();
-        // Check the signatures.
-        Signature::verify_batch(&self.id, &self.votes).map_err(ConsensusError::from)
+        Ok(())
     }
 }
 
@@ -1301,7 +1035,6 @@ pub struct Timeout {
     pub high_prop: Option<ConsensusMessage>, //Prepare message
 
     pub author: PublicKey,
-    pub signature: Signature,
 }
 
 impl Timeout {
@@ -1311,21 +1044,13 @@ impl Timeout {
         high_qc: Option<ConsensusMessage>,
         high_prop: Option<ConsensusMessage>,
         author: PublicKey,
-        mut signature_service: SignatureService,
     ) -> Self {
-        let timeout = Self {
+        Self {
             slot,
             view,
             high_qc,
             high_prop,
             author,
-            signature: Signature::default(),
-        };
-
-        let signature = signature_service.request_signature(timeout.digest()).await;
-        Self {
-            signature,
-            ..timeout
         }
     }
 
@@ -1335,12 +1060,6 @@ impl Timeout {
             committee.stake(&self.author) > 0,
             DagError::UnknownAuthority(self.author)
         );
-
-        // Check the signature.
-        self.signature.verify(&self.digest(), &self.author)?;
-        // TODO: If it would be winning QC then you need to verify
-
-        //NOTE: When verifying TC, we have purged all vote contents besides the winner --> so this step is skipped. Verification is only necessary for the winning proposal
 
         Ok(())
     }
@@ -1379,11 +1098,8 @@ impl Timeout {
             slot,
             view,
             author,
-            signature: Signature::default(),
         };
-        let signature = Signature::new(&timeout.digest(), &secret);
         Self {
-            signature,
             ..timeout
         }
     }
@@ -1541,8 +1257,7 @@ impl TC {
         for timeout in &self.timeouts {
             //timeout.signature.verify(&timeout.digest(), &timeout.author)?; // Check the signatures. (Note: these are only the signatures for the timeout votes, not the signatures for the proposals. We check those in determine/validate winner)
             timeout.verify(committee)?;
-        }
-        Ok(())
+        } Ok(())
     }
 
     //Used for debugging: Returns all voted views. 0 by default if no vote was cast for specific type (prepare/accept/qc)

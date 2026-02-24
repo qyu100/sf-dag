@@ -1,16 +1,16 @@
 #![allow(dead_code)]
 #![allow(unused_variables)]
 // Copyright(C) Facebook, Inc. and its affiliates.
-use crate::error::{DagError, DagResult, ConsensusError};
+use crate::error::{DagError, DagResult};
 use crate::messages::{Certificate, Header, Vote, QC, Timeout, TC};
 use config::{Committee, Stake};
-use crypto::{PublicKey, Signature, Digest};
+use crypto::{PublicKey, Digest};
 use std::collections::HashSet;
 
 /// Aggregates votes for a particular header into a certificate.
 pub struct VotesAggregator {
     dissemination_weight: Stake,
-    pub votes: Vec<(PublicKey, Signature)>,
+    pub votes: Vec<PublicKey>,
     used: HashSet<PublicKey>,
     diss_cert: Option<Certificate>,
 
@@ -44,7 +44,7 @@ impl VotesAggregator {
         //println!("author is {:?}", author);
         ensure!(self.used.insert(author), DagError::AuthorityReuse(author));
        
-        self.votes.push((author, vote.signature));
+        self.votes.push(author);
         self.dissemination_weight += committee.stake(&author);
 
         if self.dissemination_weight >= committee.validity_threshold() {
@@ -83,7 +83,7 @@ impl VotesAggregator {
 /// Aggregate consensus info votes and check if we reach a quorum.
 pub struct QCMaker {
     weight: Stake,
-    pub votes: Vec<(PublicKey, Signature)>,
+    pub votes: Vec<PublicKey>,
     used: HashSet<PublicKey>,
 
     pub try_fast: bool,  //TODO: Configure it for Fast path (if it's a Quorummaker for Prepare)
@@ -108,25 +108,25 @@ impl QCMaker {
     pub fn append(
         &mut self,
         author: PublicKey,
-        vote: (Digest, Signature),
+        vote: Digest,
         committee: &Committee,
     ) -> DagResult<(bool, Option<QC>)> {   //bool = QC is available. Option = Some only if QC ready to be used.
         //println!("calling append");
         ensure!(self.used.insert(author), DagError::AuthorityReuse(author));
         //println!("after ensure");
 
-        self.votes.push((author, vote.1));
+        self.votes.push(author);
         self.weight += committee.stake(&author);
         //println!("QC weight is {:?}", self.weight);
 
         if self.try_fast {
-            return self.check_fast_qc(vote.0, committee);
+            return self.check_fast_qc(vote, committee);
         }
         //else Slow path:
         if self.weight >= committee.quorum_threshold() {
             // Ensure QC is only made once.
             self.weight = 0; 
-            return Ok((true, Some(QC { id: vote.0, votes: self.votes.clone() })))
+            return Ok((true, Some(QC { id: vote, votes: self.votes.clone() })))
         }
         
         Ok((false, None))

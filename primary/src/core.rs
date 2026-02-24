@@ -318,7 +318,7 @@ impl Core {
             .parent_cert
             .votes
             .iter()
-            .map(|(pk, _)| self.committee.stake(pk))
+            .map(|pk| self.committee.stake(pk))
             .sum();
         //println!("Before first ensure");
         debug!("Past header parent cert stake check");
@@ -441,7 +441,6 @@ impl Core {
             let vote = Vote::new(
                 &header,
                 &self.name,
-                &mut self.signature_service,
                 consensus_votes,
             )
             .await;
@@ -564,8 +563,7 @@ impl Core {
             let current_instance = opt_curr_instance.unwrap();
 
             if !is_loopback && vote.author != self.name {
-                //Verify signature. Could optimize performance by only verifying after forming a batch, and use parallel batch_verification
-                sig.verify(&current_instance.digest(), &vote.author)?;
+                // Signature verification disabled.
             }
             //Why does this code not work?
             //let current_instance = self.consensus_instances.get(&(*slot, digest.clone())).unwrap(); //todo: Throw a panic if it does not exist.
@@ -610,7 +608,7 @@ impl Core {
             //If qc_ready, but qc_opt = None => This is first Slow QC;
             //If qc_ready and qc_opt => This is FastQC or Consumption of Loopback to fetch SlowQC
             let (qc_ready, qc_opt) = match is_loopback {
-                false => qc_maker.append(vote.author, (digest.clone(), sig.clone()), &self.committee)?,
+                false => qc_maker.append(vote.author, digest.clone(), &self.committee)?,
                 true => {
                     qc_maker.try_fast = false; //turn back to normal path handling
                     qc_maker.get_qc()?
@@ -633,7 +631,6 @@ impl Core {
                         height: 0, 
                         origin: PublicKey::default(), 
                         author: PublicKey::default(), 
-                        signature: Signature::default(), 
                         consensus_votes: vec![(*slot, digest.clone(), Signature::default())], 
                         //consensus_instance: Some(current_instance.clone()), //Buffer instance. Current header could've advanced in the meantime and thus no longer include this instance by the time timer triggers
                     };
@@ -734,7 +731,6 @@ impl Core {
                 height: 0, 
                 origin: PublicKey::default(), 
                 author: PublicKey::default(), 
-                signature: Signature::default(), 
                 consensus_votes: vec![], //Create dummy vote with no sigs => this indicates its the Car timeout
                 //consensus_instance: None
             };
@@ -774,8 +770,7 @@ impl Core {
         }
 
         if !is_loopback && vote.author != self.name {
-            //Verify signature. Could optimize performance by only verifying after forming a batch, and use parallel batch_verification
-            vote.sig.verify(&vote.digest, &vote.author)?;
+            // Signature verification disabled.
         }
 
         let current_instance = opt_curr_instance.unwrap();
@@ -797,7 +792,7 @@ impl Core {
         //If qc_ready, but qc_opt = None => This is first Slow QC;
         //If qc_ready and qc_opt => This is FastQC or Consumption of Loopback to fetch SlowQC
         let (qc_ready, qc_opt) = match is_loopback {
-            false => qc_maker.append(vote.author, (vote.digest.clone(), vote.sig.clone()), &self.committee)?,
+            false => qc_maker.append(vote.author, vote.digest.clone(), &self.committee)?,
             true => {
                 qc_maker.try_fast = false; //turn back to normal path handling
                 qc_maker.get_qc()?
@@ -922,7 +917,7 @@ impl Core {
 
         debug!("Send req for Consensus message {}", consensus_message);
 
-        let consensus_req = ConsensusRequest::new(self.name, consensus_message, &mut self.signature_service).await;
+        let consensus_req = ConsensusRequest::new(self.name, consensus_message).await;
 
         //send to all others
         let addresses = self
@@ -1454,10 +1449,7 @@ impl Core {
 
                 // Indicate that we vote for this instance's prepare message
                 //let sig = Signature::default();
-                let sig = self
-                    .signature_service
-                    .request_signature(prepare_message.digest())
-                    .await;
+                let sig = Signature::default();
                 consensus_sigs.push((*slot, prepare_message.digest(), sig));
                 debug!("Prepare-Vote for slot: {}, view: {},has digest: {}", slot, view, prepare_message.digest());
             }
@@ -1484,10 +1476,7 @@ impl Core {
 
                 // Indicate that we vote for this instance's confirm message
                 //let sig = Signature::default();
-                let sig = self
-                    .signature_service
-                    .request_signature(confirm_message.digest())
-                    .await;
+                let sig = Signature::default();
                 consensus_sigs.push((*slot, confirm_message.digest(), sig));
                 debug!("Confirm-Vote for slot: {}, view: {}, qc_dig {:?} -> has digest: {}", slot, view, qc.id , confirm_message.digest());
             }
@@ -1746,7 +1735,6 @@ impl Core {
             self.high_qcs.get(&slot).cloned(),
             self.high_proposals.get(&slot).cloned(),
             self.name,
-            self.signature_service.clone(),
         )
         .await;
         debug!("Created Timeout: {:?}", timeout);

@@ -103,36 +103,12 @@ impl Proposer {
     async fn make_header(&mut self) {
         // Make a new header.
         debug!("digests size before is {:?}", self.digests.len());
-        /*let mut header: Header;
-        if self.digests.len() > 0 {
-            header = Header::new(
-                self.name,
-                self.height,
-                self.digests.drain(..1).collect(),
-                self.last_parent.clone().unwrap(),
-                &mut self.signature_service,
-                self.consensus_instances.clone(),
-                self.num_active_instances,
-            ).await;
-        } else {
-            header = Header::new(
-                self.name,
-                self.height,
-                BTreeMap::new(),
-                self.last_parent.clone().unwrap(),
-                &mut self.signature_service,
-                self.consensus_instances.clone(),
-                self.num_active_instances,
-            ).await;
-
-        }*/
 
         let mut header = Header::new(
                 self.name,
                 self.height,
                 self.digests.drain(..).collect(),
                 self.last_parent.clone().unwrap(),
-                &mut self.signature_service,
                 self.consensus_instances.clone(),
                 self.num_active_instances,
             ).await;
