@@ -189,6 +189,20 @@ impl HeaderInfo {
         };
         header_info
     }
+
+    /// Fast variant using blake3 for payload digest (internally parallelized for large inputs).
+    #[allow(dead_code)]
+    pub fn create_from_fast(header: &Header) -> Self {
+        Self {
+            author: header.author,
+            round: header.round,
+            payload: payload_digest_fast(header),
+            parent: header.parent.clone(),
+            id: header.id,
+            payload_len: 0,
+        }
+    }
+
     pub fn verify(&self, committee: &Committee) -> DagResult<()> {
         // Ensure the authority has voting rights.
         let voting_rights = committee.stake(&self.author);
@@ -203,6 +217,16 @@ fn payload_digest(header: &Header) -> Digest {
         hasher.update(x);
     }
     Digest(hasher.finalize().as_slice()[..32].try_into().unwrap())
+}
+
+/// Fast payload digest using blake3 (internally parallelized for large inputs).
+fn payload_digest_fast(header: &Header) -> Digest {
+    let mut hasher = blake3::Hasher::new();
+    for x in &header.payload {
+        hasher.update(x);
+    }
+    let hash = hasher.finalize();
+    Digest(*hash.as_bytes())
 }
 impl fmt::Debug for HeaderInfo {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {

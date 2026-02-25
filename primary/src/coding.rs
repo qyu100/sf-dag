@@ -460,4 +460,5 @@ fn bench_rs_decode_real() {
         println!("shard_size: {} bytes", shard_size);
         println!("======================================");
     }
+
 }

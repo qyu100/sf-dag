@@ -43,6 +43,19 @@ pub enum PrimaryMessage {
     Decide(Decide),
 }
 
+/// Borrowing variant of `PrimaryMessage` for zero-copy serialization.
+/// Variant order MUST match `PrimaryMessage` exactly so that bincode produces
+/// identical wire format (same u32 variant indices).
+#[derive(Serialize)]
+pub(crate) enum PrimaryMessageRef<'a> {
+    Timeout(&'a Timeout),
+    Echo(&'a Echo),
+    Ready(&'a Ready),
+    CertificatesRequest(&'a Vec<Digest>, &'a PublicKey),
+    HeaderInfoWithProof(&'a HeaderInfoWithProof),
+    Decide(&'a Decide),
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum HeaderType {
     HeaderInfoWithProof(HeaderInfoWithProof),

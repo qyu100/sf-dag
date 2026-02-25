@@ -33,6 +33,7 @@ hex_fmt = "0.3.0"
 
 [dev-dependencies]
 rand = "0.7.3"
+blsttc = { git = "https://github.com/naitik-supraoracles/blsttc-supra-for-moonshot.git", rev = "4ca8a9d97893e2dfd74eee427400ac119e3e9dd9" }
 
 [features]
 benchmark = []

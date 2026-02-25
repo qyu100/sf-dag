@@ -1,5 +1,5 @@
 // Copyright(C) Facebook, Inc. and its affiliates.
-use crate::primary::{HeaderMessage, HeaderType, PrimaryMessage};
+use crate::primary::{HeaderMessage, HeaderType};
 use bytes::Bytes;
 use config::Committee;
 use crypto::{Digest, PublicKey};
@@ -7,6 +7,11 @@ use log::{error, warn, debug};
 use network::SimpleSender;
 use store::Store;
 use tokio::sync::mpsc::Receiver;
+
+/// bincode variant index for `PrimaryMessage::HeaderInfoWithProof`.
+/// PrimaryMessage variants: Timeout=0, Echo=1, Ready=2, CertificatesRequest=3,
+/// HeaderInfoWithProof=4, Decide=5.
+const HIWP_VARIANT_INDEX: u32 = 4;
 
 /// A task dedicated to help other authorities by replying to their certificates requests.
 pub struct Helper {
@@ -55,13 +60,17 @@ impl Helper {
             for digest in digests {
                 match self.store.read(digest.to_vec()).await {
                     Ok(Some(data)) => {
-                        // TODO: Remove this deserialization-serialization in the critical path.
-                        let header_info_with_proof = bincode::deserialize(&data).unwrap();
-                        let bytes = bincode::serialize(&PrimaryMessage::HeaderInfoWithProof(header_info_with_proof))
-                            .expect("Failed to serialize our own certificate");
+                        // The store contains bincode-serialized HeaderInfoWithProof.
+                        // The network expects bincode-serialized PrimaryMessage::HeaderInfoWithProof(...).
+                        // bincode encodes enums as u32 variant index (little-endian) + variant data.
+                        // PrimaryMessage::HeaderInfoWithProof is variant index 4 (0-based).
+                        // By prepending the 4-byte variant tag we skip a full deserialize-serialize
+                        // roundtrip of the ~2.9MB payload.
+                        let mut bytes = Vec::with_capacity(4 + data.len());
+                        bytes.extend_from_slice(&HIWP_VARIANT_INDEX.to_le_bytes());
+                        bytes.extend_from_slice(&data);
 
                         self.network.send(address, Bytes::from(bytes)).await;
-                        
                     }
                     Ok(None) => (),
                     Err(e) => error!("{}", e),

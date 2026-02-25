@@ -219,4 +219,39 @@ impl Synchronizer {
             }
         }
     }
+
+    /// Optimized version of deliver_certificate: accepts the parent digest directly
+    /// from Core's in-memory `parent_info` map, eliminating the store read + deserialize
+    /// of the full ~2.9MB HeaderInfoWithProof on every certificate.
+    /// Falls back to the original store-based path if `parent` is None.
+    #[allow(dead_code)]
+    pub async fn deliver_certificate_optimized(
+        &mut self,
+        certificate: &Certificate,
+        parent: Option<Digest>,
+    ) -> DagResult<bool> {
+        let parent = match parent {
+            Some(p) => p,
+            None => {
+                // Fallback: read from store (original path).
+                return self.deliver_certificate(certificate).await;
+            }
+        };
+
+        // If parent is genesis we already have it.
+        if self.genesis.iter().any(|(d, _)| d == &parent) {
+            return Ok(true);
+        }
+
+        // Check local storage for the single parent.
+        if self.store.read(parent.to_vec()).await?.is_none() {
+            self.tx_certificate_waiter
+                .send(certificate.clone())
+                .await
+                .expect("Failed to send sync certificate request");
+            return Ok(false);
+        }
+
+        Ok(true)
+    }
 }
