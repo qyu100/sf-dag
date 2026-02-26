@@ -896,7 +896,7 @@ impl Core {
                     println!("    [optimized final echo] validate={:?} agg={:?} reconstruct={:?} hash={:?} tree={:?} finalize={:?} total={:?}",
                         d_validate, d_agg, d_reconstruct, d_hash, d_tree, d_finalize, t_total.elapsed());
                 } else {
-                    debug!("echo_optimized: validate={:?} agg={:?} total={:?}", d_validate, d_agg, t_total.elapsed());
+                    // debug!("echo_optimized: validate={:?} agg={:?} total={:?}", d_validate, d_agg, t_total.elapsed());
                 }
             }
         }
