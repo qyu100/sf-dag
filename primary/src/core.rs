@@ -523,7 +523,7 @@ impl Core {
             }
         }
         let d_send = t_send.elapsed();
-        println!("    [own_header_optimized] setup={:?} serialize={:?} pad={:?} encode={:?} merkle={:?} proofs={:?} send={:?} total={:?}",
+        debug!("    [own_header_optimized] setup={:?} serialize={:?} pad={:?} encode={:?} merkle={:?} proofs={:?} send={:?} total={:?}",
             d_setup, d_ser, d_pad, d_encode, d_mtree, d_proofs, d_send, start_total.elapsed());
         Ok(())
     }
@@ -604,7 +604,7 @@ impl Core {
     /// - Serializes Echo by reference before moving into process_echo (avoids clone of ~2.9MB Proof)
     /// - Passes header_info_with_proof directly to get_parent (removes unnecessary .clone())
     /// - Uses or_insert_with for lazy clone in processing_header_proofs cache
-    #[allow(dead_code)]
+    
     async fn process_header_proof_optimized(&mut self, header_info_with_proof: &HeaderInfoWithProof) -> DagResult<()> {
         let start = Instant::now();
         debug!(
@@ -1154,7 +1154,7 @@ impl Core {
                         // },
                         PrimaryMessage::Echo(echo) => {
                             match self.sanitize_echo(&echo) {
-                                Ok(()) => self.process_echo(echo).await,
+                                Ok(()) => self.process_echo_optimized(echo).await,
                                 error => error
                             }
                         },
@@ -1163,7 +1163,7 @@ impl Core {
                         },
                         PrimaryMessage::HeaderInfoWithProof(header_info_with_proof) => {
                             match self.sanitize_header_proof(&header_info_with_proof) {
-                                Ok(()) => self.process_header_proof(&header_info_with_proof).await,
+                                Ok(()) => self.process_header_proof_optimized(&header_info_with_proof).await,
                                 error => error
                             }
                         },
@@ -1173,15 +1173,15 @@ impl Core {
 
                 // We receive here loopback headers from the `HeaderWaiter`. Those are headers for which we interrupted
                 // execution (we were missing some of their dependencies) and we are now ready to resume processing.
-                Some(header_info_with_proof) = self.rx_header_waiter.recv() => self.process_header_proof(&header_info_with_proof).await,
+                Some(header_info_with_proof) = self.rx_header_waiter.recv() => self.process_header_proof_optimized(&header_info_with_proof).await,
 
                 // We receive here loopback certificates from the `CertificateWaiter`. Those are certificates for which
                 // we interrupted execution (we were missing some of their ancestors) and we are now ready to resume
                 // processing.
-                Some(certificate) = self.rx_certificate_waiter.recv() => self.process_certificate(certificate).await,
+                Some(certificate) = self.rx_certificate_waiter.recv() => self.process_certificate_optimized(certificate).await,
 
                 // We also receive here our new headers created by the `Proposer`.
-                Some(header) = self.rx_proposer.recv() => self.process_own_header(header).await,
+                Some(header) = self.rx_proposer.recv() => self.process_own_header_optimized(header).await,
 
                 // We also receive here our timeout created by the `Proposer`.
                 // Some(timeout) = self.rx_timeout.recv() => self.process_own_timeout(timeout).await,
