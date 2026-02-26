@@ -1181,7 +1181,7 @@ impl Core {
                 Some(certificate) = self.rx_certificate_waiter.recv() => self.process_certificate_optimized(certificate).await,
 
                 // We also receive here our new headers created by the `Proposer`.
-                Some(header) = self.rx_proposer.recv() => self.process_own_header_optimized(header).await,
+                Some(header) = self.rx_proposer.recv() => self.process_own_header(header).await,
 
                 // We also receive here our timeout created by the `Proposer`.
                 // Some(timeout) = self.rx_timeout.recv() => self.process_own_timeout(timeout).await,
