@@ -35,6 +35,20 @@ use std::time::{Duration, Instant};
 // #[path = "tests/core_tests.rs"]
 // pub mod core_tests;
 
+/// Result from background own-header computation.
+struct OwnHeaderComputeResult {
+    header_info: HeaderInfo,
+    messages: Vec<(Option<HeaderInfoWithProof>, Option<Bytes>)>,
+    round: Round,
+}
+
+/// Result from background echo reconstruction.
+struct ReconstructionResult {
+    id: Digest,
+    root: Digest,
+    success: bool,
+}
+
 pub struct Core {
     /// The public key of this primary.
     name: PublicKey,
@@ -110,6 +124,12 @@ pub struct Core {
     parent_info: HashMap<Digest, (Round,Digest)>,
     rs_block_size: usize,
     rs_block_threads: usize,
+    /// Channel for receiving background own-header compute results.
+    tx_own_header_result: Sender<OwnHeaderComputeResult>,
+    rx_own_header_result: Receiver<OwnHeaderComputeResult>,
+    /// Channel for receiving background echo reconstruction results.
+    tx_reconstruction_result: Sender<ReconstructionResult>,
+    rx_reconstruction_result: Receiver<ReconstructionResult>,
 }
 
 impl Core {
@@ -139,6 +159,8 @@ impl Core {
             // Precompute shard counts so we don't move `committee` before using it.
             let data_shard_num = committee.data_shard_num() as usize;
             let parity_shard_num = committee.parity_shard_num() as usize;
+            let (tx_own_header_result, rx_own_header_result) = tokio::sync::mpsc::channel(8);
+            let (tx_reconstruction_result, rx_reconstruction_result) = tokio::sync::mpsc::channel(8);
             Self {
                 name,
                 committee: committee.clone(),
@@ -182,6 +204,10 @@ impl Core {
                 parent_info: HashMap::new(),
                 rs_block_size: rs_block_size,
                 rs_block_threads: rs_block_threads,
+                tx_own_header_result,
+                rx_own_header_result,
+                tx_reconstruction_result,
+                rx_reconstruction_result,
             }
             .run()
             .await;
@@ -216,6 +242,8 @@ impl Core {
     ) -> Self {
         let data_shard_num = committee.data_shard_num() as usize;
         let parity_shard_num = committee.parity_shard_num() as usize;
+        let (tx_own_header_result, rx_own_header_result) = tokio::sync::mpsc::channel(8);
+        let (tx_reconstruction_result, rx_reconstruction_result) = tokio::sync::mpsc::channel(8);
         Self {
             name,
             committee: committee.clone(),
@@ -259,6 +287,10 @@ impl Core {
             parent_info: HashMap::new(),
             rs_block_size,
             rs_block_threads,
+            tx_own_header_result,
+            rx_own_header_result,
+            tx_reconstruction_result,
+            rx_reconstruction_result,
         }
     }
 
@@ -525,6 +557,151 @@ impl Core {
         let d_send = t_send.elapsed();
         debug!("    [own_header_optimized] setup={:?} serialize={:?} pad={:?} encode={:?} merkle={:?} proofs={:?} send={:?} total={:?}",
             d_setup, d_ser, d_pad, d_encode, d_mtree, d_proofs, d_send, start_total.elapsed());
+        Ok(())
+    }
+
+    /// Dispatch own header computation to a background blocking thread.
+    /// Returns immediately so the event loop can keep processing echoes.
+    fn dispatch_own_header(&self, header: Header) -> DagResult<()> {
+        let coding = Arc::clone(&self.coding);
+        let committee = Arc::clone(&self.committee);
+        let name = self.name;
+        let rs_block_size = self.rs_block_size;
+        let rs_block_threads = self.rs_block_threads;
+        let tx = self.tx_own_header_result.clone();
+
+        tokio::task::spawn_blocking(move || {
+            let start_total = Instant::now();
+
+            let t_setup = Instant::now();
+            let mut header_info = HeaderInfo::create_from_fast(&header);
+            let data_shard_num = coding.data_shard_count();
+            let parity_shard_num = coding.parity_shard_count();
+            let payload = header.payload;
+            let d_setup = t_setup.elapsed();
+
+            let t_ser = Instant::now();
+            let payload_bytes = match bincode::serialize(&payload) {
+                Ok(b) => b,
+                Err(e) => {
+                    warn!("Failed to serialize payload: {:?}", e);
+                    return;
+                }
+            };
+            let d_ser = t_ser.elapsed();
+            let mut payload_bytes = payload_bytes;
+
+            let payload_len = payload_bytes.len();
+            header_info.payload_len = payload_len;
+
+            let t_pad = Instant::now();
+            let mut shard_len = (payload_len + data_shard_num - 1) / data_shard_num;
+            if shard_len == 0 {
+                shard_len = 1;
+            }
+            if shard_len % 64 != 0 {
+                shard_len += 64 - (shard_len % 64);
+            }
+            payload_bytes.resize(shard_len * (data_shard_num + parity_shard_num), 0);
+            let d_pad = t_pad.elapsed();
+
+            let mut shards_vec: Vec<&mut [u8]> = payload_bytes.chunks_mut(shard_len).collect();
+
+            let t_encode = Instant::now();
+            coding.encode(&mut shards_vec, rs_block_size, rs_block_threads).expect("wrong shard size");
+            let d_encode = t_encode.elapsed();
+
+            let t_mtree = Instant::now();
+            let hashes: Vec<Digest> = shards_vec
+                .par_iter()
+                .map(|s| MerkleTree::digest(&**s))
+                .collect();
+            let mtree = MerkleTree::from_hashes(hashes);
+            let d_mtree = t_mtree.elapsed();
+
+            assert_eq!(committee.total_stake() as usize, mtree.leaf_count());
+
+            let t_proofs = Instant::now();
+            let sorted_keys = &committee.sorted_keys;
+            let self_index = sorted_keys.iter().position(|pk| pk == &name);
+
+            let shards_refs: Vec<&[u8]> = shards_vec.iter().map(|s| &**s).collect();
+
+            let messages: Vec<(Option<HeaderInfoWithProof>, Option<Bytes>)> = (0..sorted_keys.len())
+                .into_par_iter()
+                .map(|index| {
+                    let leaf = shards_refs[index];
+                    let proof = mtree
+                        .proof_with_leaf(index, leaf)
+                        .expect("proof construction failed");
+                    let hiwp = HeaderInfoWithProof {
+                        author: header_info.author,
+                        round: header_info.round,
+                        parent: header_info.parent,
+                        id: header_info.id,
+                        proof,
+                        payload_len: header_info.payload_len,
+                    };
+                    if Some(index) == self_index {
+                        (Some(hiwp), None)
+                    } else {
+                        let bytes = bincode::serialize(
+                            &PrimaryMessage::HeaderInfoWithProof(hiwp),
+                        )
+                        .expect("Failed to serialize proof");
+                        (None, Some(Bytes::from(bytes)))
+                    }
+                })
+                .collect();
+            let d_proofs = t_proofs.elapsed();
+
+            let round = header_info.round;
+            println!("    [dispatch_own_header bg] setup={:?} serialize={:?} pad={:?} encode={:?} merkle={:?} proofs={:?} total={:?}",
+                d_setup, d_ser, d_pad, d_encode, d_mtree, d_proofs, start_total.elapsed());
+
+            let _ = tx.blocking_send(OwnHeaderComputeResult {
+                header_info,
+                messages,
+                round,
+            });
+        });
+        Ok(())
+    }
+
+    /// Handle the result of a background own-header computation.
+    /// Performs network sends and state updates inline.
+    async fn handle_own_header_result(&mut self, result: OwnHeaderComputeResult) -> DagResult<()> {
+        let start = Instant::now();
+
+        // Store header_info in processing map
+        self.processing_header_infos
+            .entry(result.header_info.id)
+            .or_insert(result.header_info.clone());
+
+        let sorted_keys = self.committee.sorted_keys.clone();
+        for (index, pk) in sorted_keys.iter().enumerate() {
+            match &result.messages[index] {
+                (Some(hiwp), _) => {
+                    self.process_header_proof_optimized(hiwp)
+                        .await
+                        .expect("Failed to process our own proof");
+                }
+                (_, Some(bytes)) => {
+                    let address = self
+                        .committee
+                        .primary(pk)
+                        .expect("unknown primary")
+                        .primary_to_primary;
+                    let handler = self.network.send(address, bytes.clone()).await;
+                    self.cancel_handlers
+                        .entry(result.round)
+                        .or_insert_with(Vec::new)
+                        .push(handler);
+                }
+                _ => unreachable!(),
+            }
+        }
+        println!("    [handle_own_header_result] send={:?}", start.elapsed());
         Ok(())
     }
 
@@ -849,52 +1026,47 @@ impl Core {
                 let d_agg = t_agg.elapsed();
 
                 if let Some((root, mut leaf_values)) = agg_result {
-                    let t_reconstruct = Instant::now();
+                    // Dispatch reconstruction to background so the event loop stays responsive.
                     let coding = Arc::clone(&self.coding);
                     let rs_block_size = self.rs_block_size;
                     let rs_block_threads = self.rs_block_threads;
-                    let leaf_values = tokio::task::spawn_blocking(move || {
-                        coding.reconstruct_shards(&mut leaf_values[..], rs_block_size, rs_block_threads)?;
-                        Ok::<_, DagError>(leaf_values)
-                    })
-                    .await
-                    .map_err(|_| DagError::ProofConstructionFailed)??;
-                    let d_reconstruct = t_reconstruct.elapsed();
+                    let tx = self.tx_reconstruction_result.clone();
+                    let recon_id = id;
 
-                    let t_hash = Instant::now();
-                    let hashes: Vec<Digest> = leaf_values
-                        .par_iter()
-                        .map(|opt| {
-                            let shard = opt.as_ref().expect("reconstruct_shards produced all shards");
-                            MerkleTree::digest(&**shard)
-                        })
-                        .collect();
-                    let d_hash = t_hash.elapsed();
+                    tokio::task::spawn_blocking(move || {
+                        let t_total = Instant::now();
 
-                    let t_tree = Instant::now();
-                    let mtree = MerkleTree::from_hashes(hashes);
-                    let d_tree = t_tree.elapsed();
-
-                    if *mtree.root_hash() != root {
-                        return Err(DagError::ProofConstructionFailed);
-                    }
-
-                    let rid = echo.id;
-                    let (header_id, round, origin) = match self.processing_header_proofs.get(&rid) {
-                        Some(h) => (h.id, h.round, h.author),
-                        None => {
-                            debug!("Missing HeaderInfoWithProof for echo id {:?}, storing pending reconstruction", rid);
-                            self.pending_reconstructions.insert(rid, root);
-                            return Ok(());
+                        let t_reconstruct = Instant::now();
+                        if let Err(e) = coding.reconstruct_shards(&mut leaf_values[..], rs_block_size, rs_block_threads) {
+                            warn!("Reconstruction failed: {:?}", e);
+                            let _ = tx.blocking_send(ReconstructionResult { id: recon_id, root, success: false });
+                            return;
                         }
-                    };
+                        let d_reconstruct = t_reconstruct.elapsed();
 
-                    let t_finalize = Instant::now();
-                    self.finalize_reconstruction_optimized(header_id, round, origin).await?;
-                    let d_finalize = t_finalize.elapsed();
+                        let t_hash = Instant::now();
+                        let hashes: Vec<Digest> = leaf_values
+                            .par_iter()
+                            .map(|opt| {
+                                let shard = opt.as_ref().expect("reconstruct_shards produced all shards");
+                                MerkleTree::digest(&**shard)
+                            })
+                            .collect();
+                        let d_hash = t_hash.elapsed();
 
-                    println!("    [optimized final echo] validate={:?} agg={:?} reconstruct={:?} hash={:?} tree={:?} finalize={:?} total={:?}",
-                        d_validate, d_agg, d_reconstruct, d_hash, d_tree, d_finalize, t_total.elapsed());
+                        let t_tree = Instant::now();
+                        let mtree = MerkleTree::from_hashes(hashes);
+                        let d_tree = t_tree.elapsed();
+
+                        let success = *mtree.root_hash() == root;
+
+                        println!("    [reconstruction bg] reconstruct={:?} hash={:?} tree={:?} success={} total={:?}",
+                            d_reconstruct, d_hash, d_tree, success, t_total.elapsed());
+
+                        let _ = tx.blocking_send(ReconstructionResult { id: recon_id, root, success });
+                    });
+
+                    debug!("echo_optimized: dispatched reconstruction for {:?}", id);
                 } else {
                     // debug!("echo_optimized: validate={:?} agg={:?} total={:?}", d_validate, d_agg, t_total.elapsed());
                 }
@@ -922,6 +1094,28 @@ impl Core {
 
         self.process_certificate_optimized(certificate).await?;
         debug!("finalize_reconstruction_optimized total time: {:?}", start.elapsed());
+        Ok(())
+    }
+
+    /// Handle the result of a background echo reconstruction.
+    async fn handle_reconstruction_result(&mut self, result: ReconstructionResult) -> DagResult<()> {
+        if !result.success {
+            warn!("Reconstruction verification failed for {:?}", result.id);
+            return Err(DagError::ProofConstructionFailed);
+        }
+
+        let (header_id, round, origin) = match self.processing_header_proofs.get(&result.id) {
+            Some(h) => (h.id, h.round, h.author),
+            None => {
+                debug!("Missing HeaderInfoWithProof for reconstruction result {:?}, storing pending", result.id);
+                self.pending_reconstructions.insert(result.id, result.root);
+                return Ok(());
+            }
+        };
+
+        let t_finalize = Instant::now();
+        self.finalize_reconstruction_optimized(header_id, round, origin).await?;
+        println!("    [handle_reconstruction_result] finalize={:?}", t_finalize.elapsed());
         Ok(())
     }
 
@@ -1181,7 +1375,14 @@ impl Core {
                 Some(certificate) = self.rx_certificate_waiter.recv() => self.process_certificate_optimized(certificate).await,
 
                 // We also receive here our new headers created by the `Proposer`.
-                Some(header) = self.rx_proposer.recv() => self.process_own_header_optimized(header).await,
+                // Dispatched to background thread — does not block the event loop.
+                Some(header) = self.rx_proposer.recv() => self.dispatch_own_header(header),
+
+                // Background own-header computation completed — do network sends inline.
+                Some(result) = self.rx_own_header_result.recv() => self.handle_own_header_result(result).await,
+
+                // Background echo reconstruction completed — finalize inline.
+                Some(result) = self.rx_reconstruction_result.recv() => self.handle_reconstruction_result(result).await,
 
                 // We also receive here our timeout created by the `Proposer`.
                 // Some(timeout) = self.rx_timeout.recv() => self.process_own_timeout(timeout).await,
