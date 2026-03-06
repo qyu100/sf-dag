@@ -143,6 +143,12 @@ impl Connection {
         loop {
             match TcpStream::connect(self.address).await {
                 Ok(stream) => {
+                    // Configure TCP for large-message throughput.
+                    let _ = stream.set_nodelay(true);
+                    let sock_ref = socket2::SockRef::from(&stream);
+                    let _ = sock_ref.set_send_buffer_size(4 * 1024 * 1024);
+                    let _ = sock_ref.set_recv_buffer_size(4 * 1024 * 1024);
+
                     info!("Outgoing connection established with {}", self.address);
 
                     // Reset the delay.
@@ -187,7 +193,13 @@ impl Connection {
         // which we are still waiting to receive an ACK.
         let mut pending_replies = VecDeque::new();
 
-        let (mut writer, mut reader) = Framed::new(stream, LengthDelimitedCodec::new()).split();
+        let (mut writer, mut reader) = Framed::new(
+            stream,
+            LengthDelimitedCodec::builder()
+                .max_frame_length(64 * 1024 * 1024)
+                .new_codec(),
+        )
+        .split();
         let error = 'connection: loop {
             // Try to send all messages of the buffer.
             while let Some((data, handler)) = self.buffer.pop_front() {

@@ -55,6 +55,12 @@ impl<Handler: MessageHandler> Receiver<Handler> {
                     continue;
                 }
             };
+            // Configure TCP for large-message throughput.
+            let _ = socket.set_nodelay(true);
+            let sock_ref = socket2::SockRef::from(&socket);
+            let _ = sock_ref.set_send_buffer_size(4 * 1024 * 1024);
+            let _ = sock_ref.set_recv_buffer_size(4 * 1024 * 1024);
+
             info!("Incoming connection established with {}", peer);
             Self::spawn_runner(socket, peer, self.handler.clone()).await;
         }
@@ -65,7 +71,12 @@ impl<Handler: MessageHandler> Receiver<Handler> {
     async fn spawn_runner(socket: TcpStream, peer: SocketAddr, handler: Handler) {
         tokio::spawn(async move {
             let start_time = Instant::now();
-            let transport = Framed::new(socket, LengthDelimitedCodec::new());
+            let transport = Framed::new(
+                socket,
+                LengthDelimitedCodec::builder()
+                    .max_frame_length(64 * 1024 * 1024)
+                    .new_codec(),
+            );
             let (mut writer, mut reader) = transport.split();
 
             while let Some(frame) = reader.next().await {
