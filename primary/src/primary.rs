@@ -10,7 +10,7 @@ use crate::garbage_collector::GarbageCollector;
 use crate::header_waiter::HeaderWaiter;
 use crate::helper::Helper;
 use crate::leader::LeaderElector;
-use crate::messages::{Certificate, Header, Vote, Timeout, TC, Proposal, ConsensusMessage, ConsensusVote, ConsensusRequest};
+use crate::messages::{Certificate, Header, Vote, Timeout, TC, Proposal, ConsensusMessage, ConsensusVote, ConsensusRequest, CutProposal, CutVote, CutCertificate, Decide};
 use crate::payload_receiver::PayloadReceiver;
 use crate::proposer::Proposer;
 use crate::synchronizer::Synchronizer;
@@ -44,6 +44,10 @@ pub enum PrimaryMessage {
     Header(Header, bool),
     Vote(Vote),
     Certificate(Certificate),
+    CutProposal(CutProposal),
+    CutVote(CutVote),
+    CutCertificate(CutCertificate),
+    Decide(Decide),
     Timeout(Timeout),
     TC(TC),
     ConsensusMessage(ConsensusMessage),
@@ -82,7 +86,7 @@ impl Primary {
         signature_service: SignatureService,
         store: Store,
         _tx_consensus: Sender<Certificate>,
-        _tx_committer: Sender<Certificate>,
+        tx_committer: Sender<Certificate>,
         rx_committer: Receiver<Certificate>,
         rx_consensus: Receiver<Certificate>,
         _tx_sailfish: Sender<Header>,
@@ -97,7 +101,7 @@ impl Primary {
         let (tx_sync_headers, rx_sync_headers) = channel(CHANNEL_CAPACITY);
         let (tx_sync_certificates, rx_sync_certificates) = channel(CHANNEL_CAPACITY);
         let (tx_headers_loopback, rx_headers_loopback) = channel(CHANNEL_CAPACITY);
-        let (tx_certificates_loopback, _rx_certificates_loopback) = channel(CHANNEL_CAPACITY);
+        let (tx_certificates_loopback, rx_certificates_loopback) = channel(CHANNEL_CAPACITY);
         let (tx_primary_messages, rx_primary_messages) = channel(CHANNEL_CAPACITY);
         let (tx_cert_requests, rx_cert_requests) = channel(CHANNEL_CAPACITY);
         let (tx_header_requests, rx_header_requests) = channel(CHANNEL_CAPACITY);
@@ -190,7 +194,8 @@ impl Primary {
             /* rx_header_waiter */ rx_headers_loopback,
             rx_header_waiter_instances,
             /* rx_proposer */ rx_headers,
-            tx_commit,
+            /* tx_committer */ tx_commit,
+            /* tx_committer_cert */ tx_committer,
             /* tx_proposer */ tx_parents,
             rx_request_header_sync,
             /*tx info */ tx_instance,
@@ -206,6 +211,7 @@ impl Primary {
             parameters.simulate_asynchrony,
             parameters.asynchrony_start,
             parameters.asynchrony_duration,
+            rx_certificates_loopback,
         );
 
         Committer::spawn(committee.clone(), store.clone(), parameters.gc_depth, rx_mempool, rx_committer, rx_commit, tx_output, synchronizer);
@@ -257,7 +263,6 @@ impl Primary {
             parameters.max_header_delay,
             /* rx_core */ rx_parents,
             /* rx_workers */ rx_our_digests,
-            /* rx_ticket */ rx_instance,
             /* tx_core */ tx_headers,
         );
 

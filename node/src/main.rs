@@ -170,7 +170,7 @@ async fn run(matches: &ArgMatches<'_>) -> Result<()> {
     // Analyze the consensus' output.
     analyze(rx_output).await;
 
-    // If this expression is reached, the program ends and all other tasks terminate.
+    // If this expression is reached, background tasks finished and channels closed.
     unreachable!();
 }
 

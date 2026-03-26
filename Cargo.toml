@@ -1,5 +1,5 @@
 [workspace]
-members = ["primary", "node", "store", "crypto", "worker", "consensus", "network", "config", "hotstuff"]
+members = ["primary", "node", "store", "crypto", "worker", "network", "config"]
 
 [patch.crates-io]
 bindgen = { git = "https://github.com/rust-lang/rust-bindgen", tag = "v0.66.1" }

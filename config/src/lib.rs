@@ -98,6 +98,7 @@ pub struct Parameters {
     pub simulate_asynchrony: bool,
     pub asynchrony_start: u64,
     pub asynchrony_duration: u64,
+    pub f_num: u32, 
 }
 
 impl Default for Parameters {
@@ -125,6 +126,7 @@ impl Default for Parameters {
             simulate_asynchrony: false,
             asynchrony_start: 20_000, //20 second in
             asynchrony_duration: 10_000, //10 seconds
+            f_num:3
         }
     }
 }
@@ -190,12 +192,13 @@ pub struct Authority {
 pub struct Committee {
     pub authorities: BTreeMap<PublicKey, Authority>,
     //pub id_map: HashMap<PublicKey, u64>, //position 
+    pub f_num: u32,
 }
 
 impl Import for Committee {}
 
 impl Committee {
-    pub fn new(info: Vec<(PublicKey, Stake, SocketAddr)>) -> Self {
+    pub fn new(info: Vec<(PublicKey, Stake, SocketAddr)>, f_num: u32) -> Self {
         Self {
             authorities: info
                 .into_iter()
@@ -204,6 +207,7 @@ impl Committee {
                     (name, authority)
                 })
                 .collect(),
+            f_num,
         }
     }
 
@@ -245,6 +249,22 @@ impl Committee {
     pub fn fast_threshold(&self) -> Stake {
         let total_votes: Stake = self.authorities.values().map(|x| x.stake).sum();
         total_votes
+    }
+    
+    pub fn block_threshold(&self) -> Stake {
+        let total_votes: Stake = self.authorities.values().map(|x| x.stake).sum();
+        total_votes / 3 + 1
+    }
+
+    pub fn total_stake(&self) -> Stake {
+        let total_votes: Stake = self.authorities.values().map(|x| x.stake).sum();
+        total_votes
+    }
+
+    pub fn optimistic_threshold(&self) -> Stake {
+        let x = (self.total_stake() + 2 * self.f_num - 2) as f64 / 2.0;
+        let ceil_result = x.ceil() as u32;
+        ceil_result
     }
 
     /// Returns the consensus addresses of the target consensus node.

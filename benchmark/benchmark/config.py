@@ -45,7 +45,7 @@ class Committee:
         }
     '''
 
-    def __init__(self, addresses, base_port):
+    def __init__(self, addresses, base_port, f_num=0):
         ''' The `addresses` field looks as follows:
             { 
                 "name": ["host", "host", ...],
@@ -62,9 +62,10 @@ class Committee:
         )
         assert len({len(x) for x in addresses.values()}) == 1
         assert isinstance(base_port, int) and base_port > 1024
+        assert isinstance(f_num, int) and f_num >= 0
 
         port = base_port
-        self.json = {'authorities': OrderedDict()}
+        self.json = {'authorities': OrderedDict(), 'f_num': f_num}
 
         for name, hosts in addresses.items():
             host = hosts.pop(0)
@@ -165,13 +166,13 @@ class Committee:
 
 
 class LocalCommittee(Committee):
-    def __init__(self, names, port, workers):
+    def __init__(self, names, port, workers, f_num=0):
         assert isinstance(names, list)
         assert all(isinstance(x, str) for x in names)
         assert isinstance(port, int)
         assert isinstance(workers, int) and workers > 0
         addresses = OrderedDict((x, ['127.0.0.1']*(1+workers)) for x in names)
-        super().__init__(addresses, port)
+        super().__init__(addresses, port, f_num=f_num)
 
 
 class NodeParameters:
@@ -186,6 +187,7 @@ class NodeParameters:
             inputs += [json['sync_retry_nodes']]
             inputs += [json['batch_size']]
             inputs += [json['max_batch_delay']]
+            inputs += [json['f_num']]
         except KeyError as e:
             raise ConfigError(f'Malformed parameters: missing key {e}')
 

@@ -274,7 +274,7 @@ impl HeaderWaiter {
                                     .primary(&author)
                                     .expect("Author of valid header not in the committee")
                                     .primary_to_primary;
-                                let message = PrimaryMessage::HeadersRequest(requires_sync, self.name);
+                                let message = PrimaryMessage::CertificatesRequest(requires_sync, self.name);
                                 let bytes = bincode::serialize(&message).expect("Failed to serialize cert request");
                                 self.network.send(address, Bytes::from(bytes)).await;
                             }
@@ -340,7 +340,7 @@ impl HeaderWaiter {
                         for x in header.payload.keys() {
                             let _ = self.batch_requests.remove(x);
                         }
-                        let _ = self.parent_requests.remove(&header.parent_cert.header_digest);
+                        let _ = self.parent_requests.remove(&header.parent);
 
                         self.tx_core.send(header).await.expect("Failed to send header");
                     },
@@ -366,7 +366,7 @@ impl HeaderWaiter {
                         match &deliver.0 {
                             ConsensusMessage::Prepare {view: _, slot: _, tc: _, qc_ticket: _, proposals} => {possibly_missing = proposals},
                             ConsensusMessage::Confirm {view: _, slot: _, qc: _, proposals} => {possibly_missing = proposals},
-                            ConsensusMessage::Commit {view: _, slot: _, qc: _, proposals} => {possibly_missing = proposals},
+                            ConsensusMessage::Commit {round: _, proposals} => {possibly_missing = proposals},
                         }
                         for (_, prop) in possibly_missing.iter() {
                             let _ = self.parent_requests.remove(&prop.header_digest);
@@ -383,7 +383,7 @@ impl HeaderWaiter {
                     }
                 },
 
-                () = &mut timer => {
+            () = &mut timer => {
                     // We optimistically sent sync requests to a single node. If this timer triggers,
                     // it means we were wrong to trust it. We are done waiting for a reply and we now
                     // broadcast the request to all nodes.
@@ -392,29 +392,20 @@ impl HeaderWaiter {
                         .expect("Failed to measure time")
                         .as_millis();
 
-                    //Retry HeaderRequests  -- We don't use this
-                    // let mut retry = Vec::new();
-                    // for (digest, (_, timestamp)) in &self.header_requests {
-                    //     if timestamp + (self.sync_retry_delay as u128) < now {
-                    //         debug!("Requesting sync for header {} (retry)", digest);
-                    //         retry.push(digest.clone());
-                    //     }
-                    // }
-                    // let addresses = self.committee.others_primaries(&self.name).iter().map(|(_, x)| x.primary_to_primary).collect();
-                    // let message = PrimaryMessage::HeadersRequest(retry, self.name);
-                    // let bytes = bincode::serialize(&message).expect("Failed to serialize header request");
-                    // self.network.lucky_broadcast(addresses, Bytes::from(bytes), self.sync_retry_nodes).await;
-
-                    //Retry CertificateRequests
                     let mut retry = Vec::new();
                     for (digest, (_, timestamp)) in &self.parent_requests {
                         if timestamp + (self.sync_retry_delay as u128) < now {
-                            debug!("Requesting retry sync for parent header {} (retry)", digest);
+                            debug!("Requesting sync for certificate {} (retry)", digest);
                             retry.push(digest.clone());
                         }
                     }
-                    let addresses = self.committee.others_primaries(&self.name).iter().map(|(_, x)| x.primary_to_primary).collect();
-                    let message = PrimaryMessage::HeadersRequest(retry, self.name);
+
+                    let addresses = self.committee
+                        .others_primaries(&self.name)
+                        .iter()
+                        .map(|(_, x)| x.primary_to_primary)
+                        .collect();
+                    let message = PrimaryMessage::CertificatesRequest(retry, self.name);
                     let bytes = bincode::serialize(&message).expect("Failed to serialize cert request");
                     self.network.lucky_broadcast(addresses, Bytes::from(bytes), self.sync_retry_nodes).await;
 

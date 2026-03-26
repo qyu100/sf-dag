@@ -113,7 +113,7 @@ impl CertificateWaiter {
                     // when all its parents are in the store.
 
                     let mut wait_for = Vec::new();
-                    wait_for.push((certificate.header_digest.to_vec(), self.store.clone()));
+                    wait_for.push((certificate.header_id.to_vec(), self.store.clone()));
                     let fut = Self::waiter(wait_for, certificate);
                     waiting.push(fut);
                 }

@@ -2,80 +2,135 @@
 #![allow(unused_variables)]
 // Copyright(C) Facebook, Inc. and its affiliates.
 use crate::error::{DagError, DagResult, ConsensusError};
-use crate::messages::{Certificate, Header, Vote, QC, Timeout, TC};
+use crate::messages::{Certificate, Header, Vote, QC, Timeout, TC, CutVote, CutCertificate, Decide};
 use config::{Committee, Stake};
 use crypto::{PublicKey, Signature, Digest};
 use std::collections::HashSet;
 
-/// Aggregates votes for a particular header into a certificate.
-pub struct VotesAggregator {
-    dissemination_weight: Stake,
-    pub votes: Vec<(PublicKey, Signature)>,
-    used: HashSet<PublicKey>,
-    diss_cert: Option<Certificate>,
 
-    pub complete: bool,  //Indicate that QC is ready. Stops adding new signatures
-    get_once: bool,  //Indicate that QC was already used. E.g. do not re-submit QC if Timer triggers after we succeeded already
+pub struct VoteAggregator {
+    weight: Stake,
+    used: HashSet<PublicKey>,
 }
 
-impl VotesAggregator {
+impl VoteAggregator {
     pub fn new() -> Self {
         Self {
-            dissemination_weight: 0,
-            votes: Vec::new(),
+            weight: 0,
             used: HashSet::new(),
-            diss_cert: None,
-            complete: false,
-            get_once: true, 
         }
     }
 
     pub fn append(
         &mut self,
-        vote: Vote,
+        vote: &Vote,
         committee: &Committee,
-        header: &Header,
-    ) -> DagResult<(bool, bool)> {
-        if self.complete {
-            return Ok((true, false));
-        }
+        use_block_threshold: bool,
+    ) -> DagResult<Option<Certificate>> {
         let author = vote.author;
         // Ensure it is the first time this authority votes.
-        //println!("author is {:?}", author);
         ensure!(self.used.insert(author), DagError::AuthorityReuse(author));
-       
-        self.votes.push((author, vote.signature));
-        self.dissemination_weight += committee.stake(&author);
+        self.weight += committee.stake(&author);
 
-        if self.dissemination_weight >= committee.validity_threshold() {
-            //self.dissemination_weight = 0;
-            if self.diss_cert.is_none() {
-                let dissemination_cert: Certificate = Certificate {
-                    author: vote.origin,
-                    header_digest: vote.id,
-                    height: vote.height,
-                    votes: self.votes.clone(),
-                };
+        let threshold = if use_block_threshold {
+            committee.block_threshold()
+        } else {
+            committee.optimistic_threshold()
+        };
 
-                self.diss_cert = Some(dissemination_cert);
-            }
-            self.complete = true;
-            //return Ok(self.diss_cert.clone());
-            return Ok((true, true));
+        if self.weight >= threshold {
+            self.weight = 0; // Ensures certificate is only reached once.
+            return Ok(Some(Certificate {
+                header_id: vote.id.clone(),
+                height: vote.height,
+                origin: vote.origin,
+            }));
         }
-        Ok((false, false))
-        //Ok(self.diss_cert.clone())
+
+        Ok(None)
+    }
+}
+
+pub struct CutVoteAggregator {
+    weight: Stake,
+    used: HashSet<PublicKey>,
+    voters: Vec<PublicKey>,
+}
+
+pub struct DecideAggregator {
+    weight: Stake,
+    used: HashSet<PublicKey>,
+    round: Option<u64>,
+    cut_id: Option<Digest>,
+}
+
+impl DecideAggregator {
+    pub fn new() -> Self {
+        Self {
+            weight: 0,
+            used: HashSet::new(),
+            round: None,
+            cut_id: None,
+        }
     }
 
-    pub fn get(&mut self,) -> DagResult<Option<Certificate>> {
-        if self.get_once {
-            self.get_once = false;
-            Ok(self.diss_cert.clone())
+    pub fn append(
+        &mut self,
+        decide: &Decide,
+        committee: &Committee,
+    ) -> DagResult<Option<Decide>> {
+        if let Some(round) = self.round {
+            ensure!(round == decide.round, DagError::InvalidHeaderId);
+        } else {
+            self.round = Some(decide.round);
         }
-        else{
-           Ok(None) 
+
+        if let Some(cut_id) = &self.cut_id {
+            ensure!(*cut_id == decide.id, DagError::InvalidHeaderId);
+        } else {
+            self.cut_id = Some(decide.id.clone());
         }
-        
+
+        let author = decide.author;
+        ensure!(self.used.insert(author), DagError::AuthorityReuse(author));
+        self.weight += committee.stake(&author);
+
+        if self.weight >= committee.quorum_threshold() {
+            self.weight = 0;
+            return Ok(Some(decide.clone()));
+        }
+
+        Ok(None)
+    }
+}
+
+impl CutVoteAggregator {
+    pub fn new() -> Self {
+        Self {
+            weight: 0,
+            used: HashSet::new(),
+            voters: Vec::new(),
+        }
+    }
+
+    pub fn append(
+        &mut self,
+        vote: &CutVote,
+        committee: &Committee,
+    ) -> DagResult<Option<CutCertificate>> {
+        let author = vote.author;
+        ensure!(self.used.insert(author), DagError::AuthorityReuse(author));
+        self.voters.push(author);
+        self.weight += committee.stake(&author);
+        if self.weight >= committee.optimistic_threshold() {
+            self.weight = 0;
+            return Ok(Some(CutCertificate {
+                round: vote.round,
+                cut_id: vote.cut_id.clone(),
+                votes: self.voters.clone(),
+            }));
+        }
+        Ok(None)
     }
 }
 
@@ -191,8 +246,8 @@ impl TCMaker {
             DagError::AuthorityReuse(author)
         );
 
-        let slot = timeout.slot;
-        let view = timeout.view;
+        let slot = timeout.round;
+        let view = timeout.round;
 
         // Add the timeout to the accumulator.
         self.votes

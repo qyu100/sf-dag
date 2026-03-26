@@ -10,7 +10,7 @@ use config::Committee;
 use crypto::Hash as _;
 use crypto::{Digest, PublicKey};
 use log::debug;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use store::Store;
 use tokio::sync::mpsc::{Receiver, Sender};
 
@@ -28,6 +28,9 @@ pub struct Synchronizer {
     tx_certificate_waiter: Sender<Certificate>,
     /// Genesis header
     genesis_headers: HashMap<PublicKey, Header>,
+    genesis: Vec<(Digest, Header)>,
+    delivered_parents: HashMap<Height, HashSet<Digest>>,
+    gc_depth: Height,
 }
 
 impl Synchronizer {
@@ -38,12 +41,19 @@ impl Synchronizer {
         tx_header_waiter: Sender<WaiterMessage>,
         tx_certificate_waiter: Sender<Certificate>,
     ) -> Self {
+        let gc_depth: Height = 50;
         Self {
             name,
             store,
             tx_header_waiter,
             tx_certificate_waiter,
             genesis_headers: Header::genesis_headers(committee),
+            genesis: Header::genesis(committee)
+                .into_iter()
+                .map(|x| (x.id.clone(), x))
+                .collect(),
+            delivered_parents: HashMap::with_capacity(2 * gc_depth as usize),
+            gc_depth,
         }
     }
 
@@ -143,7 +153,7 @@ impl Synchronizer {
                     }
                 }
             },
-            ConsensusMessage::Commit { slot: _, view: _, qc: _, proposals } => {
+            ConsensusMessage::Commit { round: _, proposals } => {
                 for (pk, proposal) in proposals {
                     if proposal.height == 0 {
                         continue;
@@ -256,36 +266,67 @@ impl Synchronizer {
         // NOTE: Before calling, must check if proposal is ready, assumes that proposal is ready
         // before calling
         debug!("proposal height is {:?}", proposal.height);
-        let mut header: Header = self.get_header(proposal.header_digest).await.expect("already synced should have header").unwrap();
+        let proposal_digest = proposal.header_digest.clone();
+        let Some(mut header) = self.get_header(proposal_digest.clone()).await? else {
+            debug!(
+                "proposal header {} missing, trigger sync",
+                proposal_digest
+            );
+            self.fetch_header(proposal_digest.clone()).await?;
+            return Err(DagError::MalformedHeader(proposal_digest));
+        };
 
         // Otherwise we have the header and all of its ancestors
         let mut current_height = proposal.height;
         while current_height > stop_height {
             debug!("current height is {:?}, stop height is {:?}", current_height, stop_height);
             ancestors.push(header.clone());
-            header = self.get_parent_header(&header).await?.expect("should have parent by now");
+            if current_height == stop_height + 1 {
+                break;
+            }
+            let parent_digest = header.parent.clone();
+            let Some(parent_header) = self.get_parent_header(&header).await? else {
+                debug!("parent header {} missing, trigger sync", parent_digest);
+                self.fetch_header(parent_digest.clone()).await?;
+                return Err(DagError::MalformedHeader(parent_digest));
+            };
+            header = parent_header;
             current_height = header.height();
         }
 
         Ok(ancestors)
     }
 
-    pub async fn get_parent_header(&mut self, header: &Header) -> DagResult<Option<Header>> {
-        if header.parent_cert.header_digest == self.genesis_headers.get(&header.author).unwrap().digest() {
-            return Ok(Some(self.genesis_headers.get(&header.author).unwrap().clone()));
+    pub async fn get_parent(&mut self, header: &Header) -> DagResult<Option<Digest>> {
+        let parent_digest = header.parent.clone();
+        let height = header.height;
+
+        // If parent is genesis, we already have it.
+        if self.genesis.iter().any(|(x, _)| x == &parent_digest) {
+            return Ok(Some(parent_digest));
         }
 
-        let parent = header.parent_cert.header_digest.clone();
-        match self.store.read(parent.to_vec()).await? {
-            Some(bytes) => Ok(Some(bincode::deserialize(&bytes)?)),
+        // If we've already delivered this parent for the round, return it.
+        if let Some(set) = self.delivered_parents.get(&height) {
+            if set.contains(&parent_digest) {
+                return Ok(Some(parent_digest));
+            }
+        }
+
+        match self.store.read(parent_digest.to_vec()).await? {
+            Some(bytes) => Ok(Some(parent_digest)),
             None => {
                 self.tx_header_waiter
-                    .send(WaiterMessage::SyncParent(parent, header.clone()))
+                    .send(WaiterMessage::SyncParent(parent_digest, header.clone()))
                     .await
                     .expect("Failed to send sync parent request");
                 Ok(None)
             }
         }
+    }
+
+    pub async fn get_parent_header(&mut self, header: &Header) -> DagResult<Option<Header>> {
+        self.get_header(header.parent.clone()).await
     }
 
 

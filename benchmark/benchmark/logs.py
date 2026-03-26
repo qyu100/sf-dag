@@ -81,11 +81,19 @@ class LogParser:
         if search(r'Error', log) is not None:
             raise ParseError('Client(s) panicked')
 
-        size = int(search(r'Transactions size: (\d+)', log).group(1))
-        rate = int(search(r'Transactions rate: (\d+)', log).group(1))
+        size_match = search(r'Transactions size: (\d+)', log)
+        rate_match = search(r'Transactions rate: (\d+)', log)
+        if size_match is None or rate_match is None:
+            raise ParseError('Client log missing size/rate headers')
+        size = int(size_match.group(1))
+        rate = int(rate_match.group(1))
 
-        tmp = search(r'\[(.*Z) .* Start ', log).group(1)
-        start = self._to_posix(tmp)
+        start_match = search(r'\[(.*Z) .* Start ', log)
+        if start_match is None:
+            raise ParseError(
+                'Client log missing Start event (benchmark likely failed before nodes were online)'
+            )
+        start = self._to_posix(start_match.group(1))
 
         misses = len(findall(r'rate too high', log))
 

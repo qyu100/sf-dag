@@ -74,7 +74,12 @@ class LocalBench:
 
             names = [x.name for x in keys]
             #print('num workers', self.workers)
-            committee = LocalCommittee(names, self.BASE_PORT, self.workers)
+            committee = LocalCommittee(
+                names,
+                self.BASE_PORT,
+                self.workers,
+                f_num=self.node_parameters.json.get('f_num', 0),
+            )
             committee.print(PathMaker.committee_file())
 
             self.node_parameters.print(PathMaker.parameters_file())

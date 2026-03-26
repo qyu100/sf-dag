@@ -1,11 +1,11 @@
 #![allow(dead_code)]
-use std::collections::{HashMap, BTreeMap};
+use std::collections::BTreeMap;
 
 // Copyright(C) Facebook, Inc. and its affiliates.
-use crate::messages::{Certificate, Header, ConsensusMessage};
+use crate::messages::{Certificate, Header};
 use crate::primary::Height;
 use config::{Committee, WorkerId};
-use crypto::{Digest, PublicKey, SignatureService, Hash};
+use crypto::{Digest, PublicKey, Hash, SignatureService};
 use log::debug;
 #[cfg(feature = "benchmark")]
 use log::info;
@@ -22,8 +22,6 @@ pub struct Proposer {
     name: PublicKey,
     /// The committee information
     committee: Committee,
-    /// Service to sign headers.
-    signature_service: SignatureService,
     /// The size of the headers' payload.
     header_size: usize,
     /// The maximum delay to wait for batches' digests.
@@ -33,8 +31,6 @@ pub struct Proposer {
     rx_core: Receiver<Certificate>,
     /// Receives the batches' digests from our workers.
     rx_workers: Receiver<(Digest, WorkerId)>,
-    // Receives new consensus instance
-    rx_instance: Receiver<ConsensusMessage>,
     /// Sends newly created headers to the `Core`.
     tx_core: Sender<Header>,
    
@@ -42,16 +38,10 @@ pub struct Proposer {
     height: Height,
     /// Holds the certificate waiting to be included in the next header
     last_parent: Option<Certificate>,
-    // Holds the consensus info for the last special header
-    consensus_instances: HashMap<Digest, ConsensusMessage>,
     /// Holds the batches' digests waiting to be included in the next header.
     digests: Vec<(Digest, WorkerId)>,
     /// Keeps track of the size (in bytes) of batches' digests that we received so far.
     payload_size: usize,
-
-    num_active_instances: usize, 
-    use_special_rule: bool, 
-    is_special: bool,
 }
 
 impl Proposer {
@@ -59,19 +49,13 @@ impl Proposer {
     pub fn spawn(
         name: PublicKey,
         committee: Committee,
-        signature_service: SignatureService,
+        _signature_service: SignatureService,
         header_size: usize,
         max_header_delay: u64,
         rx_core: Receiver<Certificate>,
         rx_workers: Receiver<(Digest, WorkerId)>,
-        rx_instance: Receiver<ConsensusMessage>,
         tx_core: Sender<Header>,
     ) {
-        /*let genesis: Vec<Digest> = Certificate::genesis(&committee)
-            .iter()
-            .map(|x| x.digest())
-            .collect();*/
-
         let genesis = Certificate::genesis_cert(&committee);
 
 
@@ -79,21 +63,15 @@ impl Proposer {
             Self {
                 name,
                 committee,
-                signature_service,
                 header_size,
                 max_header_delay,
                 rx_core,
                 rx_workers,
-                rx_instance,
                 tx_core,
                 height: 0,
                 last_parent: Some(genesis),
-                consensus_instances: HashMap::new(),
                 digests: Vec::with_capacity(2 * header_size),
                 payload_size: 0,
-                num_active_instances: 0,
-                use_special_rule: false,
-                is_special: false,
             }
             .run()
             .await;
@@ -103,53 +81,17 @@ impl Proposer {
     async fn make_header(&mut self) {
         // Make a new header.
         debug!("digests size before is {:?}", self.digests.len());
-        /*let mut header: Header;
-        if self.digests.len() > 0 {
-            header = Header::new(
-                self.name,
-                self.height,
-                self.digests.drain(..1).collect(),
-                self.last_parent.clone().unwrap(),
-                &mut self.signature_service,
-                self.consensus_instances.clone(),
-                self.num_active_instances,
-            ).await;
-        } else {
-            header = Header::new(
-                self.name,
-                self.height,
-                BTreeMap::new(),
-                self.last_parent.clone().unwrap(),
-                &mut self.signature_service,
-                self.consensus_instances.clone(),
-                self.num_active_instances,
-            ).await;
 
-        }*/
+        let parent = self.last_parent.take().expect("no parent available").header_id;
 
         let mut header = Header::new(
                 self.name,
                 self.height,
                 self.digests.drain(..).collect(),
-                self.last_parent.clone().unwrap(),
-                &mut self.signature_service,
-                self.consensus_instances.clone(),
-                self.num_active_instances,
+                parent,
             ).await;
 
-
-        if self.is_special {
-            header.special = true;
-            //TODO: need to also include the digest of the last proposal. Otherwise there is no gain in latency for that tx.
-              // Instead of including Certificate as parent => include digest.
-        }
-
-
         debug!("Created {:?}", header);
-
-        for (digest, _) in &header.consensus_messages {
-           debug!("Header has {:?}", digest);
-        }
 
         #[cfg(feature = "benchmark")]
         for digest in header.payload.keys() {
@@ -159,9 +101,6 @@ impl Proposer {
 
         // Reset last parent
         self.last_parent = None;
-        // Reset proposed consensus instances
-        self.consensus_instances.clear();
-        self.num_active_instances = 0;
       
         // Send the new header to the `Core` that will broadcast and process it.
         self.tx_core
@@ -193,13 +132,12 @@ impl Proposer {
             let enough_digests = self.payload_size >= self.header_size;
             let timer_expired = timer.is_elapsed();
 
-            if (timer_expired || enough_digests) && (enough_parent || self.is_special) {
+            if (timer_expired || enough_digests) && enough_parent {
                 if timer_expired {
                     debug!("Timer expired for height {}", self.height);
                 }
 
                 debug!("New car proposed after {:?} ms", current_time.elapsed().as_millis());
-                debug!("is special is {:?}", self.is_special);
                 current_time = Instant::now();
                 
                 // Make a new header.
@@ -213,33 +151,9 @@ impl Proposer {
 
     
             tokio::select! {
-                // Received info from consensus
-                Some(info) = self.rx_instance.recv() => {
-                    debug!("received consensus info");
-
-                    match &info {
-                        ConsensusMessage::Prepare { slot, view, tc: _, qc_ticket: _, proposals: _} => {
-                            if self.use_special_rule {
-                                self.is_special = true;
-                            }
-                            self.num_active_instances +=1;
-                            debug!("prepare has digest: {}", info.digest());
-                        },
-                        ConsensusMessage::Confirm { slot: _, view: _, qc: _, proposals: _} => {
-                            if self.use_special_rule {
-                                self.is_special = true;
-                            }
-                            self.num_active_instances +=1;
-                        },
-                        _ => {},
-                    }
-
-                    self.consensus_instances.insert(info.digest(), info);
-                }
-
                 // Receive own certificate from core (we are the author)
                 Some(parent) = self.rx_core.recv() => {
-                    debug!("   received parent from height {:?}", parent.height);
+                    debug!("received parent from height {:?}", parent.height);
 
                     if parent.height < self.height {
                         continue;

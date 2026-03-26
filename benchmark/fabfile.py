@@ -17,9 +17,9 @@ def local(ctx, debug=True):
         'nodes': [10],
         'workers': 1,
         'co-locate': True,
-        'rate': [240_000],
+        'rate': [50_000],
         'tx_size': 512,
-        'duration': 20,
+        'duration': 30,
         'runs': 1,
 
         # Unused
@@ -48,6 +48,7 @@ def local(ctx, debug=True):
         'simulate_asynchrony': False,
         'asynchrony_start': 15_000, #ms
         'asynchrony_duration': 3_000, #ms
+        'f_num': 3,
     }
     try:
         ret = LocalBench(bench_params, node_params).run(debug)
@@ -149,6 +150,7 @@ def remote(ctx, debug=False):
         'simulate_asynchrony': False,
         'asynchrony_start': 15_000, #ms
         'asynchrony_duration': 3_000, #ms
+        'f_num': 16
     }
     try:
         Bench(ctx).run(bench_params, node_params, debug)
