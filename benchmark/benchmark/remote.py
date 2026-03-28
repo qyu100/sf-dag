@@ -196,6 +196,20 @@ class Bench:
         g = Group(*ips, user=self.settings.username, connect_kwargs=self.connect)
         g.run(' && '.join(cmd), hide=True)
 
+    def _upload_config(self, committee, key_files, node_parameters):
+        committee.print(PathMaker.committee_file())
+        node_parameters.print(PathMaker.parameters_file())
+
+        names = list(committee.json['authorities'].keys())
+        progress = progress_bar(names, prefix='Uploading config files:')
+        for i, name in enumerate(progress):
+            for ip in committee.ips(name):
+                c = Connection(ip, user=self.settings.username, connect_kwargs=self.connect)
+                c.run(f'{CommandMaker.cleanup()} || true', hide=True)
+                c.put(PathMaker.committee_file(), '.')
+                c.put(key_files[i], '.')
+                c.put(PathMaker.parameters_file(), '.')
+
     def _config(self, hosts, node_parameters, bench_parameters):
         Print.info('Generating configuration files...')
 
@@ -235,22 +249,7 @@ class Bench:
             self.settings.base_port,
             f_num=node_parameters.json.get('f_num', 0),
         )
-        committee.print(PathMaker.committee_file())
-
-        node_parameters.print(PathMaker.parameters_file())
-
-        # Cleanup all nodes and upload configuration files.
-        names = names[:len(names)-bench_parameters.faults]
-        progress = progress_bar(names, prefix='Uploading config files:')
-        for i, name in enumerate(progress):
-            for ip in committee.ips(name):
-                c = Connection(ip, user=self.settings.username, connect_kwargs=self.connect)
-                c.run(f'{CommandMaker.cleanup()} || true', hide=True)
-                c.put(PathMaker.committee_file(), '.')
-                c.put(PathMaker.key_file(i), '.')
-                c.put(PathMaker.parameters_file(), '.')
-
-        return committee
+        return committee, key_files
 
     def _run_single(self, rate, committee, bench_parameters, debug=False):
         faults = bench_parameters.faults
@@ -447,7 +446,7 @@ class Bench:
 
         # Upload all configuration files.
         try:
-            committee = self._config(
+            committee, key_files = self._config(
                 selected_hosts, node_parameters, bench_parameters
             )
         except (subprocess.SubprocessError, GroupException) as e:
@@ -458,6 +457,11 @@ class Bench:
         for n in bench_parameters.nodes:
             committee_copy = deepcopy(committee)
             committee_copy.remove_nodes(committee.size() - n)
+            self._upload_config(
+                committee_copy,
+                key_files,
+                node_parameters,
+            )
 
             for r in bench_parameters.rate:
                 Print.heading(f'\nRunning {n} nodes (input rate: {r:,} tx/s)')
