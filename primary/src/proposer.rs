@@ -5,8 +5,8 @@ use std::collections::BTreeMap;
 use crate::messages::{Certificate, Header};
 use crate::primary::Height;
 use config::{Committee, WorkerId};
-use crypto::{Digest, PublicKey, Hash, SignatureService};
-use log::debug;
+use crypto::{Digest, PublicKey};
+use log::{debug, warn};
 #[cfg(feature = "benchmark")]
 use log::info;
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -131,12 +131,12 @@ impl Proposer {
             // in other words core should not be disseminating headers
             //let enough_parents = !self.last_parent.is_empty();
             let enough_parent = self.last_parent.is_some();
-            let enough_digests = self.payload_size >= self.header_size;
+            // let enough_digests = self.payload_size >= self.header_size;
             let timer_expired = timer.is_elapsed();
 
-            if (timer_expired || enough_digests) && enough_parent {
+            if enough_parent {
                 if timer_expired {
-                    debug!("Timer expired for height {}", self.height);
+                    warn!("Timer expired for height {}", self.height);
                 }
 
                 debug!("New car proposed after {:?} ms", current_time.elapsed().as_millis());
