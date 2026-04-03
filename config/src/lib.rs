@@ -99,6 +99,7 @@ pub struct Parameters {
     pub asynchrony_start: u64,
     pub asynchrony_duration: u64,
     pub f_num: u32, 
+    pub tx_size: usize, //size of each transaction in bytes, used for asynchrony simulation
 }
 
 impl Default for Parameters {
@@ -126,7 +127,9 @@ impl Default for Parameters {
             simulate_asynchrony: false,
             asynchrony_start: 20_000, //20 second in
             asynchrony_duration: 10_000, //10 seconds
-            f_num:3
+            f_num:3,
+            tx_size: 512 //1 KB per transaction
+
         }
     }
 }
@@ -144,6 +147,7 @@ impl Parameters {
         info!("Sync retry nodes set to {} nodes", self.sync_retry_nodes);
         info!("Batch size set to {} B", self.batch_size);
         info!("Max batch delay set to {} ms", self.max_batch_delay);
+        info!("Transaction size set to {} B", self.tx_size);
 
         info!("Fast path enabled? {}. Fast timeout: {}", self.use_fast_path, self.fast_path_timeout);
         info!("Optimistic tips enabled? {}", self.use_optimistic_tips);
@@ -189,6 +193,13 @@ pub struct Authority {
 }
 
 #[derive(Clone, Deserialize)]
+pub struct Comm {
+    pub authorities: BTreeMap<PublicKey, Authority>,
+}
+impl Import for Comm {}
+
+
+#[derive(Clone, Deserialize)]
 pub struct Committee {
     pub authorities: BTreeMap<PublicKey, Authority>,
     //pub id_map: HashMap<PublicKey, u64>, //position 
@@ -198,15 +209,9 @@ pub struct Committee {
 impl Import for Committee {}
 
 impl Committee {
-    pub fn new(info: Vec<(PublicKey, Stake, SocketAddr)>, f_num: u32) -> Self {
+    pub fn new(authorities: BTreeMap<PublicKey, Authority>, f_num: u32) -> Committee {
         Self {
-            authorities: info
-                .into_iter()
-                .map(|(name, stake, address)| {
-                    let authority = Authority { stake, consensus: ConsensusAddresses { consensus_to_consensus: address }, primary: PrimaryAddresses { primary_to_primary: address, worker_to_primary: address }, workers: HashMap::new() };
-                    (name, authority)
-                })
-                .collect(),
+            authorities,
             f_num,
         }
     }

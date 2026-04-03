@@ -3,7 +3,7 @@
 #![allow(unused_imports)]
 // Copyright(C) Facebook, Inc. and its affiliates.
 use crate::error::{DagError, DagResult};
-use crate::messages::{ConsensusMessage, Header, Proposal, proposal_digest};
+use crate::messages::{ConsensusMessage, Header, HeaderInfo, Proposal, proposal_digest};
 use crate::primary::{Height, PrimaryMessage, PrimaryWorkerMessage};
 use bytes::Bytes;
 use config::{Committee, WorkerId};
@@ -28,11 +28,11 @@ const TIMER_RESOLUTION: u64 = 1_000;
 /// The commands that can be sent to the `Waiter`.
 #[derive(Debug)]
 pub enum WaiterMessage {
-    SyncBatches(HashMap<Digest, WorkerId>, Header, bool),
-    SyncProposals(Vec<Proposal>, ConsensusMessage, Header),
+    SyncBatches(HashMap<Digest, WorkerId>, HeaderInfo, bool),
+    SyncProposals(Vec<Proposal>, ConsensusMessage, HeaderInfo),
     // SyncProposalsC(Vec<Proposal>, ConsensusMessage), //Consensus is independent of header.
     // SyncProposalsCAsync(Vec<Proposal>), //Consensus is independent of header.
-    SyncParent(Digest, Header),
+    SyncParent(Digest, HeaderInfo),
     SyncHeader(Digest),
 }
 
@@ -56,9 +56,9 @@ pub struct HeaderWaiter {
     /// Receives sync commands from the `Synchronizer`.
     rx_synchronizer: Receiver<WaiterMessage>,
     /// Loops back to the core headers for which we got all parents and batches.
-    tx_core: Sender<Header>,
+    tx_core: Sender<HeaderInfo>,
     /// Loops back commit messages to the committer for reprocessing
-    tx_consensus_loopback: Sender<(ConsensusMessage, Header)>,
+    tx_consensus_loopback: Sender<(ConsensusMessage, HeaderInfo)>,
 
     /// Network driver allowing to send messages.
     network: SimpleSender,
@@ -87,8 +87,8 @@ impl HeaderWaiter {
         sync_retry_delay: u64,
         sync_retry_nodes: usize,
         rx_synchronizer: Receiver<WaiterMessage>,
-        tx_core: Sender<Header>,
-        tx_consensus_loopback: Sender<(ConsensusMessage, Header)>,
+        tx_core: Sender<HeaderInfo>,
+        tx_consensus_loopback: Sender<(ConsensusMessage, HeaderInfo)>,
     ) {
         tokio::spawn(async move {
             Self {
@@ -117,9 +117,9 @@ impl HeaderWaiter {
     /// and then delivers the specified header.
     async fn waiter(
         mut missing: Vec<(Vec<u8>, Store)>,
-        deliver: Header,
+        deliver: HeaderInfo,
         mut handler: Receiver<()>,
-    ) -> DagResult<Option<Header>> {
+    ) -> DagResult<Option<HeaderInfo>> {
         let waiting: Vec<_> = missing
             .iter_mut()
             .map(|(x, y)| y.notify_read(x.to_vec()))
@@ -135,9 +135,9 @@ impl HeaderWaiter {
 
     async fn proposal_waiter(
         mut missing: Vec<(Vec<u8>, Store)>,
-        deliver: (ConsensusMessage, Header),
+        deliver: (ConsensusMessage, HeaderInfo),
         mut handler: Receiver<()>,
-    ) -> DagResult<Option<(ConsensusMessage, Header)>> {
+    ) -> DagResult<Option<(ConsensusMessage, HeaderInfo)>> {
         let waiting: Vec<_> = missing
             .iter_mut()
             .map(|(x, y)| y.notify_read(x.to_vec()))
@@ -240,7 +240,7 @@ impl HeaderWaiter {
                         WaiterMessage::SyncParent(missing, header) => {
                             debug!("Synching the parents of {}", header);
                             let header_id = header.id.clone();
-                            let height = header.height();
+                            let height = header.height;
                             let author = header.author;
 
                             // Ensure we sync only once per header.
@@ -283,7 +283,7 @@ impl HeaderWaiter {
 
                         WaiterMessage::SyncProposals(missing, consensus_message, header) => {
                             //let header_id = header.id.clone();
-                            let height = header.height();
+                            let height = header.height;
                             let author = header.author;
                             let id = proposal_digest(&consensus_message);
                             //println!("syncing proposals in header waiter");
@@ -337,9 +337,9 @@ impl HeaderWaiter {
                     Ok(Some(header)) => {
                         debug!("Finished synching {:?}", header);
                         let _ = self.pending.remove(&header.id);
-                        for x in header.payload.keys() {
-                            let _ = self.batch_requests.remove(x);
-                        }
+                        // for x in header.payload.keys() {
+                        //     let _ = self.batch_requests.remove(x);
+                        // }
                         let _ = self.parent_requests.remove(&header.parent);
 
                         self.tx_core.send(header).await.expect("Failed to send header");
@@ -358,9 +358,9 @@ impl HeaderWaiter {
                         //println!("finished syncing");
                         let id = proposal_digest(&deliver.0);
                         let _ = self.pending.remove(&id);
-                        for x in deliver.1.payload.keys() {
-                            let _ = self.batch_requests.remove(x);
-                        }
+                        // for x in deliver.1.payload.keys() {
+                        //     let _ = self.batch_requests.remove(x);
+                        // }
 
                         let possibly_missing;
                         match &deliver.0 {

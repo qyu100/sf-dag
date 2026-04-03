@@ -128,15 +128,10 @@ impl Committer {
             }
 
             for header in headers {
-                info!("Committed {}", header);
-                for digest in header.payload.keys() {
-                    info!("Committed {} -> {:?}", header, digest);
-                }
-                debug!("Finished Commit");
-                if let Err(e) = self.tx_output.send(header.clone()).await {
+                info!("Committed {:?} ", header.id);
+                if let Err(e) = self.tx_output.send(header).await {
                     debug!("Failed to send block through the output channel: {}", e);
                 }
-                debug!("Finish upcall");
             }
         }
         Ok(())

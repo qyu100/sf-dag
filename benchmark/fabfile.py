@@ -10,7 +10,7 @@ from benchmark.remote import Bench, BenchError
 
 
 @task
-def local(ctx, debug=True):
+def local(ctx, debug=True, consensus_only=True, header_size=512_000):
     ''' Run benchmarks on localhost '''
     bench_params = {
         'faults': 0,
@@ -27,8 +27,10 @@ def local(ctx, debug=True):
         'partition_start': 5,
         'partition_duration': 5,
         'partition_nodes': 1,
+        'burst': 1,
     }
     node_params = {
+        'consensus_only': consensus_only,
         'timeout_delay': 5_000,  # ms
         'header_size': 512,  # bytes
         'max_header_delay': 5_000,  # ms
@@ -44,6 +46,7 @@ def local(ctx, debug=True):
         'fast_path_timeout': 5_000,
         'use_ride_share': False,
         'car_timeout': 5_000,
+        'tx_size': bench_params['tx_size'],
 
         'simulate_asynchrony': False,
         'asynchrony_start': 15_000, #ms
@@ -51,7 +54,7 @@ def local(ctx, debug=True):
         'f_num': 3,
     }
     try:
-        ret = LocalBench(bench_params, node_params).run(debug)
+        ret = LocalBench(bench_params, node_params).run(debug, consensus_only)
         print(ret.result())
     except BenchError as e:
         Print.error(e)
@@ -112,7 +115,7 @@ def install(ctx):
 
 
 @task
-def remote(ctx, debug=False):
+def remote(ctx, burst = 50, consensus_only=True, debug=False):
     ''' Run benchmarks on AWS '''
     bench_params = {
         'faults': 0,
@@ -123,14 +126,15 @@ def remote(ctx, debug=False):
         'tx_size': 512,
         'duration': 10,
         'runs': 1,
-
         # Unused
         'simulate_partition': True,
         'partition_start': 5,
         'partition_duration': 5,
         'partition_nodes': 1,
+        'burst': [burst],
     }
     node_params = {
+        'consensus_only': consensus_only,
         'timeout_delay': 5_000,  # ms
         'header_size': 32,  # bytes
         'max_header_delay': 5_000,  # ms
@@ -146,6 +150,7 @@ def remote(ctx, debug=False):
         'fast_path_timeout': 5_000,
         'use_ride_share': False,
         'car_timeout': 5_000,
+        'tx_size': bench_params['tx_size'],
 
         'simulate_asynchrony': False,
         'asynchrony_start': 15_000, #ms
@@ -153,7 +158,7 @@ def remote(ctx, debug=False):
         'f_num': 16
     }
     try:
-        Bench(ctx).run(bench_params, node_params, debug)
+        Bench(ctx).run(bench_params, node_params, debug, consensus_only)
     except BenchError as e:
         Print.error(e)
 

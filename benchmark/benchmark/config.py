@@ -6,7 +6,6 @@ from collections import OrderedDict
 class ConfigError(Exception):
     pass
 
-
 class EdKey:
     def __init__(self, name, secret):
         self.name = name
@@ -19,15 +18,24 @@ class EdKey:
             data = load(f)
         return cls(data['name'], data['secret'])
 
+class BlsKey:
+    def __init__(self, name, secret):
+        self.nameg2 = name
+        self.secret = secret
+
+    @classmethod
+    def from_file(cls, filename):
+        assert isinstance(filename, str)
+        with open(filename, 'r') as f:
+            data = load(f)
+        return cls(data['nameg2'], data['secret'])
+
 
 class Committee:
     ''' The committee looks as follows:
         "authorities: {
             "name": {
                 "stake": 1,
-                "consensus: {
-                    "consensus_to_consensus": x.x.x.x:x,
-                },
                 "primary: {
                     "primary_to_primary": x.x.x.x:x,
                     "worker_to_primary": x.x.x.x:x,
@@ -45,7 +53,10 @@ class Committee:
         }
     '''
 
-    def __init__(self, addresses, base_port, f_num=0):
+    def __init__(self, json):
+        self.json = json
+
+    def address_list_to_json(addresses, base_port, faults, bls_pubkeys_g2=None):
         ''' The `addresses` field looks as follows:
             { 
                 "name": ["host", "host", ...],
@@ -62,12 +73,15 @@ class Committee:
         )
         assert len({len(x) for x in addresses.values()}) == 1
         assert isinstance(base_port, int) and base_port > 1024
-        assert isinstance(f_num, int) and f_num >= 0
 
         port = base_port
-        self.json = {'authorities': OrderedDict(), 'f_num': f_num}
+        json = {'authorities': OrderedDict()}
+        num_authorities = len(addresses)
 
-        for name, hosts in addresses.items():
+        bls_pubkeys_g2 = bls_pubkeys_g2 or []
+
+        for i, (name, hosts) in enumerate(addresses.items()):
+            # port = base_port
             host = hosts.pop(0)
             consensus_addr = {
                 'consensus_to_consensus': f'{host}:{port}',
@@ -89,12 +103,21 @@ class Committee:
                 }
                 port += 3
 
-            self.json['authorities'][name] = {
+            json['authorities'][name] = {
+                # Corresponds to the determination of faulty nodes in primary_addresses.
+                'is_honest': i < num_authorities - faults,
                 'stake': 1,
                 'consensus': consensus_addr,
                 'primary': primary_addr,
                 'workers': workers_addr
             }
+            if i < len(bls_pubkeys_g2):
+                json['authorities'][name]['bls_pubkey_g2'] = bls_pubkeys_g2[i]
+        return json
+
+    @classmethod
+    def from_address_list(cls, addresses, base_port, faults, bls_pubkeys_g2=None):
+        return cls(Committee.address_list_to_json(addresses, base_port, faults,bls_pubkeys_g2))
 
     def primary_addresses(self, faults=0):
         ''' Returns an ordered list of primaries' addresses. '''
@@ -126,9 +149,6 @@ class Committee:
 
         ips = set()
         for name in names:
-            addresses = self.json['authorities'][name]['consensus']
-            ips.add(self.ip(addresses['consensus_to_consensus']))
-
             addresses = self.json['authorities'][name]['primary']
             ips.add(self.ip(addresses['primary_to_primary']))
             ips.add(self.ip(addresses['worker_to_primary']))
@@ -163,23 +183,33 @@ class Committee:
     def ip(address):
         assert isinstance(address, str)
         return address.split(':')[0]
+    
+    def faults(self):
+        '''Returns the total number of Byzantine authorities.'''
+        num_honest = sum([1 for a in self.json['authorities'].values() if a['is_honest']])
+        return self.size() - num_honest
+    
+    def print(self, filename):
+        assert isinstance(filename, str)
+        with open(filename, 'w') as f:
+            dump(self.json, f, indent=4, sort_keys=False)
 
 
 class LocalCommittee(Committee):
-    def __init__(self, names, port, workers, f_num=0):
+    def __init__(self, names, port, workers, faults, bls_pubkeys_g2=None):
         assert isinstance(names, list)
         assert all(isinstance(x, str) for x in names)
         assert isinstance(port, int)
         assert isinstance(workers, int) and workers > 0
         addresses = OrderedDict((x, ['127.0.0.1']*(1+workers)) for x in names)
-        super().__init__(addresses, port, f_num=f_num)
+        json = Committee.address_list_to_json(addresses, port, faults, bls_pubkeys_g2)
+        super().__init__(json)
 
 
 class NodeParameters:
     def __init__(self, json):
         inputs = []
         try:
-            inputs += [json['timeout_delay']]
             inputs += [json['header_size']]
             inputs += [json['max_header_delay']]
             inputs += [json['gc_depth']]
@@ -187,6 +217,7 @@ class NodeParameters:
             inputs += [json['sync_retry_nodes']]
             inputs += [json['batch_size']]
             inputs += [json['max_batch_delay']]
+            inputs += [json['tx_size']]
             inputs += [json['f_num']]
         except KeyError as e:
             raise ConfigError(f'Malformed parameters: missing key {e}')
@@ -219,6 +250,13 @@ class BenchParameters:
                 raise ConfigError('Missing input rate')
             self.rate = [int(x) for x in rate]
 
+            burst = json['burst']
+            burst = burst if isinstance(burst, list) else [burst]
+            if not burst:
+                raise ConfigError('Missing burst setting')
+            self.burst = [int(x) for x in burst]
+
+            
             self.workers = int(json['workers'])
 
             if 'collocate' in json:
@@ -227,15 +265,11 @@ class BenchParameters:
                 self.collocate = True
 
             self.tx_size = int(json['tx_size'])
-
+           
             self.duration = int(json['duration'])
 
             self.runs = int(json['runs']) if 'runs' in json else 1
-            self.simulate_partition = bool(json['simulate_partition'])
-
-            self.partition_nodes = int(json['partition_nodes'])
-            self.partition_start = int(json['partition_start'])
-            self.partition_duration = int(json['partition_duration'])
+            
         except KeyError as e:
             raise ConfigError(f'Malformed bench parameters: missing key {e}')
 

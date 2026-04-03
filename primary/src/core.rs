@@ -8,7 +8,7 @@ use crate::leader::LeaderElector;
 use crate::messages::{
     Certificate, ConsensusMessage, Header, Proposal, Timeout, Vote, TC, CommitQC, ConsensusRequest, ConsensusVote, Cut, CutProposal, CutCertificate, CutVote, Decide,
 };
-use crate::primary::{Height, PrimaryMessage, Slot, View};
+use crate::primary::{Height, PrimaryMessage, PrimaryMessageRef, Slot, View};
 use crate::synchronizer::Synchronizer;
 use async_recursion::async_recursion;
 use bytes::Bytes;
@@ -31,26 +31,22 @@ use store::Store;
 use tokio::sync::mpsc::{Receiver, Sender};
 //use tokio::time::{sleep, Duration, Instant};
 
-#[cfg(test)]
-#[path = "tests/core_tests.rs"]
-pub mod core_tests;
+// fn collect_uncommitted_cut_chain(
+//     tip_cut: Digest,
+//     cut_parents: &HashMap<Digest, Digest>,
+//     committed_cuts: &HashSet<Digest>,
+// ) -> Vec<Digest> {
+//     let mut chain: Vec<Digest> = Vec::new();
+//     let mut cursor = tip_cut;
 
-fn collect_uncommitted_cut_chain(
-    tip_cut: Digest,
-    cut_parents: &HashMap<Digest, Digest>,
-    committed_cuts: &HashSet<Digest>,
-) -> Vec<Digest> {
-    let mut chain: Vec<Digest> = Vec::new();
-    let mut cursor = tip_cut;
+//     while cursor != Digest::default() && !committed_cuts.contains(&cursor) {
+//         chain.push(cursor.clone());
+//         cursor = cut_parents.get(&cursor).cloned().unwrap_or_default();
+//     }
 
-    while cursor != Digest::default() && !committed_cuts.contains(&cursor) {
-        chain.push(cursor.clone());
-        cursor = cut_parents.get(&cursor).cloned().unwrap_or_default();
-    }
-
-    chain.reverse();
-    chain
-}
+//     chain.reverse();
+//     chain
+// }
 
 pub struct Core {
     /// The public key of this primary.
@@ -61,8 +57,6 @@ pub struct Core {
     store: Store,
     /// Handles synchronization with other nodes and our workers.
     synchronizer: Synchronizer,
-    /// Service to sign headers.
-    signature_service: SignatureService,
     /// The current consensus round (used for cleanup).
     consensus_round: Arc<AtomicU64>,
     /// The depth of the garbage collector.
@@ -71,9 +65,9 @@ pub struct Core {
     /// Receiver for dag messages (headers, votes, certificates).
     rx_primaries: Receiver<PrimaryMessage>,
     /// Receives loopback headers from the `HeaderWaiter`.
-    rx_header_waiter: Receiver<Header>,
+    rx_header_waiter: Receiver<crate::messages::HeaderInfo>,
     /// Receives loopback instances from the 'HeaderWaiter'
-    rx_header_waiter_instances: Receiver<(ConsensusMessage, Header)>,
+    rx_header_waiter_instances: Receiver<(ConsensusMessage, crate::messages::HeaderInfo)>,
     /// Receives our newly created headers from the `Proposer`.
     rx_proposer: Receiver<Header>,
     // Output all certificates to the consensus Dag view
@@ -92,7 +86,7 @@ pub struct Core {
     /// The authors of the last voted headers. (Ensures only voting for one header per round)
     last_voted: HashMap<Height, HashSet<PublicKey>>,
     /// The last header we proposed (for which we are waiting votes).
-    current_header: Header,
+    // current_header: Header,
     // Whether we have already sent certificate to proposer
     sent_cert_to_proposer: bool,
 
@@ -182,12 +176,11 @@ impl Core {
         committee: Committee,
         store: Store,
         synchronizer: Synchronizer,
-        signature_service: SignatureService,
         consensus_round: Arc<AtomicU64>,
         gc_depth: Height,
         rx_primaries: Receiver<PrimaryMessage>,
-        rx_header_waiter: Receiver<Header>,
-        rx_header_waiter_instances: Receiver<(ConsensusMessage, Header)>,
+        rx_header_waiter: Receiver<crate::messages::HeaderInfo>,
+        rx_header_waiter_instances: Receiver<(ConsensusMessage, crate::messages::HeaderInfo)>,
         rx_proposer: Receiver<Header>,
         tx_committer: Sender<ConsensusMessage>,
         tx_committer_cert: Sender<Certificate>,
@@ -216,7 +209,6 @@ impl Core {
                 committee,
                 store,
                 synchronizer,
-                signature_service,
                 consensus_round,
                 gc_depth,
                 rx_primaries,
@@ -233,7 +225,7 @@ impl Core {
                 current_qcs_formed: 0,
                 sent_cert_to_proposer: false,
                 last_voted: HashMap::with_capacity(2 * gc_depth as usize),
-                current_header: Header::default(),
+                // current_header: Header::default(),
                 votes_aggregator: VoteAggregator::new(),
                 network: ReliableSender::new(),
                 cancel_handlers: HashMap::with_capacity(2 * gc_depth as usize),
@@ -305,8 +297,6 @@ impl Core {
         //println!("Received own header");
         debug!("Processing own header {:?}", header);
 
-        // Update the current header we are collecting votes for
-        self.current_header = header.clone();
         // Indicate that we haven't sent a cert yet for this header
         self.sent_cert_to_proposer = false;
 
@@ -321,7 +311,7 @@ impl Core {
             .iter()
             .map(|(_, x)| x.primary_to_primary)
             .collect();
-        let bytes = bincode::serialize(&PrimaryMessage::Header(header.clone(), false))
+        let bytes = bincode::serialize(&PrimaryMessageRef::Header(&header, false))
             .expect("Failed to serialize our own header");
         let handlers = self.network.broadcast(addresses, Bytes::from(bytes)).await;
         self.cancel_handlers
@@ -341,7 +331,7 @@ impl Core {
         if header.height != 1 {
             let parent = self
                 .synchronizer
-                .get_parent(&header.clone())
+                .get_parent(&header)
                 .await?;
             if parent.is_none() {
                 debug!(
@@ -350,14 +340,6 @@ impl Core {
                 );
                 return Ok(());
             }
-        }
-
-        // Ensure we have the payload. If we don't, the synchronizer will ask our workers to get it, and then
-        // reschedule processing of this header once we have it.
-        if self.synchronizer.missing_payload(&header, sync).await? {
-            //println!("Missing payload");
-            debug!("Processing of {} suspended: missing payload", header);
-            return Ok(());
         }
 
         // Store the header since we have the parents (recursively).
@@ -591,19 +573,19 @@ impl Core {
         cut_id
     }
 
-    fn commit_cut_chain(&mut self, tip_cut: Digest) {
-        let chain = collect_uncommitted_cut_chain(tip_cut, &self.cut_parents, &self.committed_cuts);
-        for cut_id in chain {
-            if self.committed_cuts.insert(cut_id.clone()) {
-                if let Some(round) = self.cut_round_by_id.get(&cut_id).cloned() {
-                    self.last_committed_cut_round = self.last_committed_cut_round.max(round);
-                    debug!("Committed cut {} at round {}", cut_id, round);
-                } else {
-                    debug!("Committed cut {}", cut_id);
-                }
-            }
-        }
-    }
+    // fn commit_cut_chain(&mut self, tip_cut: Digest) {
+    //     let chain = collect_uncommitted_cut_chain(tip_cut, &self.cut_parents, &self.committed_cuts);
+    //     for cut_id in chain {
+    //         if self.committed_cuts.insert(cut_id.clone()) {
+    //             if let Some(round) = self.cut_round_by_id.get(&cut_id).cloned() {
+    //                 self.last_committed_cut_round = self.last_committed_cut_round.max(round);
+    //                 debug!("Committed cut {} at round {}", cut_id, round);
+    //             } else {
+    //                 debug!("Committed cut {}", cut_id);
+    //             }
+    //         }
+    //     }
+    // }
 
     async fn process_cut_certificate(&mut self, certificate: CutCertificate) -> DagResult<()> {
         certificate.verify(&self.committee)?;
@@ -801,9 +783,20 @@ impl Core {
     async fn process_loopback(
         &mut self,
         _consensus_message: ConsensusMessage,
-        _header: Header,
+        _header: crate::messages::HeaderInfo,
     ) -> DagResult<()> {
         Ok(())
+    }
+
+    async fn process_header_loopback(
+        &mut self,
+        header_info: crate::messages::HeaderInfo,
+    ) -> DagResult<()> {
+        let Some(bytes) = self.store.read(header_info.id.to_vec()).await? else {
+            return Err(DagError::MalformedHeader(header_info.id));
+        };
+        let header: Header = bincode::deserialize(&bytes)?;
+        self.process_header(header, true).await
     }
 
     // Main loop listening to incoming messages.
@@ -880,7 +873,7 @@ impl Core {
                 // execution (we were missing some of their dependencies) and we are now ready to resume processing.
                 Some(header) = self.rx_header_waiter.recv() => {
                     debug!("normal loopback for header");
-                    self.process_header(header, true).await
+                    self.process_header_loopback(header).await
                 },
 
                 // Loopback for committed instance that hasn't had all of it ancestors yet

@@ -1,0 +1,7 @@
+Consensus R Latency,Consensus R-1 Latency,Consensus Tps,Consensus Bps,Consensus Latency,E2E Tps,E2E Bps,E2E Latency,BLPS,Burst,Header size
+0,0,2,0,1218,0,0,0,2,1,512
+0,0,2,0,1210,0,0,0,2,1,512
+0,0,2,0,980,0,0,0,2,1,512
+0,0,2,0,1146,0,0,0,2,1,512
+0,0,2,0,1044,0,0,0,2,1,512
+0,0,2,0,1159,0,0,0,2,1,512

@@ -1,4 +1,5 @@
 // Copyright(C) Facebook, Inc. and its affiliates.
+
 use crate::error::{DagError, DagResult};
 use crate::primary::{Height, Slot, View};
 use config::{Committee, WorkerId};
@@ -10,13 +11,14 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::convert::TryInto;
 use std::fmt;
 
-pub type Round = Height;
+pub type Round = u64;
+pub type Transaction = Vec<u8>;
 
 #[derive(Clone, Serialize, Deserialize, Default)]
 pub struct Header {
     pub author: PublicKey,
     pub height: Height,
-    pub payload: BTreeMap<Digest, WorkerId>,
+    pub payload: Vec<Transaction>,
     pub parent: Digest,
     pub id: Digest,
 }
@@ -25,7 +27,7 @@ impl Header {
     pub async fn new(
         author: PublicKey,
         height: Height,
-        payload: BTreeMap<Digest, WorkerId>,
+        payload: Vec<Transaction>,
         parent: Digest,
     ) -> Self {
         let header = Self {
@@ -86,11 +88,10 @@ impl Hash for Header {
         let mut hasher = Sha512::new();
         hasher.update(&self.author);
         hasher.update(self.height.to_le_bytes());
-        for (x, y) in &self.payload {
+        for x in &self.payload {
             hasher.update(x);
-            hasher.update(y.to_le_bytes());
         }
-        hasher.update(&self.parent);
+        // hasher.update(&self.parent);
         Digest(hasher.finalize().as_slice()[..32].try_into().unwrap())
     }
 }
@@ -102,6 +103,47 @@ impl fmt::Debug for Header {
 }
 
 impl fmt::Display for Header {
+    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+        write!(f, "B{}({})", self.height, self.author)
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, Default)]
+pub struct HeaderInfo {
+    pub author: PublicKey,
+    pub height: Height,
+    pub parent: Digest,
+    pub payload: Digest,
+    pub id: Digest,
+}
+
+impl HeaderInfo {
+    pub fn from_header(header: &Header) -> Self {
+        Self {
+            author: header.author,
+            height: header.height,
+            parent: header.parent.clone(),
+            payload: payload_digest(header),
+            id: header.id.clone(),
+        }
+    }
+}
+
+fn payload_digest(header: &Header) -> Digest {
+    let mut hasher = Sha512::new();
+    for x in &header.payload {
+        hasher.update(x);
+    }
+    Digest(hasher.finalize().as_slice()[..32].try_into().unwrap())
+}
+
+impl fmt::Debug for HeaderInfo {
+    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+        write!(f, "{}: B{}({})", self.id, self.height, self.author)
+    }
+}
+
+impl fmt::Display for HeaderInfo {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         write!(f, "B{}({})", self.height, self.author)
     }

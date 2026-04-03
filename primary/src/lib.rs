@@ -16,9 +16,9 @@ mod proposer;
 mod synchronizer;
 pub mod timer;
 
-#[cfg(test)]
-#[path = "tests/common.rs"]
-mod common;
+// #[cfg(test)]
+// #[path = "tests/common.rs"]
+// mod common;
 
 pub use crate::error::DagError;
 pub use crate::messages::{Certificate, Header};

@@ -10,6 +10,14 @@ from benchmark.logs import LogParser, ParseError
 from benchmark.utils import Print, BenchError, PathMaker
 
 
+class ParseFallback:
+    def __init__(self, message):
+        self.message = message
+
+    def result(self):
+        return self.message
+
+
 class LocalBench:
     BASE_PORT = 3000
 
@@ -35,29 +43,28 @@ class LocalBench:
         except subprocess.SubprocessError as e:
             raise BenchError('Failed to kill testbed', e)
 
-    def run(self, debug=False):
+    def run(self, debug=False, consensus_only=False):
         assert isinstance(debug, bool)
+        assert isinstance(consensus_only, bool)
         Print.heading('Starting local benchmark')
 
         # Kill any previous testbed.
         self._kill_nodes()
-        
+
         try:
             Print.info('Setting up testbed...')
-            nodes, rate = self.nodes[0], self.rate[0]
+            nodes, rate, burst = self.nodes[0], self.rate[0], self.burst[0]
 
             # Cleanup all files.
             cmd = f'{CommandMaker.clean_logs()} ; {CommandMaker.cleanup()}'
-            print('before run')
             subprocess.run([cmd], shell=True, stderr=subprocess.DEVNULL)
-            print('after run')
             sleep(0.5)  # Removing the store may take time.
 
-            print('past cleanup')
-            # Recompile the latest code.
-            cmd = CommandMaker.compile().split()
-            subprocess.run(cmd, check=True, cwd=PathMaker.node_crate_path())
-            print('past compiled')
+            # Recompile the latest code. Keep the full command string and run it through
+            # the shell so environment variable prefixes (e.g. RUSTFLAGS=...) are handled
+            # correctly instead of being treated as the executable name.
+            cmd = CommandMaker.compile()
+            subprocess.run(cmd, shell=True, check=True, cwd=PathMaker.node_crate_path())
 
             # Create alias for the client and nodes binary.
             cmd = CommandMaker.alias_binaries(PathMaker.binary_path())
@@ -65,66 +72,46 @@ class LocalBench:
 
             # Generate configuration files.
             keys = []
-            key_files = [PathMaker.key_file(i) for i in range(nodes)]
+            key_files = [PathMaker.ed_key_file(i) for i in range(nodes)]
             for filename in key_files:
-                cmd = CommandMaker.generate_key(filename).split()
+                cmd = CommandMaker.generate_ed_key(filename).split()
                 subprocess.run(cmd, check=True)
                 keys += [EdKey.from_file(filename)]
-            print('past keys')
 
             names = [x.name for x in keys]
-            #print('num workers', self.workers)
-            committee = LocalCommittee(
-                names,
-                self.BASE_PORT,
-                self.workers,
-                f_num=self.node_parameters.json.get('f_num', 0),
-            )
+            committee = LocalCommittee(names, self.BASE_PORT, self.workers, self.bench_parameters.faults, [])
             committee.print(PathMaker.committee_file())
 
             self.node_parameters.print(PathMaker.parameters_file())
 
-            # Run the clients (they will wait for the nodes to be ready).
-            workers_addresses = committee.workers_addresses(self.faults)
-            rate_share = ceil(rate / committee.workers())
-            for i, addresses in enumerate(workers_addresses):
-                for (id, address) in addresses:
-                    cmd = CommandMaker.run_client(
-                        address,
-                        self.tx_size,
-                        rate_share,
-                        [x for y in workers_addresses for _, x in y]
-                    )
-                    log_file = PathMaker.client_log_file(i, id)
-                    self._background_run(cmd, log_file)
-            print('past workers')
+
+            if not consensus_only:
+                # Run the clients (they will wait for the nodes to be ready).
+                workers_addresses = committee.workers_addresses(self.faults)
+                rate_share = ceil(rate / committee.workers())
+                for i, addresses in enumerate(workers_addresses):
+                    for (id, address) in addresses:
+                        cmd = CommandMaker.run_client(
+                            address,
+                            self.tx_size,
+                            burst,
+                            rate_share,
+                            [x for y in workers_addresses for _, x in y]
+                        )
+                        log_file = PathMaker.client_log_file(i, id)
+                        self._background_run(cmd, log_file)
 
             # Run the primaries (except the faulty ones).
             for i, address in enumerate(committee.primary_addresses(self.faults)):
                 cmd = CommandMaker.run_primary(
-                    PathMaker.key_file(i),
+                    PathMaker.ed_key_file(i),
                     PathMaker.committee_file(),
                     PathMaker.db_path(i),
                     PathMaker.parameters_file(),
                     debug=debug
                 )
                 log_file = PathMaker.primary_log_file(i)
-                print(cmd)
                 self._background_run(cmd, log_file)
-
-            # Run the workers (except the faulty ones).
-            for i, addresses in enumerate(workers_addresses):
-                for (id, address) in addresses:
-                    cmd = CommandMaker.run_worker(
-                        PathMaker.key_file(i),
-                        PathMaker.committee_file(),
-                        PathMaker.db_path(i, id),
-                        PathMaker.parameters_file(),
-                        id,  # The worker's id.
-                        debug=debug
-                    )
-                    log_file = PathMaker.worker_log_file(i, id)
-                    self._background_run(cmd, log_file)
 
             # Wait for all transactions to be processed.
             Print.info(f'Running benchmark ({self.duration} sec)...')
@@ -133,7 +120,19 @@ class LocalBench:
 
             # Parse logs and return the parser.
             Print.info('Parsing logs...')
-            return LogParser.process(PathMaker.logs_path(), faults=self.faults)
+            try:
+                return LogParser.process(
+                    PathMaker.logs_path(),
+                    burst,
+                    faults=self.faults,
+                    consensus_only=consensus_only,
+                )
+            except ParseError as e:
+                Print.warn(f'Log parsing skipped: {e}')
+                return ParseFallback(
+                    'Benchmark completed, but the current log format is incompatible '
+                    'with benchmark/logs.py. Raw logs are available under logs/.'
+                )
 
         except (subprocess.SubprocessError, ParseError) as e:
             self._kill_nodes()

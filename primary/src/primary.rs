@@ -10,7 +10,7 @@ use crate::garbage_collector::GarbageCollector;
 use crate::header_waiter::HeaderWaiter;
 use crate::helper::Helper;
 use crate::leader::LeaderElector;
-use crate::messages::{Certificate, Header, Vote, Timeout, TC, Proposal, ConsensusMessage, ConsensusVote, ConsensusRequest, CutProposal, CutVote, CutCertificate, Decide};
+use crate::messages::{Certificate, Header, HeaderInfo, Vote, Timeout, TC, Proposal, ConsensusMessage, ConsensusVote, ConsensusRequest, CutProposal, CutVote, CutCertificate, Decide};
 use crate::payload_receiver::PayloadReceiver;
 use crate::proposer::Proposer;
 use crate::synchronizer::Synchronizer;
@@ -58,6 +58,11 @@ pub enum PrimaryMessage {
     ProposalHeadersRequest(Proposal, Height, /* requestor */ PublicKey),
 }
 
+#[derive(Serialize)]
+pub enum PrimaryMessageRef<'a> {
+    Header(&'a Header, bool),
+}
+
 /// The messages sent by the primary to its workers.
 #[derive(Debug, Serialize, Deserialize)]
 pub enum PrimaryWorkerMessage {
@@ -83,7 +88,7 @@ impl Primary {
         name: PublicKey,
         committee: Committee,
         parameters: Parameters,
-        signature_service: SignatureService,
+        // signature_service: SignatureService,
         store: Store,
         _tx_consensus: Sender<Certificate>,
         tx_committer: Sender<Certificate>,
@@ -100,7 +105,7 @@ impl Primary {
         let (tx_headers, rx_headers) = channel(CHANNEL_CAPACITY);
         let (tx_sync_headers, rx_sync_headers) = channel(CHANNEL_CAPACITY);
         let (tx_sync_certificates, rx_sync_certificates) = channel(CHANNEL_CAPACITY);
-        let (tx_headers_loopback, rx_headers_loopback) = channel(CHANNEL_CAPACITY);
+        let (tx_headers_loopback, rx_headers_loopback) = channel::<HeaderInfo>(CHANNEL_CAPACITY);
         let (tx_certificates_loopback, rx_certificates_loopback) = channel(CHANNEL_CAPACITY);
         let (tx_primary_messages, rx_primary_messages) = channel(CHANNEL_CAPACITY);
         let (tx_cert_requests, rx_cert_requests) = channel(CHANNEL_CAPACITY);
@@ -187,7 +192,7 @@ impl Primary {
             committee.clone(),
             store.clone(),
             synchronizer.clone(),
-            signature_service.clone(),
+            // signature_service.clone(),
             consensus_round.clone(),
             parameters.gc_depth,
             /* rx_primaries */ rx_primary_messages,
@@ -258,12 +263,13 @@ impl Primary {
         Proposer::spawn(
             name,
             committee.clone(),
-            signature_service,
+            // signature_service,
             parameters.header_size,
             parameters.max_header_delay,
             /* rx_core */ rx_parents,
             /* rx_workers */ rx_our_digests,
             /* tx_core */ tx_headers,
+            parameters.tx_size,
         );
 
         // The `Helper` is dedicated to reply to certificates requests from other primaries.

@@ -7,13 +7,14 @@ use clap::{crate_name, crate_version, App, AppSettings, ArgMatches, SubCommand};
 use config::Export as _;
 use config::Import as _;
 use config::{Committee, KeyPair, Parameters, WorkerId};
-use crypto::SignatureService;
 use env_logger::Env;
 use primary::Header;
 use primary::Primary;
 use store::Store;
 use tokio::sync::mpsc::{channel, Receiver};
 use worker::Worker;
+use config::Comm;
+
 
 /// The default channel capacity.
 pub const CHANNEL_CAPACITY: usize = 1_000;
@@ -24,7 +25,7 @@ async fn main() -> Result<()> {
     
     let matches = App::new(crate_name!())
         .version(crate_version!())
-        .about("A research implementation of Sailfish.")
+        .about("A research implementation of Narwhal and Tusk.")
         .args_from_usage("-v... 'Sets the level of verbosity'")
         .subcommand(
             SubCommand::with_name("generate_keys")
@@ -34,7 +35,7 @@ async fn main() -> Result<()> {
         .subcommand(
             SubCommand::with_name("run")
                 .about("Run a node")
-                .args_from_usage("--keys=<FILE> 'The file containing the node keys'")
+                .args_from_usage("--edkeys=<FILE> 'The file containing the node keys'")
                 .args_from_usage("--committee=<FILE> 'The file containing committee information'")
                 .args_from_usage("--parameters=[FILE] 'The file containing the node parameters'")
                 .args_from_usage("--store=<PATH> 'The path where to create the data store'")
@@ -73,16 +74,15 @@ async fn main() -> Result<()> {
 
 // Runs either a worker or a primary.
 async fn run(matches: &ArgMatches<'_>) -> Result<()> {
-    let key_file = matches.value_of("keys").unwrap();
+    let ed_key_file = matches.value_of("edkeys").unwrap();
     let committee_file = matches.value_of("committee").unwrap();
     let parameters_file = matches.value_of("parameters");
     let store_path = matches.value_of("store").unwrap();
 
     // Read the committee and node's keypair from file.
-    let keypair = KeyPair::import(key_file).context("Failed to load the node's keypair")?;
-    let name = keypair.name;
-    let committee =
-        Committee::import(committee_file).context("Failed to load the committee information")?;
+    let ed_keypair = KeyPair::import(ed_key_file).context("Failed to load the node's keypair")?;
+
+    let comm = Comm::import(committee_file).context("Failed to load the committee information")?;
 
     // Load default parameters if none are specified.
     let parameters = match parameters_file {
@@ -92,8 +92,10 @@ async fn run(matches: &ArgMatches<'_>) -> Result<()> {
         None => Parameters::default(),
     };
 
+    let committee = Committee::new(comm.authorities, parameters.f_num);
+
     // The `SignatureService` provides signatures on input digests.
-    let signature_service = SignatureService::new(keypair.secret);
+    // let signature_service = SignatureService::new(keypair.secret);
 
     // Make the data store.
     let store = Store::new(store_path).context("Failed to create a store")?;
@@ -122,10 +124,9 @@ async fn run(matches: &ArgMatches<'_>) -> Result<()> {
             let(tx_request_header_sync, rx_request_header_sync) = channel(CHANNEL_CAPACITY);
 
             Primary::spawn(
-                name,
+                ed_keypair.name,
                 committee.clone(),
                 parameters.clone(),
-                signature_service.clone(),
                 store.clone(),
                 /* tx_consensus */ tx_new_certificates,
                 tx_committer,
@@ -155,15 +156,15 @@ async fn run(matches: &ArgMatches<'_>) -> Result<()> {
             );*/
         }
 
-        // Spawn a single worker.
-        ("worker", Some(sub_matches)) => {
-            let id = sub_matches
-                .value_of("id")
-                .unwrap()
-                .parse::<WorkerId>()
-                .context("The worker id must be a positive integer")?;
-            Worker::spawn(keypair.name, id, committee, parameters, store);
-        }
+        // // Spawn a single worker.
+        // ("worker", Some(sub_matches)) => {
+        //     let id = sub_matches
+        //         .value_of("id")
+        //         .unwrap()
+        //         .parse::<WorkerId>()
+        //         .context("The worker id must be a positive integer")?;
+        //     Worker::spawn(keypair.name, id, committee, parameters, store);
+        // }
         _ => unreachable!(),
     }
 

@@ -33,6 +33,19 @@ class PathMaker:
         return f'.node-{i}.json'
 
     @staticmethod
+    def ed_key_file(i):
+        return PathMaker.key_file(i)
+
+    @staticmethod
+    def bls_file_default_path():
+        return f'.node-bls-x.json'
+
+    @staticmethod
+    def bls_key_file(i):
+        assert isinstance(i, int) and i >= 0
+        return f'.node-bls-{i}.json'
+    
+    @staticmethod
     def db_path(i, j=None):
         assert isinstance(i, int) and i >= 0
         assert (isinstance(j, int) and i >= 0) or j is None

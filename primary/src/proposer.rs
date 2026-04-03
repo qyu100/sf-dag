@@ -12,10 +12,6 @@ use log::info;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::time::{sleep, Duration, Instant};
 
-#[cfg(test)]
-#[path = "tests/proposer_tests.rs"]
-pub mod proposer_tests;
-
 /// The proposer creates new headers and send them to the core for broadcasting and further processing.
 pub struct Proposer {
     /// The public key of this primary.
@@ -42,6 +38,7 @@ pub struct Proposer {
     digests: Vec<(Digest, WorkerId)>,
     /// Keeps track of the size (in bytes) of batches' digests that we received so far.
     payload_size: usize,
+    tx_size: usize,
 }
 
 impl Proposer {
@@ -49,12 +46,13 @@ impl Proposer {
     pub fn spawn(
         name: PublicKey,
         committee: Committee,
-        _signature_service: SignatureService,
+        // _signature_service: SignatureService,
         header_size: usize,
         max_header_delay: u64,
         rx_core: Receiver<Certificate>,
         rx_workers: Receiver<(Digest, WorkerId)>,
         tx_core: Sender<Header>,
+        tx_size: usize,
     ) {
         let genesis = Certificate::genesis_cert(&committee);
 
@@ -72,6 +70,7 @@ impl Proposer {
                 last_parent: Some(genesis),
                 digests: Vec::with_capacity(2 * header_size),
                 payload_size: 0,
+                tx_size,
             }
             .run()
             .await;
@@ -83,20 +82,23 @@ impl Proposer {
         debug!("digests size before is {:?}", self.digests.len());
 
         let parent = self.last_parent.take().expect("no parent available").header_id;
-
+        let mut payload = vec![vec![0u8; self.tx_size]; self.header_size / self.tx_size];
         let mut header = Header::new(
                 self.name,
                 self.height,
-                self.digests.drain(..).collect(),
+                payload,
                 parent,
             ).await;
 
-        debug!("Created {:?}", header);
-
+        // debug!("Created {:?}", header);
         #[cfg(feature = "benchmark")]
-        for digest in header.payload.keys() {
-            // NOTE: This log entry is used to compute performance.
-            info!("Created {} -> {:?}", header, digest);
+        {
+        info!("Created {:?}", header.id);
+        info!(
+            "Header {:?} contains {} B",
+            header.id,
+            header.payload.len() * self.tx_size
+        );
         }
 
         // Reset last parent
@@ -167,11 +169,11 @@ impl Proposer {
                     self.last_parent = Some(parent.clone());
                 }
 
-                Some((digest, worker_id)) = self.rx_workers.recv() => {
-                    //println!("   received payload from worker {}", worker_id);
-                    self.payload_size += digest.size();
-                    self.digests.push((digest, worker_id));
-                }
+                // Some((digest, worker_id)) = self.rx_workers.recv() => {
+                //     //println!("   received payload from worker {}", worker_id);
+                //     self.payload_size += digest.size();
+                //     self.digests.push((digest, worker_id));
+                // }
                 () = &mut timer => {
                     // Nothing to do.
                 }

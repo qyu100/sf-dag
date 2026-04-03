@@ -58,6 +58,7 @@ pub fn committee() -> Committee {
                 )
             })
             .collect(),
+        f_num: 0,
     }
 }
 
