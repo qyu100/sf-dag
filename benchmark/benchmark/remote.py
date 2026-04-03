@@ -12,7 +12,7 @@ import subprocess
 from subprocess import SubprocessError
 from os import chmod
 import traceback
-from benchmark.config import Committee, EdKey,BlsKey, NodeParameters, BenchParameters, ConfigError
+from benchmark.config import Committee, EdKey, NodeParameters, BenchParameters, ConfigError
 from benchmark.utils import BenchError, Print, PathMaker, progress_bar
 from benchmark.commands import CommandMaker
 from benchmark.logs import LogParser, ParseError
@@ -286,7 +286,6 @@ class Bench:
             # Copy the Deploy Key to /home/ubuntu
             await sftp.put(PathMaker.committee_file(), '.', preserve=True)
             # Copy the installation and update scripts to the same location
-            await sftp.put(PathMaker.bls_key_file(id), '.', preserve=True)
             await sftp.put(PathMaker.ed_key_file(id), '.', preserve=True)
             await sftp.put(PathMaker.parameters_file(), '.', preserve=True)
 
@@ -306,9 +305,6 @@ class Bench:
         cmd = CommandMaker.alias_binaries(PathMaker.binary_path())
         subprocess.run([cmd], shell=True)
 
-        cmd = CommandMaker.generate_key(len(hosts), 2, PathMaker.bls_file_default_path()).split()
-        subprocess.run(cmd, check=True)
-
         # Generate configuration files.
         keys = []
         key_files = [PathMaker.ed_key_file(i) for i in range(len(hosts))]
@@ -317,14 +313,7 @@ class Bench:
             subprocess.run(cmd, check=True)
             keys += [EdKey.from_file(filename)]
 
-        bls_keys = []
-        key_files = [PathMaker.bls_key_file(i) for i in range(len(hosts))]
-        for filename in key_files:
-            bls_keys += [BlsKey.from_file(filename)]
-
-            
         names = [x.name for x in keys]
-        bls_pubkeys_g2 = [_.nameg2 for _ in bls_keys]
 
         if bench_parameters.collocate:
             workers = bench_parameters.workers
@@ -335,7 +324,7 @@ class Bench:
             addresses = OrderedDict(
                 (x, y) for x, y in zip(names, hosts)
             )
-        committee = Committee.from_address_list(addresses, self.settings.base_port, bench_parameters.faults, bls_pubkeys_g2)
+        committee = Committee.from_address_list(addresses, self.settings.base_port, bench_parameters.faults)
         committee.print(PathMaker.committee_file())
         node_parameters.print(PathMaker.parameters_file())
         return (committee, names)
@@ -371,7 +360,6 @@ class Bench:
             host = Committee.ip(address)
             cmd = CommandMaker.run_primary(
                 PathMaker.ed_key_file(i),
-                PathMaker.bls_key_file(i),
                 PathMaker.committee_file(),
                 PathMaker.db_path(i),
                 PathMaker.parameters_file(),
@@ -392,7 +380,6 @@ class Bench:
                 host = Committee.ip(address)
                 cmd = CommandMaker.run_worker(
                     PathMaker.ed_key_file(i),
-                    PathMaker.bls_key_file(i),
                     PathMaker.committee_file(),
                     PathMaker.db_path(i, id),
                     PathMaker.parameters_file(),

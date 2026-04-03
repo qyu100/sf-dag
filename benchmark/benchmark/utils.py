@@ -12,6 +12,14 @@ class BenchError(Exception):
 
 class PathMaker:
     @staticmethod
+    def bootstrap_script_path():
+        return join('benchmark', 'bootstrap_node.sh')
+
+    @staticmethod
+    def update_script_path():
+        return join('benchmark', 'update_node.sh')
+    
+    @staticmethod
     def binary_path():
         return join('..', 'target', 'release')
 

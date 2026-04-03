@@ -458,7 +458,11 @@ impl Certificate {
         committee
             .authorities
             .keys()
-            .map(|_| Self { ..Self::default() })
+            .map(|pk| Self {
+                header_id: Digest::default(),
+                height: 0,
+                origin: *pk,
+            })
             .collect()
     }
 
@@ -473,7 +477,16 @@ impl Certificate {
         committee
             .authorities
             .keys()
-            .map(|pk| (*pk, Self::default()))
+            .map(|pk| {
+                (
+                    *pk,
+                    Self {
+                        header_id: Digest::default(),
+                        height: 0,
+                        origin: *pk,
+                    },
+                )
+            })
             .collect()
     }
 
