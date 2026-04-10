@@ -66,7 +66,10 @@ impl Proposer {
                 rx_core,
                 rx_workers,
                 tx_core,
-                height: 0,
+                // Height 0 is reserved for genesis certificates/proposals.
+                // Start real headers at height 1 so the committer's genesis DAG
+                // entry is never overwritten by a real certificate at height 0.
+                height: 1,
                 last_parent: Some(genesis),
                 digests: Vec::with_capacity(2 * header_size),
                 payload_size: 0,
