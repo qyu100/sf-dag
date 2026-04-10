@@ -1,6 +1,7 @@
 # Copyright(C) Facebook, Inc. and its affiliates.
 from json import dump, load
 from collections import OrderedDict
+from copy import deepcopy
 
 
 class ConfigError(Exception):
@@ -95,6 +96,30 @@ class Committee:
                 'workers': workers_addr
             }
 
+    @staticmethod
+    def address_list_to_json(addresses, base_port, faults=0):
+        addresses = deepcopy(addresses)
+        committee = Committee(addresses, base_port)
+        good_nodes = committee.size() - faults
+        for i, authority in enumerate(committee.json['authorities'].values()):
+            authority['is_honest'] = i < good_nodes
+        return committee.json
+
+    @classmethod
+    def from_address_list(cls, addresses, base_port, faults=0):
+        committee = cls.__new__(cls)
+        committee.json = cls.address_list_to_json(addresses, base_port, faults)
+        return committee
+
+    @classmethod
+    def from_file(cls, filename):
+        assert isinstance(filename, str)
+        with open(filename, 'r') as f:
+            data = load(f)
+        committee = cls.__new__(cls)
+        committee.json = data
+        return committee
+
     def primary_addresses(self, faults=0):
         ''' Returns an ordered list of primaries' addresses. '''
         assert faults < self.size()
@@ -163,6 +188,10 @@ class Committee:
         assert isinstance(address, str)
         return address.split(':')[0]
 
+    def faults(self):
+        honest = sum(1 for authority in self.json['authorities'].values() if authority.get('is_honest', True))
+        return self.size() - honest
+
 
 class LocalCommittee(Committee):
     def __init__(self, names, port, workers):
@@ -186,6 +215,7 @@ class NodeParameters:
             inputs += [json['sync_retry_nodes']]
             inputs += [json['batch_size']]
             inputs += [json['max_batch_delay']]
+            inputs += [json['tx_size']]
         except KeyError as e:
             raise ConfigError(f'Malformed parameters: missing key {e}')
 
@@ -216,6 +246,12 @@ class BenchParameters:
             if not rate:
                 raise ConfigError('Missing input rate')
             self.rate = [int(x) for x in rate]
+
+            burst = json.get('burst', [1])
+            burst = burst if isinstance(burst, list) else [burst]
+            if not burst:
+                raise ConfigError('Missing burst setting')
+            self.burst = [int(x) for x in burst]
 
             self.workers = int(json['workers'])
 

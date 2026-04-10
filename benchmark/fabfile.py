@@ -30,7 +30,7 @@ def local(ctx, debug=True):
     }
     node_params = {
         'timeout_delay': 5_000,  # ms
-        'header_size': 512,  # bytes
+        'header_size': 512_00,  # bytes
         'max_header_delay': 5_000,  # ms
         'gc_depth': 50,  # rounds
         'sync_retry_delay': 5_000,  # ms
@@ -44,6 +44,7 @@ def local(ctx, debug=True):
         'fast_path_timeout': 5_000,
         'use_ride_share': False,
         'car_timeout': 5_000,
+        'tx_size': bench_params['tx_size'],
 
         'simulate_asynchrony': False,
         'asynchrony_start': 15_000, #ms
@@ -111,7 +112,7 @@ def install(ctx):
 
 
 @task
-def remote(ctx, debug=False):
+def remote(ctx, debug=False, consensus_only=True):
     ''' Run benchmarks on AWS '''
     bench_params = {
         'faults': 0,
@@ -145,13 +146,19 @@ def remote(ctx, debug=False):
         'fast_path_timeout': 5_000,
         'use_ride_share': False,
         'car_timeout': 5_000,
+        'tx_size': bench_params['tx_size'],
 
         'simulate_asynchrony': False,
         'asynchrony_start': 15_000, #ms
         'asynchrony_duration': 3_000, #ms
     }
     try:
-        Bench(ctx).run(bench_params, node_params, debug)
+        Bench(ctx).run(
+            bench_params,
+            node_params,
+            debug,
+            consensus_only=consensus_only,
+        )
     except BenchError as e:
         Print.error(e)
 

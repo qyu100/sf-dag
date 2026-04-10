@@ -1,5 +1,5 @@
 #![allow(dead_code)]
-use std::collections::{HashMap, BTreeMap};
+use std::collections::HashMap;
 
 // Copyright(C) Facebook, Inc. and its affiliates.
 use crate::messages::{Certificate, Header, ConsensusMessage};
@@ -7,6 +7,7 @@ use crate::primary::Height;
 use config::{Committee, WorkerId};
 use crypto::{Digest, PublicKey, SignatureService, Hash};
 use log::debug;
+use log::warn;
 #[cfg(feature = "benchmark")]
 use log::info;
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -48,6 +49,7 @@ pub struct Proposer {
     digests: Vec<(Digest, WorkerId)>,
     /// Keeps track of the size (in bytes) of batches' digests that we received so far.
     payload_size: usize,
+    tx_size: usize,
 
     num_active_instances: usize, 
     use_special_rule: bool, 
@@ -66,6 +68,7 @@ impl Proposer {
         rx_workers: Receiver<(Digest, WorkerId)>,
         rx_instance: Receiver<ConsensusMessage>,
         tx_core: Sender<Header>,
+        tx_size: usize,
     ) {
         /*let genesis: Vec<Digest> = Certificate::genesis(&committee)
             .iter()
@@ -91,6 +94,7 @@ impl Proposer {
                 consensus_instances: HashMap::new(),
                 digests: Vec::with_capacity(2 * header_size),
                 payload_size: 0,
+                tx_size,
                 num_active_instances: 0,
                 use_special_rule: false,
                 is_special: false,
@@ -103,34 +107,12 @@ impl Proposer {
     async fn make_header(&mut self) {
         // Make a new header.
         debug!("digests size before is {:?}", self.digests.len());
-        /*let mut header: Header;
-        if self.digests.len() > 0 {
-            header = Header::new(
-                self.name,
-                self.height,
-                self.digests.drain(..1).collect(),
-                self.last_parent.clone().unwrap(),
-                &mut self.signature_service,
-                self.consensus_instances.clone(),
-                self.num_active_instances,
-            ).await;
-        } else {
-            header = Header::new(
-                self.name,
-                self.height,
-                BTreeMap::new(),
-                self.last_parent.clone().unwrap(),
-                &mut self.signature_service,
-                self.consensus_instances.clone(),
-                self.num_active_instances,
-            ).await;
 
-        }*/
-
+        let payload = vec![vec![0u8; self.tx_size]; self.header_size / self.tx_size];
         let mut header = Header::new(
                 self.name,
                 self.height,
-                self.digests.drain(..).collect(),
+                payload,
                 self.last_parent.clone().unwrap(),
                 &mut self.signature_service,
                 self.consensus_instances.clone(),
@@ -147,18 +129,19 @@ impl Proposer {
 
         debug!("Created {:?}", header);
 
-        for (digest, _) in &header.consensus_messages {
-           debug!("Header has {:?}", digest);
-        }
-
         #[cfg(feature = "benchmark")]
-        for digest in header.payload.keys() {
-            // NOTE: This log entry is used to compute performance.
-            info!("Created {} -> {:?}", header, digest);
+        {
+            info!("Created {:?}", header.id);
+            info!(
+                "Header {:?} contains {} B",
+                header.id,
+                header.payload.len() * self.tx_size
+            );
         }
 
         // Reset last parent
         self.last_parent = None;
+        self.is_special = false;
         // Reset proposed consensus instances
         self.consensus_instances.clear();
         self.num_active_instances = 0;
@@ -190,12 +173,11 @@ impl Proposer {
             // in other words core should not be disseminating headers
             //let enough_parents = !self.last_parent.is_empty();
             let enough_parent = self.last_parent.is_some();
-            let enough_digests = self.payload_size >= self.header_size;
             let timer_expired = timer.is_elapsed();
 
-            if (timer_expired || enough_digests) && (enough_parent || self.is_special) {
+            if enough_parent || self.is_special {
                 if timer_expired {
-                    debug!("Timer expired for height {}", self.height);
+                    warn!("Timer expired for height {}", self.height);
                 }
 
                 debug!("New car proposed after {:?} ms", current_time.elapsed().as_millis());
@@ -254,9 +236,7 @@ impl Proposer {
                 }
 
                 Some((digest, worker_id)) = self.rx_workers.recv() => {
-                    //println!("   received payload from worker {}", worker_id);
-                    self.payload_size += digest.size();
-                    self.digests.push((digest, worker_id));
+                    debug!("Ignoring worker batch {:?} from worker {}", digest, worker_id);
                 }
                 () = &mut timer => {
                     // Nothing to do.

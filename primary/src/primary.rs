@@ -10,7 +10,7 @@ use crate::garbage_collector::GarbageCollector;
 use crate::header_waiter::HeaderWaiter;
 use crate::helper::Helper;
 use crate::leader::LeaderElector;
-use crate::messages::{Certificate, Header, Vote, Timeout, TC, Proposal, ConsensusMessage, ConsensusVote, ConsensusRequest};
+use crate::messages::{Certificate, Header, HeaderContext, Vote, Timeout, TC, Proposal, ConsensusMessage, ConsensusVote, ConsensusRequest};
 use crate::payload_receiver::PayloadReceiver;
 use crate::proposer::Proposer;
 use crate::synchronizer::Synchronizer;
@@ -52,6 +52,11 @@ pub enum PrimaryMessage {
     CertificatesRequest(Vec<Digest>, /* requestor */ PublicKey),
     HeadersRequest(Vec<Digest>, /* requestor */ PublicKey),
     ProposalHeadersRequest(Proposal, Height, /* requestor */ PublicKey),
+}
+
+#[derive(Serialize)]
+pub enum PrimaryMessageRef<'a> {
+    Header(&'a Header, bool),
 }
 
 /// The messages sent by the primary to its workers.
@@ -102,7 +107,7 @@ impl Primary {
         let (tx_cert_requests, rx_cert_requests) = channel(CHANNEL_CAPACITY);
         let (tx_header_requests, rx_header_requests) = channel(CHANNEL_CAPACITY);
         let (tx_instance, rx_instance) = channel(CHANNEL_CAPACITY);
-        let (tx_header_waiter_instances, rx_header_waiter_instances) = channel(CHANNEL_CAPACITY);
+        let (tx_header_waiter_instances, rx_header_waiter_instances) = channel::<(ConsensusMessage, HeaderContext)>(CHANNEL_CAPACITY);
         let (tx_commit, rx_commit) = channel(CHANNEL_CAPACITY);
         let (_tx_mempool, rx_mempool) = channel(CHANNEL_CAPACITY);
 
@@ -259,6 +264,7 @@ impl Primary {
             /* rx_workers */ rx_our_digests,
             /* rx_ticket */ rx_instance,
             /* tx_core */ tx_headers,
+            parameters.tx_size,
         );
 
         // The `Helper` is dedicated to reply to certificates requests from other primaries.

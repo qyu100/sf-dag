@@ -2,7 +2,7 @@
 #![allow(unused_variables)]
 // Copyright(C) Facebook, Inc. and its affiliates.
 use crate::error::{DagError, DagResult, ConsensusError};
-use crate::messages::{Certificate, Header, Vote, QC, Timeout, TC};
+use crate::messages::{Certificate, Vote, QC, Timeout, TC};
 use config::{Committee, Stake};
 use crypto::{PublicKey, Signature, Digest};
 use std::collections::HashSet;
@@ -34,7 +34,6 @@ impl VotesAggregator {
         &mut self,
         vote: Vote,
         committee: &Committee,
-        header: &Header,
     ) -> DagResult<(bool, bool)> {
         if self.complete {
             return Ok((true, false));

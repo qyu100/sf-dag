@@ -149,15 +149,15 @@ impl Committer {
 
                                 // Commit all of the headers
                                 for header in headers {
-                                    info!("Committed {}", header);
+                                    // info!("Committed {}", header);
                                     #[cfg(feature = "benchmark")]
-                                    for digest in header.payload.keys() {
-                                        // NOTE: This log entry is used to compute performance.
-                                        info!("Committed {} -> {:?}", header, digest);
+                                    {
+                                        info!("Committed {:?} ", header.id);
+                                        // info!("Header {:?} contains {} B", header.id, header.payload.iter().map(|tx| tx.len()).sum::<usize>());
                                     }
                                     debug!("Finished Commit");
                                     // Output the block to the top-level application.
-                                    if let Err(e) = self.tx_output.send(header.clone()).await {
+                                    if let Err(e) = self.tx_output.send(header).await {
                                         debug!("Failed to send block through the output channel: {}", e);
                                     }
                                     debug!("Finish upcall");

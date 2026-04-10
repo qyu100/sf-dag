@@ -6,9 +6,9 @@ use crate::aggregators::{QCMaker, TCMaker, VotesAggregator};
 use crate::error::{DagError, DagResult};
 use crate::leader::LeaderElector;
 use crate::messages::{
-    Certificate, ConsensusMessage, Header, Proposal, Timeout, Vote, TC, ConsensusType, QC, verify_confirm, verify_commit, CommitQC, transform_commitQC, ConsensusRequest, ConsensusVote,
+    Certificate, ConsensusMessage, Header, HeaderContext, Proposal, Timeout, Vote, TC, ConsensusType, QC, verify_confirm, verify_commit, CommitQC, transform_commitQC, ConsensusRequest, ConsensusVote,
 };
-use crate::primary::{Height, PrimaryMessage, Slot, View};
+use crate::primary::{Height, PrimaryMessage, PrimaryMessageRef, Slot, View};
 use crate::synchronizer::{Synchronizer, self};
 use crate::timer::{Timer, CarTimer, FastTimer};
 use async_recursion::async_recursion;
@@ -60,7 +60,7 @@ pub struct Core {
     /// Receives loopback headers from the `HeaderWaiter`.
     rx_header_waiter: Receiver<Header>,
     /// Receives loopback instances from the 'HeaderWaiter'
-    rx_header_waiter_instances: Receiver<(ConsensusMessage, Header)>,
+    rx_header_waiter_instances: Receiver<(ConsensusMessage, HeaderContext)>,
     /// Receives our newly created headers from the `Proposer`.
     rx_proposer: Receiver<Header>,
     // Output all certificates to the consensus Dag view
@@ -77,7 +77,7 @@ pub struct Core {
     /// The authors of the last voted headers. (Ensures only voting for one header per round)
     last_voted: HashMap<Height, HashSet<PublicKey>>,
     /// The last header we proposed (for which we are waiting votes).
-    current_header: Header,
+    current_header: CurrentHeader,
     // Whether we have already sent certificate to proposer
     sent_cert_to_proposer: bool,
 
@@ -141,6 +141,25 @@ pub struct Core {
     async_delayed_prepare: Option<ConsensusMessage>,
 }
 
+#[derive(Clone, Debug, Default)]
+struct CurrentHeader {
+    id: Digest,
+    height: Height,
+    num_active_instances: usize,
+    consensus_messages: HashMap<Digest, ConsensusMessage>,
+}
+
+impl CurrentHeader {
+    fn from_header(header: &Header) -> Self {
+        Self {
+            id: header.id.clone(),
+            height: header.height,
+            num_active_instances: header.num_active_instances,
+            consensus_messages: header.consensus_messages.clone(),
+        }
+    }
+}
+
 impl Core {
     #[allow(clippy::too_many_arguments)]
     pub fn spawn(
@@ -153,7 +172,7 @@ impl Core {
         gc_depth: Height,
         rx_primaries: Receiver<PrimaryMessage>,
         rx_header_waiter: Receiver<Header>,
-        rx_header_waiter_instances: Receiver<(ConsensusMessage, Header)>,
+        rx_header_waiter_instances: Receiver<(ConsensusMessage, HeaderContext)>,
         rx_proposer: Receiver<Header>,
         tx_committer: Sender<ConsensusMessage>,
         tx_proposer: Sender<Certificate>,
@@ -196,7 +215,7 @@ impl Core {
                 current_qcs_formed: 0,
                 sent_cert_to_proposer: false,
                 last_voted: HashMap::with_capacity(2 * gc_depth as usize),
-                current_header: Header::default(),
+                current_header: CurrentHeader::default(),
                 votes_aggregator: VotesAggregator::new(),
                 network: ReliableSender::new(),
                 cancel_handlers: HashMap::with_capacity(2 * gc_depth as usize),
@@ -259,14 +278,6 @@ impl Core {
         //GC all obsolete qc_makers //WARNING: FIXME: Can only do this here if Votes are piggybacked on cars (i.e. not external and never delayed)
         //self.qc_makers.clear();
 
-        // Update the current header we are collecting votes for
-        self.current_header = header.clone();
-        // Indicate that we haven't sent a cert yet for this header
-        self.sent_cert_to_proposer = false;
-
-        // Reset the votes aggregator.
-        self.votes_aggregator = VotesAggregator::new();
-
         match self.use_optimistic_tips { //Add early here, so that enough coverage will include leader tip.
             true => self.current_proposal_tips.insert(header.origin(), Proposal {header_digest: header.digest(), height: header.height(),}),
             false => self.current_certified_tips.insert(header.origin(), Proposal {header_digest: header.digest(), height: header.height(),}),
@@ -288,6 +299,14 @@ impl Core {
             //self.consensus_instances.insert(dig.clone(), consensus.clone());
         }
 
+        // Update the current header we are collecting votes for.
+        self.current_header = CurrentHeader::from_header(&header);
+        // Indicate that we haven't sent a cert yet for this header
+        self.sent_cert_to_proposer = false;
+
+        // Reset the votes aggregator.
+        self.votes_aggregator = VotesAggregator::new();
+
         // Broadcast the new header in a reliable manner.
         let addresses = self
             .committee
@@ -295,7 +314,7 @@ impl Core {
             .iter()
             .map(|(_, x)| x.primary_to_primary)
             .collect();
-        let bytes = bincode::serialize(&PrimaryMessage::Header(header.clone(), false))
+        let bytes = bincode::serialize(&PrimaryMessageRef::Header(&header, false))
             .expect("Failed to serialize our own header");
         let handlers = self.network.broadcast(addresses, Bytes::from(bytes)).await;
         self.cancel_handlers
@@ -345,20 +364,22 @@ impl Core {
         }
 
         // By FIFO should have parent of this header (and recursively all ancestors), reschedule for processing if we don't
-        if self
-            .synchronizer
-            .get_parent_header(&header)
-            .await?
-            .is_none()
-        {
+        let header = match self.synchronizer.sync_header_parent(header).await? {
+            Some(header) => header,
+            None => {
             //println!("The parent is missing");
             debug!("The parent is missing, suspending processing");
             return Ok(());
-        }
+            }
+        };
 
 
         
 
+
+        // Store the header once its parent is available so loopback paths can reload it later.
+        let bytes = bincode::serialize(&header).expect("Failed to serialize header");
+        self.store.write(header.digest().to_vec(), bytes).await;
 
         // Check whether we can seamlessly vote for all consensus messages, if not reschedule
         if !self.is_consensus_ready(&header).await {
@@ -373,10 +394,6 @@ impl Core {
 
         //println!("storing the header");
         debug!("storing the header");
-
-        // Store the header since we have the parents (recursively).
-        let bytes = bincode::serialize(&header).expect("Failed to serialize header");
-        self.store.write(header.digest().to_vec(), bytes).await;
 
         // If the header received is at a greater height then add it to our local tips and proposals
         if self.use_optimistic_tips && header.height() > self.current_proposal_tips.get(&header.origin()).unwrap().height {
@@ -414,7 +431,7 @@ impl Core {
         debug!("after tip height check");
 
         // Process the parent certificate
-        self.process_certificate(header.clone().parent_cert).await?;
+        self.process_certificate(header.parent_cert.clone()).await?;
 
         //If Header has no consensus messages (i.e. is pure car) then only 2f+1 replicas need to vote and reply.
         if header.consensus_messages.is_empty() && !self.check_cast_vote(&header) {
@@ -708,7 +725,7 @@ impl Core {
         // Add the vote to the votes aggregator for the actual header
         //Note: car_cert_ready is true if QC exists (f+1 votes); first = true when QC is formed the first time (this starts timer only once)
         //=> aggregator will ignore new votes after (in particular it will ignore the fake loopback vote)
-        let (car_cert_ready, first) = self.votes_aggregator.append(vote, &self.committee, &self.current_header)?;
+        let (car_cert_ready, first) = self.votes_aggregator.append(vote, &self.committee)?;
         
         //Consider consensus "ready" if we timed out (i.e. just move on without waiting for consensus)
         let consensus_ready = consensus_ready || car_timeout;
@@ -935,7 +952,7 @@ impl Core {
         let handlers = self.network.broadcast(addresses, Bytes::from(message)).await;
 
         self.cancel_handlers
-            .entry(self.current_header.height())
+            .entry(self.current_header.height)
             .or_insert_with(Vec::new)
             .extend(handlers);
 
@@ -1012,7 +1029,7 @@ impl Core {
                             .expect("Failed to serialize prepare message");
                         let handler = self.network.send(address, Bytes::from(bytes)).await;
                         self.cancel_handlers
-                            .entry(self.current_header.height())
+                            .entry(self.current_header.height)
                             .or_insert_with(Vec::new)
                             .push(handler);
                         //println!("forwarding to the leader");
@@ -1204,7 +1221,13 @@ impl Core {
                     // TODO: For testing with faults make the certificate of tip syncing happen
                     // asynchronously, change synchronizer so that it write to the store without
                     // the history
-                    is_ready = is_ready && !self.synchronizer.get_proposals(consensus_message, header).await.unwrap().is_empty();
+                    is_ready = is_ready
+                        && !self
+                            .synchronizer
+                            .get_proposals(consensus_message, Some(header.into()))
+                            .await
+                            .unwrap()
+                            .is_empty();
                 },
                 ConsensusMessage::Commit { slot: _, view: _, qc: _, proposals: _ } => {
                     //TODO: If we'd like to process it earlier
@@ -1250,7 +1273,9 @@ impl Core {
                         //println!("processing confirm message");
                         debug!("processing confirm in slot {:?} with proposal {:?}", slot, proposals);
                         // Start syncing on the proposals if we haven't already
-                        self.synchronizer.get_proposals(consensus_message, &header).await?;
+                        self.synchronizer
+                            .get_proposals(consensus_message, Some(HeaderContext::from(header)))
+                            .await?;
                         self.process_confirm_message(consensus_message, consensus_votes.as_mut()).await;
                     },
                     ConsensusMessage::Commit {
@@ -1261,7 +1286,7 @@ impl Core {
                     } => {
                         //println!("processing commit message");
                         debug!("processing commit in slot {:?}", slot);
-                        self.process_commit_message(consensus_message.clone(), &header).await?; //FIXME: Does this need to be a copy?
+                        self.process_commit_message(consensus_message.clone()).await?; //FIXME: Does this need to be a copy?
                     }
                 }
             }
@@ -1324,18 +1349,25 @@ impl Core {
     async fn process_consensus_message(&mut self, consensus_message: ConsensusMessage, author: PublicKey) -> DagResult<()> {
 
         let mut consensus_votes: Vec<(Slot, Digest, Signature)> = Vec::new();
+        let context = HeaderContext {
+            id: Digest::default(),
+            author,
+            height: 0,
+        };
        
         debug!("processing consensus msg");
-       
-        
-        let mut header = Header::default();
-        header.author = author;
 
         match &consensus_message {
             ConsensusMessage::Prepare { slot, view: _, tc: _, qc_ticket: _, proposals,} 
             => {
                 debug!("processing prepare in slot {:?} with proposal {:?}", slot, proposals);
-                if self.synchronizer.get_proposals(&consensus_message, &header).await.unwrap().is_empty() {
+                if self
+                    .synchronizer
+                    .get_proposals(&consensus_message, Some(context.clone()))
+                    .await
+                    .unwrap()
+                    .is_empty()
+                {
                     debug!("proposals of prepare in slot {:?} with proposal {:?} are not ready", slot, proposals);
                     return Ok(());
                 }
@@ -1350,7 +1382,9 @@ impl Core {
                 //println!("processing confirm message");
                 debug!("processing confirm in slot {:?} with proposal {:?}", slot, proposals);
                 // Start syncing on the proposals if we haven't already
-                self.synchronizer.get_proposals(&consensus_message, &header).await?;
+                self.synchronizer
+                    .get_proposals(&consensus_message, Some(context.clone()))
+                    .await?;
                 self.process_confirm_message(&consensus_message, consensus_votes.as_mut()).await;
             },
             ConsensusMessage::Commit {
@@ -1361,7 +1395,7 @@ impl Core {
             } => {
                 //println!("processing commit message");
                 debug!("processing commit in slot {:?}", slot);
-                self.process_commit_message(consensus_message.clone(), &header).await?; //FIXME: Does this need to be a copy?
+                self.process_commit_message(consensus_message.clone()).await?; //FIXME: Does this need to be a copy?
             }
         }
         
@@ -1515,7 +1549,7 @@ impl Core {
     }
 
     #[async_recursion]
-    async fn process_commit_message(&mut self, commit_message: ConsensusMessage, header: &Header) -> DagResult<()> {
+    async fn process_commit_message(&mut self, commit_message: ConsensusMessage) -> DagResult<()> {
        debug!("Called process commit");
         match &commit_message {
             ConsensusMessage::Commit {
@@ -1565,7 +1599,13 @@ impl Core {
 
                 // Only send to committer if proposals and all ancestors are stored locally,
                 // otherwise sync will be triggered, and this commit message will be reprocessed
-                if !self.synchronizer.get_proposals(&commit_message, &header).await.unwrap().is_empty() {
+                if !self
+                    .synchronizer
+                    .get_proposals(&commit_message, None)
+                    .await
+                    .unwrap()
+                    .is_empty()
+                {
                     //println!("Sent to committer");
                     debug!("sending to committer");
                     self.tx_committer
@@ -1622,13 +1662,18 @@ impl Core {
 
 
     #[async_recursion]
-    async fn process_loopback(&mut self, consensus_message: ConsensusMessage, header: Header) -> DagResult<()> {
+    async fn process_loopback(&mut self, consensus_message: ConsensusMessage, header: HeaderContext) -> DagResult<()> {
         //println!("reprocessing a header/commit message");
         debug!("Can reprocess a header/commit message");
         match &consensus_message {
             ConsensusMessage::Prepare { slot, view, tc: _, qc_ticket: _, proposals: _ } => {
                 if self.use_ride_share {
                     // Now that proposals are ready we can reprocess the header
+                    let header = self
+                        .synchronizer
+                        .get_header(header.id)
+                        .await?
+                        .expect("loopback header should be in store");
                     self.process_header(header, false).await?;
                 }
                 else{
@@ -1665,7 +1710,7 @@ impl Core {
                 // Process any forwarded commit messages
                 // NOTE: Used "dummy header" for second argument for now, header doesn't matter since proposal syncing
                 // does not block processing the header, only prepare messages do
-                self.process_commit_message(consensus_message, &self.current_header.clone());
+                self.process_commit_message(consensus_message).await?;
             },
             _ => {}
         }

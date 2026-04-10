@@ -423,7 +423,7 @@ impl fmt::Display for ConsensusMessage {
 pub struct Header {
     pub author: PublicKey,
     pub height: Height,
-    pub payload: BTreeMap<Digest, WorkerId>,
+    pub payload: Vec<Transaction>,
     pub parent_cert: Certificate,
     pub id: Digest,
     pub signature: Signature,
@@ -434,13 +434,30 @@ pub struct Header {
     pub special: bool, //Trying out special car
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct HeaderContext {
+    pub id: Digest,
+    pub author: PublicKey,
+    pub height: Height,
+}
+
+impl From<&Header> for HeaderContext {
+    fn from(header: &Header) -> Self {
+        Self {
+            id: header.id.clone(),
+            author: header.author,
+            height: header.height,
+        }
+    }
+}
+
 //NOTE: A header is special if "is_special = true". It contains a view, prev_view_round, and its parents may be just a single edge -- a Digest of its parent header (notably not of a Cert)
 // Special headers currently do not need to carry the QC/TC to justify their ticket -- we keep that at the consensu layer. The view and prev_view_round references the relevant QC/TC.
 impl Header {
     pub async fn new(
         author: PublicKey,
         height: Height,
-        payload: BTreeMap<Digest, WorkerId>,
+        payload: Vec<Transaction>,
         parent_cert: Certificate,
         signature_service: &mut SignatureService,
         consensus_instances: HashMap<Digest, ConsensusMessage>,
@@ -523,13 +540,6 @@ impl Header {
         let voting_rights = committee.stake(&self.author);
         ensure!(voting_rights > 0, DagError::UnknownAuthority(self.author));
 
-        // Ensure all worker ids are correct.
-        for worker_id in self.payload.values() {
-            committee
-                .worker(&self.author, &worker_id)
-                .map_err(|_| DagError::MalformedHeader(self.id.clone()))?;
-        }
-
         // Check the signature.
         self.signature
             .verify(&self.id, &self.author)
@@ -572,9 +582,8 @@ impl Hash for Header {
         let mut hasher = Sha512::new();
         hasher.update(&self.author);
         hasher.update(self.height.to_le_bytes());
-        for (x, y) in &self.payload {
-            hasher.update(x);
-            hasher.update(y.to_le_bytes());
+        for tx in &self.payload {
+            hasher.update(tx);
         }
         hasher.update(&self.parent_cert.header_digest); //Need to hash the chain parent(?)
         //hasher.update(&self.parent_cert);
@@ -608,7 +617,7 @@ impl fmt::Debug for Header {
             self.height,
             self.consensus_messages.len(),
             self.author,
-            self.payload.keys().map(|x| x.size()).sum::<usize>(),
+            self.payload.iter().map(|tx| tx.len()).sum::<usize>(),
         )
     }
 }
@@ -1587,3 +1596,4 @@ impl Hash for Committment {
         Digest(hasher.finalize().as_slice()[..32].try_into().unwrap())
     }
 }
+pub type Transaction = Vec<u8>;

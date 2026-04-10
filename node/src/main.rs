@@ -6,14 +6,13 @@ use anyhow::{Context, Result};
 use clap::{crate_name, crate_version, App, AppSettings, ArgMatches, SubCommand};
 use config::Export as _;
 use config::Import as _;
-use config::{Committee, KeyPair, Parameters, WorkerId};
+use config::{Committee, KeyPair, Parameters};
 use crypto::SignatureService;
 use env_logger::Env;
 use primary::Header;
 use primary::Primary;
 use store::Store;
 use tokio::sync::mpsc::{channel, Receiver};
-use worker::Worker;
 
 /// The default channel capacity.
 pub const CHANNEL_CAPACITY: usize = 1_000;
@@ -39,11 +38,6 @@ async fn main() -> Result<()> {
                 .args_from_usage("--parameters=[FILE] 'The file containing the node parameters'")
                 .args_from_usage("--store=<PATH> 'The path where to create the data store'")
                 .subcommand(SubCommand::with_name("primary").about("Run a single primary"))
-                .subcommand(
-                    SubCommand::with_name("worker")
-                        .about("Run a single worker")
-                        .args_from_usage("--id=<INT> 'The worker id'"),
-                )
                 .setting(AppSettings::SubcommandRequiredElseHelp),
         )
         .setting(AppSettings::SubcommandRequiredElseHelp)
@@ -110,8 +104,7 @@ async fn run(matches: &ArgMatches<'_>) -> Result<()> {
     // Channel for indicating commit and that new header should be proposed
     //let (tx_ticket, rx_ticket) = channel(CHANNEL_CAPACITY);
 
-    // Check whether to run a primary, a worker, or an entire authority.
-    //Note: Each node has at most one worker. Workers that don't include a primary (e.g. are not an entire authority) use PrimaryConnector to connect to a designated primary.
+    // Check whether to run a primary.
     match matches.subcommand() {
         // Spawn the primary and consensus core.
         ("primary", _) => {
@@ -155,15 +148,6 @@ async fn run(matches: &ArgMatches<'_>) -> Result<()> {
             );*/
         }
 
-        // Spawn a single worker.
-        ("worker", Some(sub_matches)) => {
-            let id = sub_matches
-                .value_of("id")
-                .unwrap()
-                .parse::<WorkerId>()
-                .context("The worker id must be a positive integer")?;
-            Worker::spawn(keypair.name, id, committee, parameters, store);
-        }
         _ => unreachable!(),
     }
 

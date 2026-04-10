@@ -98,6 +98,7 @@ pub struct Parameters {
     pub simulate_asynchrony: bool,
     pub asynchrony_start: u64,
     pub asynchrony_duration: u64,
+    pub tx_size: usize,
 }
 
 impl Default for Parameters {
@@ -125,6 +126,7 @@ impl Default for Parameters {
             simulate_asynchrony: false,
             asynchrony_start: 20_000, //20 second in
             asynchrony_duration: 10_000, //10 seconds
+            tx_size: 512,
         }
     }
 }
@@ -142,6 +144,7 @@ impl Parameters {
         info!("Sync retry nodes set to {} nodes", self.sync_retry_nodes);
         info!("Batch size set to {} B", self.batch_size);
         info!("Max batch delay set to {} ms", self.max_batch_delay);
+        info!("Transaction size set to {} B", self.tx_size);
 
         info!("Fast path enabled? {}. Fast timeout: {}", self.use_fast_path, self.fast_path_timeout);
         info!("Optimistic tips enabled? {}", self.use_optimistic_tips);

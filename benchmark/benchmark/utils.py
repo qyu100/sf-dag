@@ -12,6 +12,14 @@ class BenchError(Exception):
 
 class PathMaker:
     @staticmethod
+    def bootstrap_script_path():
+        return join('benchmark', 'bootstrap_node.sh')
+
+    @staticmethod
+    def update_script_path():
+        return join('benchmark', 'update_node.sh')
+
+    @staticmethod
     def binary_path():
         return join('..', 'target', 'release')
 
@@ -31,6 +39,10 @@ class PathMaker:
     def key_file(i):
         assert isinstance(i, int) and i >= 0
         return f'.node-{i}.json'
+
+    @staticmethod
+    def ed_key_file(i):
+        return PathMaker.key_file(i)
 
     @staticmethod
     def db_path(i, j=None):

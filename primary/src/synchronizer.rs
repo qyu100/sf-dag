@@ -5,7 +5,7 @@ use crate::{DagError, Height};
 // Copyright(C) Facebook, Inc. and its affiliates.
 use crate::error::DagResult;
 use crate::header_waiter::WaiterMessage;
-use crate::messages::{Certificate, ConsensusMessage, Header, Proposal};
+use crate::messages::{Certificate, ConsensusMessage, Header, HeaderContext, Proposal};
 use config::Committee;
 use crypto::Hash as _;
 use crypto::{Digest, PublicKey};
@@ -51,40 +51,8 @@ impl Synchronizer {
     /// synchronize with other nodes (through our workers), and re-schedule processing of the
     /// header for when we will have its complete payload.
     pub async fn missing_payload(&mut self, header: &Header, force_sync: bool) -> DagResult<bool> {
-        // We don't store the payload of our own workers.
-        if header.author == self.name {
-            return Ok(false);
-        }
-
-        let mut missing = HashMap::new();
-        for (digest, worker_id) in header.payload.iter() {
-            // Check whether we have the batch. If one of our worker has the batch, the primary stores the pair
-            // (digest, worker_id) in its own storage. It is important to verify that we received the batch
-            // from the correct worker id to prevent the following attack:
-            //      1. A Bad node sends a batch X to 2f good nodes through their worker #0.
-            //      2. The bad node proposes a malformed block containing the batch X and claiming it comes
-            //         from worker #1.
-            //      3. The 2f good nodes do not need to sync and thus don't notice that the header is malformed.
-            //         The bad node together with the 2f good nodes thus certify a block containing the batch X.
-            //      4. The last good node will never be able to sync as it will keep sending its sync requests
-            //         to workers #1 (rather than workers #0). Also, clients will never be able to retrieve batch
-            //         X as they will be querying worker #1.
-            let key = [digest.as_ref(), &worker_id.to_le_bytes()].concat();
-            if self.store.read(key).await?.is_none() {
-                debug!("Missing Digest: {}, Author: {}. Name: {}. Round {}", digest, header.author, self.name, header.height);
-                missing.insert(digest.clone(), *worker_id);
-            }
-        }
-
-        if missing.is_empty() {
-            return Ok(false);
-        }
-
-        self.tx_header_waiter
-            .send(WaiterMessage::SyncBatches(missing, header.clone(), force_sync))
-            .await
-            .expect("Failed to send sync batch request");
-        Ok(true)
+        // Payload is carried directly inside the header, so there is nothing to sync here.
+        Ok(false)
     }
 
     pub async fn fetch_header(&mut self, header_digest: Digest) -> DagResult<()> {
@@ -98,7 +66,11 @@ impl Synchronizer {
     /// Returns the proposals of a consensus message if we have them all. If at least one parent is missing,
     /// we return an empty vector, synchronize with other nodes, and re-schedule processing
     /// of the header for when we will have all the parents.
-    pub async fn get_proposals(&mut self, consensus_message: &ConsensusMessage, delivered_header: &Header) -> DagResult<Vec<Header>> { 
+    pub async fn get_proposals(
+        &mut self,
+        consensus_message: &ConsensusMessage,
+        delivered_header: Option<HeaderContext>,
+    ) -> DagResult<Vec<Header>> {
         let mut missing = Vec::new();
         let mut proposals_vector = Vec::new();
         //println!("getting proposals");
@@ -110,11 +82,6 @@ impl Synchronizer {
 
                     if proposal.header_digest == self.genesis_headers.get(&pk).unwrap().digest() {
                         proposals_vector.push(self.genesis_headers.get(&pk).unwrap().clone());
-                        continue;
-                    }
-
-                    if proposal.header_digest == delivered_header.digest() {
-                        proposals_vector.push(delivered_header.clone());
                         continue;
                     }
 
@@ -171,7 +138,11 @@ impl Synchronizer {
         debug!("Triggering sync for proposals");
         debug!("missing proposals are {:?}", missing);
         self.tx_header_waiter
-            .send(WaiterMessage::SyncProposals(missing, consensus_message.clone(), delivered_header.clone()))
+            .send(WaiterMessage::SyncProposals(
+                missing,
+                consensus_message.clone(),
+                delivered_header.unwrap_or_default(),
+            ))
             .await
             .expect("Failed to send sync parents request");
         Ok(Vec::new())
@@ -262,12 +233,31 @@ impl Synchronizer {
         let mut current_height = proposal.height;
         while current_height > stop_height {
             debug!("current height is {:?}, stop height is {:?}", current_height, stop_height);
-            ancestors.push(header.clone());
-            header = self.get_parent_header(&header).await?.expect("should have parent by now");
+            let parent = self.get_parent_header(&header).await?.expect("should have parent by now");
+            ancestors.push(header);
+            header = parent;
             current_height = header.height();
         }
 
         Ok(ancestors)
+    }
+
+    pub async fn sync_header_parent(&mut self, header: Header) -> DagResult<Option<Header>> {
+        if header.parent_cert.header_digest == self.genesis_headers.get(&header.author).unwrap().digest() {
+            return Ok(Some(header));
+        }
+
+        let parent = header.parent_cert.header_digest.clone();
+        match self.store.read(parent.to_vec()).await? {
+            Some(bytes) => Ok(Some(header)),
+            None => {
+                self.tx_header_waiter
+                    .send(WaiterMessage::SyncParent(parent, header))
+                    .await
+                    .expect("Failed to send sync parent request");
+                Ok(None)
+            }
+        }
     }
 
     pub async fn get_parent_header(&mut self, header: &Header) -> DagResult<Option<Header>> {
@@ -278,13 +268,7 @@ impl Synchronizer {
         let parent = header.parent_cert.header_digest.clone();
         match self.store.read(parent.to_vec()).await? {
             Some(bytes) => Ok(Some(bincode::deserialize(&bytes)?)),
-            None => {
-                self.tx_header_waiter
-                    .send(WaiterMessage::SyncParent(parent, header.clone()))
-                    .await
-                    .expect("Failed to send sync parent request");
-                Ok(None)
-            }
+            None => Ok(None),
         }
     }
 
