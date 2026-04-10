@@ -162,6 +162,29 @@ impl fmt::Debug for HeaderInfoWithProof {
         write!(f, "{}: B{}({})", self.id, self.round, self.author,)
     }
 }
+
+/// Hint sent from Core to Proposer as soon as a header proof is received and its parent is available.
+/// This is intentionally distinct from `Certificate` to make receive-vs-deliver semantics explicit.
+#[derive(Clone, Serialize, Deserialize, Default, PartialEq, Eq, Hash)]
+pub struct ProposerParent {
+    pub header_id: Digest,
+    pub round: Round,
+    pub origin: PublicKey,
+}
+
+impl ProposerParent {
+    pub fn genesis(committee: &Committee) -> Vec<Self> {
+        committee
+            .authorities
+            .keys()
+            .map(|_| Self { ..Self::default() })
+            .collect()
+    }
+
+    pub fn round(&self) -> Round {
+        self.round
+    }
+}
 impl fmt::Display for HeaderInfoWithProof {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         write!(f, "B{}({})", self.round, self.author)

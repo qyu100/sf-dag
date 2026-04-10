@@ -10,15 +10,15 @@ from benchmark.remote import Bench, BenchError
 
 
 @task
-def local(ctx, debug=True, consensus_only=True, header_size=51200_000):
+def local(ctx, debug=True, consensus_only=True, header_size=5120):
     ''' Run benchmarks on localhost '''
     bench_params = {
         'faults': 0,
-        'nodes': 50,
+        'nodes': 10,
         'workers': 1,
         'rate': 100_000,
         'tx_size': 512,
-        'duration': 180,
+        'duration': 60,
         "burst" : 50
     }
     node_params = {
@@ -31,7 +31,7 @@ def local(ctx, debug=True, consensus_only=True, header_size=51200_000):
         'batch_size': header_size,  # bytescd
         'tx_size': bench_params['tx_size'],
         'max_batch_delay': 200,  # ms
-        'f_num': 16,
+        'f_num': 3,
         'rs_block_size': 4 * 1024,  # bytes
         'rs_block_threads': 4
     }

@@ -1,6 +1,6 @@
 use crate::batch_maker::Transaction;
 use crate::messages::{
-    Certificate, Header, HeaderWithCertificate, Timeout, TimeoutCert,
+    Header, HeaderWithCertificate, ProposerParent, Timeout, TimeoutCert,
 };
 use crate::primary::Round;
 use config::Committee;
@@ -33,7 +33,7 @@ pub struct Proposer {
     consensus_only: bool,
 
     /// Receives the parents to include in the next header (along with their round number).
-    rx_core: Receiver<Certificate>,
+    rx_core: Receiver<ProposerParent>,
     /// Receives the batch digest from our workers.
     rx_workers: Receiver<Vec<Transaction>>,
     /// Sends newly created headers to the `Core`.
@@ -45,9 +45,7 @@ pub struct Proposer {
     /// The current round of the dag.
     round: Round,
     /// Holds the certificates' ids waiting to be included in the next header.
-    last_parent: Vec<Certificate>,
-    /// Holds the certificate of the last leader (if any).
-    last_leader: Option<Certificate>,
+    last_parent: Vec<ProposerParent>,
     /// Holds the txns waiting to be included in the next header.
     txns: Vec<Transaction>,
     /// Keeps track of the size (in bytes) of batches' digests that we received so far.
@@ -66,13 +64,13 @@ impl Proposer {
         tx_size: usize,
         max_header_delay: u64,
         consensus_only: bool,
-        rx_core: Receiver<Certificate>,
+        rx_core: Receiver<ProposerParent>,
         rx_workers: Receiver<Vec<Transaction>>,
         tx_core: Sender<Header>,
         tx_core_timeout: Sender<Timeout>,
         rx_timeout_cert: Receiver<(TimeoutCert, Round)>,
     ) {
-        let genesis = Certificate::genesis(&committee);
+        let genesis = ProposerParent::genesis(&committee);
         tokio::spawn(async move {
             Self {
                 name,
@@ -89,7 +87,6 @@ impl Proposer {
                 rx_timeout_cert,
                 round: 0,
                 last_parent: genesis,
-                last_leader: None,
                 txns: Vec::new(),
                 payload_size: 0,
                 last_timeout_cert: TimeoutCert::new(0),
@@ -177,22 +174,6 @@ impl Proposer {
             .expect("Failed to send header");
     }
 
-    // Update the last leader.
-    fn update_leader(&mut self) -> bool {
-        let leader_name = self.committee.leader(self.round as usize);
-        self.last_leader = self
-            .last_parent
-            .iter()
-            .find(|x| x.origin() == leader_name)
-            .cloned();
-        debug!("Updated leader for round {}: {:?}, {:?}", self.round, self.last_leader, leader_name);
-        if let Some(leader) = self.last_leader.as_ref() {
-            debug!("Got leader {} for round {}", leader.origin(), self.round);
-        }
-
-        self.last_leader.is_some()
-    }
-
     /// Main loop listening to incoming messages.
     pub async fn run(&mut self) {
         debug!("Protocol starting at round {}", self.round);
@@ -231,6 +212,8 @@ impl Proposer {
                     self.make_header().await;
                     self.payload_size = 0;
                 }
+                // Require a fresh parent notification before advancing again.
+                advance = false;
                 // Reschedule the timer.
                 let deadline = Instant::now() + Duration::from_millis(self.max_header_delay);
                 timer.as_mut().reset(deadline);
@@ -247,20 +230,16 @@ impl Proposer {
                             // late (or just joined the network).
                             self.round = parent.round();
                             self.last_parent = vec![parent];
+                            advance = true;
                         },
                         Ordering::Less => {
                             // Ignore parents from older rounds.
                         },
                         Ordering::Equal => {
                             self.last_parent = vec![parent];
+                            advance = true;
                         }
                     }
-
-                    // Check whether we can advance to the next round. Note that if we timeout,
-                    // we ignore this check and advance anyway.
-                    // TODO: (1) Implement the wait for NVC if leader logic here
-                    // (2) Also implement the wait for leader idea what is was there before
-                    advance = self.update_leader();
                 }
                 Some(txns) = self.rx_workers.recv() => {
                     self.payload_size += txns.iter().map(|txn| txn.len()).sum::<usize>();

@@ -8,7 +8,7 @@ use crate::aggregators::{
 };
 use crate::error::{DagError, DagResult};
 use crate::messages::{
-    Certificate, Header, Ready, Timeout, TimeoutCert, HeaderInfoWithProof, Echo, Decide
+    Certificate, Header, Ready, Timeout, TimeoutCert, HeaderInfoWithProof, Echo, Decide, ProposerParent
 };
 use crate::primary::{HeaderType, PrimaryMessage, PrimaryMessageRef, Round};
 use crate::synchronizer::Synchronizer;
@@ -79,7 +79,7 @@ pub struct Core {
     /// Output all certificates to the consensus layer.
     tx_consensus: Sender<Certificate>,
     /// Send valid a quorum of certificates' ids to the `Proposer` (along with their round).
-    tx_proposer: Sender<Certificate>,
+    tx_proposer: Sender<ProposerParent>,
     /// Send a valid TimeoutCertificate along with the round to the `Proposer`.
     tx_timeout_cert: Sender<(TimeoutCert, Round)>,
     /// Send a the header that has voted for the prev leader to the `Consensus` logic.
@@ -88,6 +88,9 @@ pub struct Core {
     gc_round: Round,
     /// The authors of the last voted headers.
     last_voted: HashMap<Round, HashSet<PublicKey>>,
+    /// Headers waiting for optimistic echo gating: key is required certified round (r-2),
+    /// value is header ids that can be echoed once that certificate exists.
+    pending_echo_headers: HashMap<Round, HashSet<Digest>>,
     /// For storing info of header infos in processing
     processing_header_infos: HashMap<Digest, HeaderInfo>,
     /// For storing proof of header infos in processing
@@ -149,7 +152,7 @@ impl Core {
         rx_proposer: Receiver<Header>,
         rx_timeout: Receiver<Timeout>,
         tx_consensus: Sender<Certificate>,
-        tx_proposer: Sender<Certificate>,
+        tx_proposer: Sender<ProposerParent>,
         tx_timeout_cert: Sender<(TimeoutCert, Round)>,
         tx_consensus_header_msg: Sender<ConsensusMessage>,
         rs_block_size: usize,
@@ -181,6 +184,7 @@ impl Core {
                 tx_consensus_header_msg,
                 gc_round: 0,
                 last_voted: HashMap::with_capacity(2 * gc_depth as usize),
+                pending_echo_headers: HashMap::new(),
                 processing_header_infos: HashMap::new(),
                 processing_header_proofs: HashMap::new(),
                 processing_echo_aggregators: HashMap::new(),
@@ -234,7 +238,7 @@ impl Core {
         rx_proposer: Receiver<Header>,
         rx_timeout: Receiver<Timeout>,
         tx_consensus: Sender<Certificate>,
-        tx_proposer: Sender<Certificate>,
+        tx_proposer: Sender<ProposerParent>,
         tx_timeout_cert: Sender<(TimeoutCert, Round)>,
         tx_consensus_header_msg: Sender<ConsensusMessage>,
         rs_block_size: usize,
@@ -264,6 +268,7 @@ impl Core {
             tx_consensus_header_msg,
             gc_round: 0,
             last_voted: HashMap::with_capacity(2 * gc_depth as usize),
+            pending_echo_headers: HashMap::new(),
             processing_header_infos: HashMap::new(),
             processing_header_proofs: HashMap::new(),
             processing_echo_aggregators: HashMap::new(),
@@ -717,31 +722,6 @@ impl Core {
         self.processing_header_proofs
              .entry(header_info_with_proof.id)
              .or_insert(header_info_with_proof.clone());
-
-        if self.last_voted.entry(header_info_with_proof.round).or_insert_with(HashSet::new).insert(header_info_with_proof.author) {
-             // Make an echo and send it to all nodes
-             let echo = Echo::new(&header_info_with_proof, &self.name).await;
-             let addresses = self
-                 .committee
-                 .others_primaries(&self.name)
-                 .iter()
-                 .map(|(_, x)| x.primary_to_primary)
-                 .collect();
-                // Serialize a clone for the network but keep the original to process locally (move into process_echo).
-                let bytes = bincode::serialize(&PrimaryMessage::Echo(echo.clone()))
-                    .expect("Failed to serialize our own echo");
-
-                let handlers = self.network.broadcast(addresses, Bytes::from(bytes)).await;
-
-                self.cancel_handlers
-                     .entry(header_info_with_proof.round)
-                     .or_insert_with(Vec::new)
-                     .extend(handlers);
-
-                self.process_echo(echo)
-                   .await
-                    .expect("Failed to process our own echo");
-             }
         
         let t_parent = Instant::now();
         if header_info_with_proof.round != 1 {
@@ -758,6 +738,19 @@ impl Core {
                 return Ok(());
             }
         }
+
+        // Notify proposer as soon as we have this block and its parent delivered.
+        self.tx_proposer
+            .send(ProposerParent {
+                header_id: header_info_with_proof.id,
+                round: header_info_with_proof.round,
+                origin: header_info_with_proof.author,
+            })
+            .await
+            .expect("Failed to send parent candidate to proposer");
+
+        // Optimistic echo is gated by certificate(r-2) to avoid cascading optimistic failures.
+        self.maybe_echo_or_defer(header_info_with_proof).await?;
 
         let hid = header_info_with_proof.id;
         let bytes = bincode::serialize(header_info_with_proof).expect("Failed to serialize header");
@@ -795,33 +788,6 @@ impl Core {
              .entry(header_info_with_proof.id)
              .or_insert_with(|| header_info_with_proof.clone());
 
-        if self.last_voted.entry(header_info_with_proof.round).or_insert_with(HashSet::new).insert(header_info_with_proof.author) {
-             // Make an echo and send it to all nodes
-             let echo = Echo::new(&header_info_with_proof, &self.name).await;
-             let addresses = self
-                 .committee
-                 .others_primaries(&self.name)
-                 .iter()
-                 .map(|(_, x)| x.primary_to_primary)
-                 .collect();
-
-                // 2a: Serialize by reference via PrimaryMessageRef, then move the echo
-                // into process_echo.  Avoids cloning the ~2.9MB Proof for serialization.
-                let bytes = bincode::serialize(&PrimaryMessageRef::Echo(&echo))
-                    .expect("Failed to serialize our own echo");
-
-                let handlers = self.network.broadcast(addresses, Bytes::from(bytes)).await;
-
-                self.cancel_handlers
-                     .entry(header_info_with_proof.round)
-                     .or_insert_with(Vec::new)
-                     .extend(handlers);
-
-                self.process_echo_optimized(echo)
-                   .await
-                    .expect("Failed to process our own echo");
-             }
-
         let t_parent = Instant::now();
         if header_info_with_proof.round != 1 {
             // 2b: Pass header_info_with_proof directly — no unnecessary .clone().
@@ -838,6 +804,19 @@ impl Core {
                 return Ok(());
             }
         }
+
+        // Notify proposer as soon as we have this block and its parent delivered.
+        self.tx_proposer
+            .send(ProposerParent {
+                header_id: header_info_with_proof.id,
+                round: header_info_with_proof.round,
+                origin: header_info_with_proof.author,
+            })
+            .await
+            .expect("Failed to send parent candidate to proposer");
+
+        // Optimistic echo is gated by certificate(r-2) to avoid cascading optimistic failures.
+        self.maybe_echo_or_defer(header_info_with_proof).await?;
 
         let hid = header_info_with_proof.id;
         let bytes = bincode::serialize(header_info_with_proof).expect("Failed to serialize header");
@@ -858,6 +837,74 @@ impl Core {
             return Ok(());
         }
         debug!("process_header_proof_optimized total time: {:?}", start.elapsed());
+        Ok(())
+    }
+
+    /// Send optimistic echo immediately if gating is satisfied, otherwise defer until
+    /// certificate(round-2) is formed.
+    async fn maybe_echo_or_defer(&mut self, header_info_with_proof: &HeaderInfoWithProof) -> DagResult<()> {
+        let round = header_info_with_proof.round;
+
+        if round > 2 {
+            let required_cert_round = round - 2;
+            if !self.certificates.contains_key(&required_cert_round) {
+                self.pending_echo_headers
+                    .entry(required_cert_round)
+                    .or_insert_with(HashSet::new)
+                    .insert(header_info_with_proof.id);
+                debug!(
+                    "Deferring echo for header {:?} at round {}: waiting for certificate round {}",
+                    header_info_with_proof.id,
+                    round,
+                    required_cert_round
+                );
+                return Ok(());
+            }
+        }
+
+        if self
+            .last_voted
+            .entry(round)
+            .or_insert_with(HashSet::new)
+            .insert(header_info_with_proof.author)
+        {
+            let echo = Echo::new(header_info_with_proof, &self.name).await;
+            let addresses = self
+                .committee
+                .others_primaries(&self.name)
+                .iter()
+                .map(|(_, x)| x.primary_to_primary)
+                .collect();
+
+            let bytes = bincode::serialize(&PrimaryMessageRef::Echo(&echo))
+                .expect("Failed to serialize our own echo");
+            let handlers = self.network.broadcast(addresses, Bytes::from(bytes)).await;
+            self.cancel_handlers
+                .entry(round)
+                .or_insert_with(Vec::new)
+                .extend(handlers);
+
+            self.process_echo_optimized(echo)
+                .await
+                .expect("Failed to process our own echo");
+        }
+
+        Ok(())
+    }
+
+    /// If some headers were waiting for `certified_round == r-2`, release their deferred echoes now.
+    async fn release_deferred_echoes(&mut self, certified_round: Round) -> DagResult<()> {
+        let Some(ids) = self.pending_echo_headers.remove(&certified_round) else {
+            return Ok(());
+        };
+
+        for id in ids {
+            let Some(header_info_with_proof) = self.processing_header_proofs.get(&id).cloned() else {
+                continue;
+            };
+            self.maybe_echo_or_defer(&header_info_with_proof).await?;
+        }
+
         Ok(())
     }
 
@@ -1146,13 +1193,8 @@ impl Core {
         // debug!("certificate length: {}", bytes.len());
         // debug!("store certificate time: {:?}", t_store.elapsed());
 
-        // Send it to the `Proposer`.
-        self.tx_proposer
-            .send(certificate.clone())
-            .await
-            .expect("Failed to send certificate");
-
         self.certificates.entry(certificate.round).or_insert(certificate.clone());
+        self.release_deferred_echoes(certificate.round).await?;
 
         let decide = Decide::new(certificate.header_id, certificate.round, &certificate.origin, &self.name).await;
 
@@ -1201,14 +1243,9 @@ impl Core {
         let round = certificate.round;
         let origin = certificate.origin;
 
-        // Send to Proposer — clone only once.
-        self.tx_proposer
-            .send(certificate.clone())
-            .await
-            .expect("Failed to send certificate");
-
         // Store in local map — move certificate in (no extra clone).
         self.certificates.entry(round).or_insert(certificate);
+        self.release_deferred_echoes(round).await?;
 
         // 4a: Build decide from the extracted small fields.
         let decide = Decide::new(header_id, round, &origin, &self.name).await;
@@ -1406,6 +1443,7 @@ impl Core {
                     .retain(|_, h| &h.round >= &gc_round);
                 self.processing_header_proofs
                     .retain(|_, h| &h.round >= &gc_round);
+                self.pending_echo_headers.retain(|k, _| k >= &gc_round);
                 self.cancel_handlers.retain(|k, _| k >= &gc_round);
                 // let _ = self.synchronizer.garbage_collect(gc_round).await;
                 self.gc_round = gc_round;
