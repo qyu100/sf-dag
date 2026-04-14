@@ -106,12 +106,13 @@ impl CertificatesAggregator {
         self.certificate_weight += committee.stake(&origin);
 
         let leader = committee.leader(round as usize);
-        if !self.used.contains(&leader) {
-            return Ok(None);
-        }
+        // if !self.used.contains(&leader) {
+        //     return Ok(None);
+        // }
         // Enter round if 1) weight >= 2f+1 - votes number
         // and 2) weight >= max (propose_num - f, 0)
         if self.weight >= committee.quorum_threshold()
+            && self.used.contains(&leader)
             && self.certificate_weight >= propose_num.saturating_sub(committee.f_num as usize) as u32
         {
             self.weight = 0;
@@ -139,12 +140,13 @@ impl CertificatesAggregator {
         self.weight += committee.stake(&origin);
 
         let leader = committee.leader(round as usize);
-        if !self.used.contains(&leader) {
-            return Ok(None);
-        }
+        // if !self.used.contains(&leader) {
+        //     return Ok(None);
+        // }
         // Enter round if 1) weight >= 2f+1 - votes number
         // and 2) certificate_weight >= max (propose_num - f, 0)
         if self.weight >= committee.quorum_threshold()
+            && self.used.contains(&leader)
             && self.certificate_weight >= propose_num.saturating_sub(committee.f_num as usize) as u32
         {
             self.weight = 0;
