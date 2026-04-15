@@ -699,8 +699,10 @@ impl Core {
                             }
                         },
                         PrimaryMessage::Certificate(certificate) => {
-                            let res = self.sanitize_certificate(&certificate, &sender_channel);
-                            res
+                            match self.sanitize_certificate(&certificate, &sender_channel) {
+                                Ok(()) => self.process_certificate(certificate).await,
+                                error => error,
+                            }
                         },
                         PrimaryMessage::VerifiedCertificate(certificate) => {
                                 self.process_certificate(certificate).await
