@@ -1,11 +1,9 @@
 // Copyright(C) Facebook, Inc. and its affiliates.
-use crate::aggregators::{
-    CertificatesAggregator, TimeoutAggregator, VotesAggregator,
-};
+use crate::aggregators::{CertificatesAggregator, TimeoutAggregator, VotesAggregator};
 use crate::error::{DagError, DagResult};
 use crate::messages::{
-    Certificate, HeaderInfoWithCertificate, HeaderWithCertificate, Timeout,
-    TimeoutCert, Vote, Support
+    Certificate, HeaderInfoWithCertificate, HeaderWithCertificate, Support, Timeout, TimeoutCert,
+    Vote,
 };
 use crate::primary::{HeaderType, PrimaryMessage, Round};
 use crate::synchronizer::Synchronizer;
@@ -242,7 +240,14 @@ impl Core {
                     .certificates_aggregators
                     .entry(certificate.round())
                     .or_insert_with(|| Box::new(CertificatesAggregator::new()))
-                    .append_certificate(&certificate, &self.committee, self.header_proposers.get(&(certificate.round-1)).map(|set| set.len()).unwrap_or(0))?
+                    .append_certificate(
+                        &certificate,
+                        &self.committee,
+                        self.header_proposers
+                            .get(&(certificate.round - 1))
+                            .map(|set| set.len())
+                            .unwrap_or(0),
+                    )?
                 {
                     // Send it to the `Proposer`.
                     self.tx_proposer
@@ -273,7 +278,7 @@ impl Core {
 
         let header_info: HeaderInfo;
         match header_msg {
-            HeaderMessage::HeaderWithCertificate(header_with_parents) => {     
+            HeaderMessage::HeaderWithCertificate(header_with_parents) => {
                 let _ = self
                     .process_parent_certificates(&header_with_parents.parents)
                     .await;
@@ -392,7 +397,10 @@ impl Core {
 
     #[async_recursion]
     async fn process_support_msg(&mut self, support: Support) -> DagResult<()> {
-        debug!("Processing support at round {:?}, {:?}", support.round, support);
+        debug!(
+            "Processing support at round {:?}, {:?}",
+            support.round, support
+        );
 
         self.tx_consensus_header_msg
             .send(ConsensusMessage::Support(support.clone()))
@@ -404,10 +412,15 @@ impl Core {
             .certificates_aggregators
             .entry(support.round)
             .or_insert_with(|| Box::new(CertificatesAggregator::new()))
-            .append_support(&support, 
-                &self.committee, 
-            self.header_proposers.get(&(support.round-1)).map(|set| set.len()).unwrap_or(0))?
-        {   
+            .append_support(
+                &support,
+                &self.committee,
+                self.header_proposers
+                    .get(&(support.round - 1))
+                    .map(|set| set.len())
+                    .unwrap_or(0),
+            )?
+        {
             // Send it to the `Proposer`.
             self.tx_proposer
                 .send((parents, support.round))
@@ -512,10 +525,15 @@ impl Core {
             .certificates_aggregators
             .entry(certificate.round())
             .or_insert_with(|| Box::new(CertificatesAggregator::new()))
-            .append_certificate(&certificate, 
-                &self.committee, 
-            self.header_proposers.get(&(certificate.round-1)).map(|set| set.len()).unwrap_or(0))?
-        {   
+            .append_certificate(
+                &certificate,
+                &self.committee,
+                self.header_proposers
+                    .get(&(certificate.round - 1))
+                    .map(|set| set.len())
+                    .unwrap_or(0),
+            )?
+        {
             // Send it to the `Proposer`.
             self.tx_proposer
                 .send((parents, certificate.round()))
@@ -724,7 +742,7 @@ impl Core {
                 Some(header_with_parents) = self.rx_proposer.recv() => self.process_own_header(header_with_parents ,&sender_channel).await,
 
                 Some(support) = self.rx_support.recv() => self.process_own_support(support).await,
-                
+
                 // We also receive here our timeout created by the `Proposer`.
                 Some(timeout) = self.rx_timeout.recv() => self.process_own_timeout(timeout).await,
             };

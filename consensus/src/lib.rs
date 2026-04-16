@@ -160,7 +160,7 @@ impl Consensus {
                             state.insert_certificate(certificate);
                             continue;
                         }
-                        
+
                         ConsensusMessage::Support(support) => {
                             let r = support.round - 1;
                             let leader_round = r;
@@ -179,7 +179,7 @@ impl Consensus {
 
                             let current_stake = self.stake_vote.get(&support.round);
                             let current_stake_value = *current_stake.unwrap_or(&0);
-                            
+
                             // Commit if we have QT
                             if current_stake_value >= self.committee.quorum_threshold() {
                                 debug!("Leader {:?} has enough support with header at round {}", leader, leader_round);
@@ -191,7 +191,7 @@ impl Consensus {
                                     state.update(&certificate, self.gc_depth);
                                     #[cfg(not(feature = "benchmark"))]
                                     info!("Committed {} with header", certificate.header_id);
-                                    
+
                                     if certificate.round == leader_round {
                                         info!("Committed {:?} Leader", certificate.header_id);
                                     }else if certificate.round == leader_round-1 {
@@ -214,7 +214,7 @@ impl Consensus {
 
                         ConsensusMessage::HeaderInfo(header_info) => {
                             debug!("Processing header info {:?} at round {}", header_info.id, header_info.round);
-                            
+
                             state.parent_info.insert(header_info.id, header_info.parents.clone());
                             // Try to order the dag to commit. Start from the previous round.
                             let r = header_info.round - 1;
@@ -360,12 +360,7 @@ impl Consensus {
     }
 
     /// Checks if there is a path between two leaders.
-    async fn linked(
-        &self,
-        leader: &Certificate,
-        prev_leader: &Certificate,
-        state: &State,
-    ) -> bool {
+    async fn linked(&self, leader: &Certificate, prev_leader: &Certificate, state: &State) -> bool {
         let mut parents = vec![leader];
         for r in (prev_leader.round()..leader.round()).rev() {
             let round_certificates = state
@@ -383,7 +378,7 @@ impl Consensus {
                                 new_parents.push(certificate);
                                 break;
                             } else {
-                                break; 
+                                break;
                             }
                         } else {
                             sleep(Duration::from_millis(1)).await;
@@ -541,8 +536,12 @@ mod tests {
             state.insert_certificate(certificate);
         }
 
-        state.parent_info.insert(round_1_leader.header_id, Vec::new());
-        state.parent_info.insert(round_1_orphan.header_id, Vec::new());
+        state
+            .parent_info
+            .insert(round_1_leader.header_id, Vec::new());
+        state
+            .parent_info
+            .insert(round_1_orphan.header_id, Vec::new());
         state
             .parent_info
             .insert(round_2_leader.header_id, vec![round_1_leader.header_id]);
@@ -554,12 +553,11 @@ mod tests {
             .collect_commit_sequence(&round_3_leader, &state)
             .await;
 
-        assert!(sequence.iter().any(|x| x.header_id == round_1_orphan.header_id));
+        assert!(sequence
+            .iter()
+            .any(|x| x.header_id == round_1_orphan.header_id));
         assert_eq!(
-            sequence
-                .iter()
-                .map(|x| x.round())
-                .collect::<Vec<_>>(),
+            sequence.iter().map(|x| x.round()).collect::<Vec<_>>(),
             vec![1, 1, 2, 3]
         );
     }

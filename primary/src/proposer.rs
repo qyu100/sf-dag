@@ -1,7 +1,5 @@
 use crate::batch_maker::Transaction;
-use crate::messages::{
-    Certificate, Header, HeaderWithCertificate, Timeout, TimeoutCert, Support,
-};
+use crate::messages::{Certificate, Header, HeaderWithCertificate, Support, Timeout, TimeoutCert};
 use crate::primary::Round;
 use config::Committee;
 use crypto::{PublicKey, SignatureService};
@@ -58,7 +56,7 @@ pub struct Proposer {
     /// Holds the Timeout certificate for the latest round.
     last_timeout_cert: TimeoutCert,
     // Rate of proposing a header
-    propose_rate: f64, 
+    propose_rate: f64,
     /// Whether the proposer should propose in the this round.
     propose_this_round: bool,
 }
@@ -124,11 +122,7 @@ impl Proposer {
             .expect("Failed to send timeout");
     }
 
-    async fn make_support_msg(
-        &mut self,
-        vote: bool,
-        propose_next_round: bool, 
-    ) {
+    async fn make_support_msg(&mut self, vote: bool, propose_next_round: bool) {
         self.last_parents.clear();
         let support = Support::new(
             self.name,
@@ -171,7 +165,7 @@ impl Proposer {
         }
 
         let parents: Vec<Certificate> = self.last_parents.drain(..).collect();
-        
+
         let header = Header::new(
             self.name,
             self.round,
@@ -219,6 +213,30 @@ impl Proposer {
             .expect("Failed to send header");
     }
 
+    fn advertised_propose_next_round(
+        &self,
+        header_proposers: &[PublicKey],
+        actual_propose_next_round: bool,
+        is_next_leader: bool,
+    ) -> bool {
+        if is_next_leader {
+            return true;
+        }
+
+        if !actual_propose_next_round {
+            return false;
+        }
+
+        let mut selected = header_proposers.to_vec();
+        selected.sort();
+
+        let suppressed = selected.len() / 2;
+        !selected
+            .iter()
+            .take(suppressed)
+            .any(|name| name == &self.name)
+    }
+
     /// Update the last leader.
     fn update_leader(&mut self) -> bool {
         let leader_name = self.committee.leader(self.round as usize);
@@ -263,33 +281,38 @@ impl Proposer {
                 timeout_sent = true;
             }
 
-            if ((timer_expired
-                && timeout_cert_gathered
-                && (!is_next_leader))
+            if ((timer_expired && timeout_cert_gathered && (!is_next_leader))
                 || ((enough_digests || self.consensus_only) && advance))
                 && enough_parents
             {
-                if timer_expired && self.last_leader.is_none() && !is_next_leader {
-                }
+                if timer_expired && self.last_leader.is_none() && !is_next_leader {}
 
                 // Advance to the next round.
                 self.round += 1;
                 debug!("Dag moved to round {}", self.round);
 
-                let header_proposers = self.committee.header_proposers((self.round) as usize, self.propose_rate);
-                let propose_next_round = header_proposers.contains(&self.name);
+                let header_proposers = self
+                    .committee
+                    .header_proposers((self.round) as usize, self.propose_rate);
+                let actual_propose_next_round = header_proposers.contains(&self.name);
+                let advertised_propose_next_round = self.advertised_propose_next_round(
+                    &header_proposers,
+                    actual_propose_next_round,
+                    is_next_leader,
+                );
                 // If propose this round or is the leader of the next round, make a new header; otherwise, send a support message.
                 if self.propose_this_round || is_next_leader {
-                    self.make_header(propose_next_round).await;
+                    self.make_header(advertised_propose_next_round).await;
                 } else {
                     let vote = if self.last_leader.is_none() {
                         false
                     } else {
                         true
                     };
-                    self.make_support_msg(vote, propose_next_round).await;
+                    self.make_support_msg(vote, advertised_propose_next_round)
+                        .await;
                 }
-                self.propose_this_round = propose_next_round;
+                self.propose_this_round = actual_propose_next_round;
                 self.payload_size = 0;
 
                 // Reschedule the timer.

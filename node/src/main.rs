@@ -113,7 +113,7 @@ async fn run(matches: &ArgMatches<'_>) -> Result<()> {
         }
         None => Parameters::default(),
     };
-    
+
     let committee = Committee::new(comm.authorities, parameters.f_num);
 
     let mut sorted_keys = committee.get_bls_public_keys();
