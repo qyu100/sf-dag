@@ -1,7 +1,8 @@
 use crate::config::{Committee, Stake};
 use crate::consensus::Round;
-use crate::error::{ConsensusError, ConsensusResult};
-use crate::messages::{Timeout, Vote, QC, TC, Ready};
+use crate::error::ConsensusResult;
+use crate::merkle::Proof;
+use crate::messages::{Echo, PayloadReady, Ready, Timeout, Vote, QC, TC};
 use crypto::Hash as _;
 use crypto::{Digest, PublicKey, Signature};
 use std::collections::{HashMap, HashSet};
@@ -14,6 +15,8 @@ pub struct Aggregator {
     committee: Committee,
     votes_aggregators: HashMap<Round, HashMap<Digest, Box<QCMaker>>>,
     ready_aggregators: HashMap<Round, HashMap<Digest, Box<QCMaker>>>,
+    echo_aggregators: HashMap<Digest, Box<EchoMaker>>,
+    payload_ready_aggregators: HashMap<Digest, Box<PayloadReadyMaker>>,
     timeouts_aggregators: HashMap<Round, Box<TCMaker>>,
 }
 
@@ -23,8 +26,28 @@ impl Aggregator {
             committee,
             votes_aggregators: HashMap::new(),
             ready_aggregators: HashMap::new(),
+            echo_aggregators: HashMap::new(),
+            payload_ready_aggregators: HashMap::new(),
             timeouts_aggregators: HashMap::new(),
         }
+    }
+
+    pub fn add_echo(
+        &mut self,
+        echo: Echo,
+    ) -> ConsensusResult<Option<(Digest, Vec<Option<Box<[u8]>>>)>> {
+        let shard_count = self.committee.size();
+        self.echo_aggregators
+            .entry(echo.id.clone())
+            .or_insert_with(|| Box::new(EchoMaker::new(shard_count)))
+            .append(echo, &self.committee)
+    }
+
+    pub fn add_payload_ready(&mut self, ready: PayloadReady) -> ConsensusResult<Option<Digest>> {
+        self.payload_ready_aggregators
+            .entry(ready.id.clone())
+            .or_insert_with(|| Box::new(PayloadReadyMaker::new()))
+            .append(ready, &self.committee)
     }
 
     pub fn add_vote(&mut self, vote: Vote) -> ConsensusResult<Option<QC>> {
@@ -71,6 +94,85 @@ impl Aggregator {
     }
 }
 
+struct EchoMaker {
+    used: HashSet<PublicKey>,
+    proofs: HashMap<Digest, HashMap<PublicKey, Proof>>,
+    weights: HashMap<Digest, Stake>,
+    shard_count: usize,
+}
+
+impl EchoMaker {
+    fn new(shard_count: usize) -> Self {
+        Self {
+            used: HashSet::new(),
+            proofs: HashMap::new(),
+            weights: HashMap::new(),
+            shard_count,
+        }
+    }
+
+    fn append(
+        &mut self,
+        echo: Echo,
+        committee: &Committee,
+    ) -> ConsensusResult<Option<(Digest, Vec<Option<Box<[u8]>>>)>> {
+        let author = echo.author;
+        if !self.used.insert(author) {
+            return Ok(None);
+        }
+
+        let root = echo.proof.root_hash().clone();
+        let entry = self.proofs.entry(root.clone()).or_insert_with(HashMap::new);
+        entry.insert(author, echo.proof);
+        let weight = self.weights.entry(root.clone()).or_insert(0);
+        *weight += committee.stake(&author);
+
+        if *weight >= committee.quorum_threshold() {
+            let mut proofs = self.proofs.remove(&root).expect("proofs exist");
+            self.weights.remove(&root);
+            let shards = committee
+                .sorted_keys()
+                .into_iter()
+                .take(self.shard_count)
+                .map(|pk| proofs.remove(&pk).map(|p| p.into_value()))
+                .collect();
+            return Ok(Some((root, shards)));
+        }
+        Ok(None)
+    }
+}
+
+struct PayloadReadyMaker {
+    used: HashSet<PublicKey>,
+    weights: HashMap<Digest, Stake>,
+}
+
+impl PayloadReadyMaker {
+    fn new() -> Self {
+        Self {
+            used: HashSet::new(),
+            weights: HashMap::new(),
+        }
+    }
+
+    fn append(
+        &mut self,
+        ready: PayloadReady,
+        committee: &Committee,
+    ) -> ConsensusResult<Option<Digest>> {
+        let author = ready.author;
+        if !self.used.insert(author) {
+            return Ok(None);
+        }
+        let weight = self.weights.entry(ready.root_hash.clone()).or_insert(0);
+        *weight += committee.stake(&author);
+        if *weight >= committee.payload_ready_threshold() {
+            return Ok(Some(ready.root_hash));
+        }
+        Ok(None)
+    }
+}
+
 struct QCMaker {
     weight: Stake,
     votes: Vec<(PublicKey, Signature)>,
@@ -87,14 +189,17 @@ impl QCMaker {
     }
 
     /// Try to append a signature to a (partial) quorum.
-    pub fn append_vote(&mut self, vote: Vote, committee: &Committee) -> ConsensusResult<Option<QC>> {
+    pub fn append_vote(
+        &mut self,
+        vote: Vote,
+        committee: &Committee,
+    ) -> ConsensusResult<Option<QC>> {
         let author = vote.author;
 
         // Ensure it is the first time this authority votes.
-        ensure!(
-            self.used.insert(author),
-            ConsensusError::AuthorityReuse(author)
-        );
+        if !self.used.insert(author) {
+            return Ok(None);
+        }
 
         self.votes.push((author, vote.signature));
         self.weight += committee.stake(&author);
@@ -117,10 +222,9 @@ impl QCMaker {
         let author = ready.author;
 
         // Ensure it is the first time this authority votes.
-        ensure!(
-            self.used.insert(author),
-            ConsensusError::AuthorityReuse(author)
-        );
+        if !self.used.insert(author) {
+            return Ok(None);
+        }
 
         self.votes.push((author, ready.signature));
         self.weight += committee.stake(&author);
@@ -160,10 +264,9 @@ impl TCMaker {
         let author = timeout.author;
 
         // Ensure it is the first time this authority votes.
-        ensure!(
-            self.used.insert(author),
-            ConsensusError::AuthorityReuse(author)
-        );
+        if !self.used.insert(author) {
+            return Ok(None);
+        }
 
         // Add the timeout to the accumulator.
         self.votes

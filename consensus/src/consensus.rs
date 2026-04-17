@@ -3,8 +3,7 @@ use crate::core::Core;
 use crate::error::ConsensusError;
 use crate::helper::Helper;
 use crate::leader::LeaderElector;
-use crate::mempool::MempoolDriver;
-use crate::messages::{Block, Timeout, Vote, TC, Ready};
+use crate::messages::{Block, BlockInfoWithProof, Echo, PayloadReady, Ready, Timeout, Vote, TC};
 use crate::proposer::Proposer;
 use crate::synchronizer::Synchronizer;
 use async_trait::async_trait;
@@ -12,12 +11,11 @@ use bytes::Bytes;
 use crypto::{Digest, PublicKey, SignatureService};
 use futures::SinkExt as _;
 use log::info;
-use mempool::ConsensusMempoolMessage;
 use network::{MessageHandler, Receiver as NetworkReceiver, Writer};
 use serde::{Deserialize, Serialize};
 use std::error::Error;
 use store::Store;
-use tokio::sync::mpsc::{channel, Receiver, Sender};
+use tokio::sync::mpsc::{channel, Sender};
 
 #[cfg(test)]
 #[path = "tests/consensus_tests.rs"]
@@ -32,11 +30,14 @@ pub type Round = u64;
 #[derive(Serialize, Deserialize, Debug)]
 pub enum ConsensusMessage {
     Propose(Block),
+    ProposeInfo(BlockInfoWithProof),
+    Echo(Echo),
+    PayloadReady(PayloadReady),
     Vote(Vote),
     Timeout(Timeout),
     TC(TC),
     SyncRequest(Digest, PublicKey),
-    Ready(Ready)
+    Ready(Ready),
 }
 
 pub struct Consensus;
@@ -49,8 +50,6 @@ impl Consensus {
         parameters: Parameters,
         signature_service: SignatureService,
         store: Store,
-        rx_mempool: Receiver<Digest>,
-        tx_mempool: Sender<ConsensusMempoolMessage>,
         tx_commit: Sender<Block>,
     ) {
         // NOTE: This log entry is used to compute performance.
@@ -82,9 +81,6 @@ impl Consensus {
         // Make the leader election module.
         let leader_elector = LeaderElector::new(committee.clone());
 
-        // Make the mempool driver.
-        let mempool_driver = MempoolDriver::new(store.clone(), tx_mempool, tx_loopback.clone());
-
         // Make the synchronizer.
         let synchronizer = Synchronizer::new(
             name,
@@ -101,9 +97,10 @@ impl Consensus {
             signature_service.clone(),
             store.clone(),
             leader_elector,
-            mempool_driver,
             synchronizer,
             parameters.timeout_delay,
+            parameters.rs_block_size,
+            parameters.rs_block_threads,
             /* rx_message */ rx_consensus,
             rx_loopback,
             tx_proposer,
@@ -113,9 +110,9 @@ impl Consensus {
         // Spawn the block proposer.
         Proposer::spawn(
             name,
-            committee.clone(),
             signature_service,
-            rx_mempool,
+            parameters.header_size,
+            parameters.tx_size,
             /* rx_message */ rx_proposer,
             tx_loopback,
         );
@@ -142,7 +139,7 @@ impl MessageHandler for ConsensusReceiverHandler {
                 .send((missing, origin))
                 .await
                 .expect("Failed to send consensus message"),
-            message @ ConsensusMessage::Propose(..) => {
+            message => {
                 // Reply with an ACK.
                 let _ = writer.send(Bytes::from("Ack")).await;
 
@@ -152,11 +149,6 @@ impl MessageHandler for ConsensusReceiverHandler {
                     .await
                     .expect("Failed to consensus message")
             }
-            message => self
-                .tx_consensus
-                .send(message)
-                .await
-                .expect("Failed to consensus message"),
         }
         Ok(())
     }

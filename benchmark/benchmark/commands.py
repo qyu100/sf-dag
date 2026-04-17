@@ -31,7 +31,8 @@ class CommandMaker:
         assert isinstance(parameters, str)
         assert isinstance(debug, bool)
         v = '-vvv' if debug else '-vv'
-        return (f'./node {v} run --keys {keys} --committee {committee} '
+        log_level = 'debug' if debug else 'info'
+        return (f'RUST_LOG={log_level} ./node {v} run --keys {keys} --committee {committee} '
                 f'--store {store} --parameters {parameters}')
 
     @staticmethod

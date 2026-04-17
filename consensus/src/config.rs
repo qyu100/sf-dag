@@ -11,6 +11,10 @@ pub type EpochNumber = u128;
 pub struct Parameters {
     pub timeout_delay: u64,
     pub sync_retry_delay: u64,
+    pub header_size: usize,
+    pub tx_size: usize,
+    pub rs_block_size: usize,
+    pub rs_block_threads: usize,
 }
 
 impl Default for Parameters {
@@ -18,6 +22,10 @@ impl Default for Parameters {
         Self {
             timeout_delay: 5_000,
             sync_retry_delay: 10_000,
+            header_size: 4_096,
+            tx_size: 512,
+            rs_block_size: 1_048_576,
+            rs_block_threads: 4,
         }
     }
 }
@@ -27,6 +35,10 @@ impl Parameters {
         // NOTE: These log entries are used to compute performance.
         info!("Timeout delay set to {} rounds", self.timeout_delay);
         info!("Sync retry delay set to {} ms", self.sync_retry_delay);
+        info!("Header size set to {} B", self.header_size);
+        info!("Transaction size set to {} B", self.tx_size);
+        info!("RS block size set to {} B", self.rs_block_size);
+        info!("RS block threads set to {}", self.rs_block_threads);
     }
 }
 
@@ -60,6 +72,16 @@ impl Committee {
         self.authorities.len()
     }
 
+    pub fn sorted_keys(&self) -> Vec<PublicKey> {
+        let mut keys: Vec<_> = self.authorities.keys().cloned().collect();
+        keys.sort();
+        keys
+    }
+
+    pub fn max_faults(&self) -> usize {
+        self.size().saturating_sub(1) / 3
+    }
+
     pub fn stake(&self, name: &PublicKey) -> Stake {
         self.authorities.get(name).map_or_else(|| 0, |x| x.stake)
     }
@@ -69,6 +91,10 @@ impl Committee {
         // then (2 N + 3) / 3 = 2f + 1 + (2k + 2)/3 = 2f + 1 + k = N - f
         let total_votes: Stake = self.authorities.values().map(|x| x.stake).sum();
         2 * total_votes / 3 + 1
+    }
+
+    pub fn payload_ready_threshold(&self) -> Stake {
+        (2 * self.max_faults() + 1) as Stake
     }
 
     pub fn address(&self, name: &PublicKey) -> Option<SocketAddr> {

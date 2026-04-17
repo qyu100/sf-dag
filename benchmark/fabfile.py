@@ -22,6 +22,10 @@ def local(ctx):
         "consensus": {
             "timeout_delay": 1_000,
             "sync_retry_delay": 10_000,
+            "header_size": 4_096,
+            "tx_size": 512,
+            "rs_block_size": 4 * 1024,
+            "rs_block_threads": 4,
         },
         "mempool": {
             "gc_depth": 50,
@@ -100,13 +104,17 @@ def remote(ctx):
         "nodes": [4],
         "rate": [10_000],
         "tx_size": 512,
-        "duration": 300,
+        "duration": 120,
         "runs": 1,
     }
     node_params = {
         "consensus": {
             "timeout_delay": 5_000,
             "sync_retry_delay": 5_000,
+            "header_size": 4_096,
+            "tx_size": 512,
+            "rs_block_size": 4 * 1024,
+            "rs_block_threads": 4,
         },
         "mempool": {
             "gc_depth": 50,

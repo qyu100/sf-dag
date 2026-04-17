@@ -1,13 +1,13 @@
 use crate::config::Committee;
 use crate::consensus::{ConsensusMessage, CHANNEL_CAPACITY};
-use crate::error::{ConsensusResult, ConsensusError};
-use crate::messages::{Block, QC};
+use crate::error::ConsensusResult;
+use crate::messages::Block;
 use bytes::Bytes;
 use crypto::Hash as _;
 use crypto::{Digest, PublicKey};
+use futures::future::BoxFuture;
 use futures::stream::futures_unordered::FuturesUnordered;
 use futures::stream::StreamExt as _;
-use futures::future::BoxFuture;
 use futures::FutureExt;
 use log::{debug, error};
 use network::SimpleSender;
@@ -15,9 +15,8 @@ use std::collections::{HashMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 use store::Store;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
-use tokio::time::{sleep, Duration, Instant};
-use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
+use tokio::time::{sleep, Duration, Instant};
 
 #[cfg(test)]
 #[path = "tests/synchronizer_tests.rs"]
@@ -48,7 +47,8 @@ impl Synchronizer {
 
         let store_copy = store.clone();
         tokio::spawn(async move {
-            let mut waiting: FuturesUnordered<BoxFuture<'static, ConsensusResult<Block>>> = FuturesUnordered::new();
+            let mut waiting: FuturesUnordered<BoxFuture<'static, ConsensusResult<Block>>> =
+                FuturesUnordered::new();
             let mut pending = HashSet::new();
             let mut requests = HashMap::new();
 
@@ -131,14 +131,15 @@ impl Synchronizer {
     }
 
     async fn waiter(mut store: Store, wait_on: Digest) -> ConsensusResult<Block> {
-        let _ = store.notify_read(wait_on.to_vec()).await?;
-        match store.read(wait_on.to_vec()).await? {
-            Some(bytes) => Ok(bincode::deserialize(&bytes)?),
-            None => Err(ConsensusError::MalformedBlock(wait_on)),
-        }
+        let bytes = store.notify_read(wait_on.to_vec()).await?;
+        Ok(bincode::deserialize(&bytes)?)
     }
 
-    pub async fn get_block(&mut self, digest: &Digest, author: &PublicKey) -> ConsensusResult<Option<Block>> {
+    pub async fn get_block(
+        &mut self,
+        digest: &Digest,
+        author: &PublicKey,
+    ) -> ConsensusResult<Option<Block>> {
         debug!("Getting block {:?}", digest);
         if digest == &Digest::default() {
             return Ok(Some(Block::genesis()));
@@ -147,11 +148,20 @@ impl Synchronizer {
             Some(bytes) => Ok(Some(bincode::deserialize(&bytes)?)),
             None => {
                 let (tx, _rx) = oneshot::channel();
-                if let Err(e) = self.inner_channel.send(SyncMessage::Digest(digest.clone(), author.clone(), tx)).await {
+                if let Err(e) = self
+                    .inner_channel
+                    .send(SyncMessage::Digest(digest.clone(), author.clone(), tx))
+                    .await
+                {
                     panic!("Failed to send request to synchronizer: {}", e);
                 }
                 Ok(None)
             }
         }
+    }
+
+    #[cfg(test)]
+    pub async fn get_parent_block(&mut self, block: &Block) -> ConsensusResult<Option<Block>> {
+        self.get_block(block.parent(), &block.author).await
     }
 }

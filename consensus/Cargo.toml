@@ -17,11 +17,14 @@ futures = "0.3.8"
 async-recursion = "1.0.0"
 base64 = "0.13.0"
 async-trait = "0.1.50"
+rayon = "1.7"
+blake3 = "1.4"
+reed-solomon-simd = "3.1"
+rs_merkle = "1.4.2"
 
 store = { path = "../store" }
 crypto = { path = "../crypto" }
 network = { path = "../network" }
-mempool = { path = "../mempool" }
 
 [dev-dependencies]
 tokio-util = { version = "0.7.3", features= ["codec"] }

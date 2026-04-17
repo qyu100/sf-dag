@@ -103,8 +103,7 @@ async fn get_missing_parent_block() {
     let value = bincode::serialize(&parent_block).unwrap();
     let _ = store.write(key, value).await;
 
-    // Now that we have the parent, ensure the synchronizer loops back the block to the core
-    // to resume processing.
+    // Now that we have the parent, ensure the synchronizer loops back the fetched block.
     let delivered = rx_loopback.recv().await.unwrap();
-    assert_eq!(delivered, block.clone());
+    assert_eq!(delivered, parent_block.clone());
 }

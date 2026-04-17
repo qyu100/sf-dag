@@ -1,12 +1,13 @@
 #[macro_use]
 mod error;
 mod aggregator;
+mod coding;
 mod config;
 mod consensus;
 mod core;
 mod helper;
 mod leader;
-mod mempool;
+mod merkle;
 mod messages;
 mod proposer;
 mod synchronizer;

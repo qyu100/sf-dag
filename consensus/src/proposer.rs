@@ -1,71 +1,58 @@
-use crate::config::{Committee, Stake};
-use crate::consensus::{ConsensusMessage, Round};
+use crate::consensus::Round;
 use crate::messages::{Block, QC, TC};
-use bytes::Bytes;
-use crypto::{Digest, PublicKey, SignatureService};
-use futures::stream::futures_unordered::FuturesUnordered;
-use futures::stream::StreamExt as _;
-use log::{debug, info};
-use network::{CancelHandler, ReliableSender};
-use std::collections::HashSet;
+#[cfg(feature = "benchmark")]
+use crypto::Hash as _;
+use crypto::{PublicKey, SignatureService};
+use log::debug;
 use tokio::sync::mpsc::{Receiver, Sender};
 
 #[derive(Debug)]
 pub enum ProposerMessage {
     Make(Round, QC, Option<TC>),
-    Cleanup(Vec<Digest>),
+    Cleanup,
 }
 
 pub struct Proposer {
     name: PublicKey,
-    committee: Committee,
     signature_service: SignatureService,
-    rx_mempool: Receiver<Digest>,
     rx_message: Receiver<ProposerMessage>,
     tx_loopback: Sender<Block>,
-    buffer: HashSet<Digest>,
-    network: ReliableSender,
+    header_size: usize,
+    tx_size: usize,
 }
 
 impl Proposer {
     pub fn spawn(
         name: PublicKey,
-        committee: Committee,
         signature_service: SignatureService,
-        rx_mempool: Receiver<Digest>,
+        header_size: usize,
+        tx_size: usize,
         rx_message: Receiver<ProposerMessage>,
         tx_loopback: Sender<Block>,
     ) {
         tokio::spawn(async move {
             Self {
                 name,
-                committee,
                 signature_service,
-                rx_mempool,
                 rx_message,
                 tx_loopback,
-                buffer: HashSet::new(),
-                network: ReliableSender::new(),
+                header_size,
+                tx_size,
             }
             .run()
             .await;
         });
     }
 
-    /// Helper function. It waits for a future to complete and then delivers a value.
-    async fn waiter(wait_for: CancelHandler, deliver: Stake) -> Stake {
-        let _ = wait_for.await;
-        deliver
-    }
-
     async fn make_block(&mut self, round: Round, qc: QC, tc: Option<TC>) {
+        let payload = vec![vec![0u8; self.tx_size]; self.header_size / self.tx_size];
         // Generate a new block.
         let block = Block::new(
             qc,
             tc,
             self.name,
             round,
-            /* payload */ self.buffer.drain().collect(),
+            payload,
             self.signature_service.clone(),
         )
         .await;
@@ -74,36 +61,31 @@ impl Proposer {
             debug!("Created {}", block);
 
             #[cfg(feature = "benchmark")]
-            for x in &block.payload {
+            {
                 // NOTE: This log entry is used to compute performance.
-                info!("Created {} -> {:?}", block, x);
+                log::info!("Created {:?}", block.digest());
+                log::info!(
+                    "Block {:?} contains {} B",
+                    block.digest(),
+                    block.payload.iter().map(|tx| tx.len()).sum::<usize>()
+                );
             }
         }
         debug!("Created {:?}", block);
-        
+
         // Send our block to the core for processing.
         self.tx_loopback
             .send(block)
             .await
             .expect("Failed to send block");
-
     }
 
     async fn run(&mut self) {
         loop {
             tokio::select! {
-                Some(digest) = self.rx_mempool.recv() => {
-                    //if self.buffer.len() < 155 {
-                        self.buffer.insert(digest);
-                    //}
-                },
                 Some(message) = self.rx_message.recv() => match message {
                     ProposerMessage::Make(round, qc, tc) => self.make_block(round, qc, tc).await,
-                    ProposerMessage::Cleanup(digests) => {
-                        for x in &digests {
-                            self.buffer.remove(x);
-                        }
-                    }
+                    ProposerMessage::Cleanup => {}
                 }
             }
         }

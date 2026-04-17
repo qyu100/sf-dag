@@ -1,6 +1,7 @@
 use crate::config::Committee;
 use crate::consensus::Round;
 use crate::error::{ConsensusError, ConsensusResult};
+use crate::merkle::Proof;
 use crypto::{Digest, Hash, PublicKey, Signature, SignatureService};
 use ed25519_dalek::Digest as _;
 use ed25519_dalek::Sha512;
@@ -8,6 +9,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::convert::TryInto;
 use std::fmt;
+
+pub type Transaction = Vec<u8>;
 
 #[cfg(test)]
 #[path = "tests/messages_tests.rs"]
@@ -19,7 +22,7 @@ pub struct Block {
     pub tc: Option<TC>,
     pub author: PublicKey,
     pub round: Round,
-    pub payload: Vec<Digest>,
+    pub payload: Vec<Transaction>,
     pub signature: Signature,
 }
 
@@ -29,7 +32,7 @@ impl Block {
         tc: Option<TC>,
         author: PublicKey,
         round: Round,
-        payload: Vec<Digest>,
+        payload: Vec<Transaction>,
         mut signature_service: SignatureService,
     ) -> Self {
         let block = Self {
@@ -98,9 +101,216 @@ impl fmt::Debug for Block {
             self.author,
             self.round,
             self.qc,
-            self.payload.iter().map(|x| x.size()).sum::<usize>(),
+            self.payload.iter().map(|x| x.len()).sum::<usize>(),
         )
     }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct BlockInfo {
+    pub qc: QC,
+    pub tc: Option<TC>,
+    pub author: PublicKey,
+    pub round: Round,
+    pub payload_digest: Digest,
+    pub payload_len: usize,
+    pub id: Digest,
+    pub signature: Signature,
+}
+
+impl BlockInfo {
+    pub fn create_from(block: &Block) -> Self {
+        Self {
+            qc: block.qc.clone(),
+            tc: block.tc.clone(),
+            author: block.author,
+            round: block.round,
+            payload_digest: payload_digest(&block.payload),
+            payload_len: bincode::serialized_size(&block.payload)
+                .expect("payload serialization should not fail") as usize,
+            id: block.digest(),
+            signature: block.signature.clone(),
+        }
+    }
+
+    pub fn verify(&self, committee: &Committee) -> ConsensusResult<()> {
+        let voting_rights = committee.stake(&self.author);
+        ensure!(
+            voting_rights > 0,
+            ConsensusError::UnknownAuthority(self.author)
+        );
+        self.signature.verify(&self.id, &self.author)?;
+        if self.qc != QC::genesis() {
+            self.qc.verify(committee)?;
+        }
+        if let Some(ref tc) = self.tc {
+            tc.verify(committee)?;
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Debug for BlockInfo {
+    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+        write!(f, "{}: BI({}, {})", self.id, self.author, self.round)
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct BlockInfoWithProof {
+    pub info: BlockInfo,
+    pub proof: Proof,
+}
+
+impl BlockInfoWithProof {
+    pub fn new(info: BlockInfo, proof: Proof) -> Self {
+        Self { info, proof }
+    }
+
+    pub fn verify(&self, committee: &Committee) -> ConsensusResult<()> {
+        self.info.verify(committee)?;
+        ensure!(
+            self.proof.validate(committee.size()),
+            ConsensusError::InvalidPayload
+        );
+        Ok(())
+    }
+}
+
+impl fmt::Debug for BlockInfoWithProof {
+    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+        write!(f, "{:?}", self.info)
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Echo {
+    pub id: Digest,
+    pub round: Round,
+    pub origin: PublicKey,
+    pub author: PublicKey,
+    pub proof: Proof,
+    pub signature: Signature,
+}
+
+impl Echo {
+    pub async fn new(
+        block_info: &BlockInfoWithProof,
+        author: PublicKey,
+        mut signature_service: SignatureService,
+    ) -> Self {
+        let echo = Self {
+            id: block_info.info.id.clone(),
+            round: block_info.info.round,
+            origin: block_info.info.author,
+            author,
+            proof: block_info.proof.clone(),
+            signature: Signature::default(),
+        };
+        let signature = signature_service.request_signature(echo.digest()).await;
+        Self { signature, ..echo }
+    }
+
+    pub fn verify(&self, committee: &Committee) -> ConsensusResult<()> {
+        ensure!(
+            committee.stake(&self.author) > 0,
+            ConsensusError::UnknownAuthority(self.author)
+        );
+        ensure!(
+            self.proof.validate(committee.size()),
+            ConsensusError::InvalidPayload
+        );
+        self.signature.verify(&self.digest(), &self.author)?;
+        Ok(())
+    }
+}
+
+impl Hash for Echo {
+    fn digest(&self) -> Digest {
+        let mut hasher = Sha512::new();
+        hasher.update(&self.id);
+        hasher.update(self.round.to_le_bytes());
+        hasher.update(self.origin.0);
+        hasher.update(self.author.0);
+        hasher.update(self.proof.root_hash());
+        hasher.update((self.proof.index() as u64).to_le_bytes());
+        Digest(hasher.finalize().as_slice()[..32].try_into().unwrap())
+    }
+}
+
+impl fmt::Debug for Echo {
+    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+        write!(f, "E({}, {}, {})", self.id, self.round, self.author)
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct PayloadReady {
+    pub id: Digest,
+    pub round: Round,
+    pub origin: PublicKey,
+    pub author: PublicKey,
+    pub root_hash: Digest,
+    pub signature: Signature,
+}
+
+impl PayloadReady {
+    pub async fn new(
+        info: &BlockInfo,
+        author: PublicKey,
+        root_hash: Digest,
+        mut signature_service: SignatureService,
+    ) -> Self {
+        let ready = Self {
+            id: info.id.clone(),
+            round: info.round,
+            origin: info.author,
+            author,
+            root_hash,
+            signature: Signature::default(),
+        };
+        let signature = signature_service.request_signature(ready.digest()).await;
+        Self { signature, ..ready }
+    }
+
+    pub fn verify(&self, committee: &Committee) -> ConsensusResult<()> {
+        ensure!(
+            committee.stake(&self.author) > 0,
+            ConsensusError::UnknownAuthority(self.author)
+        );
+        self.signature.verify(&self.digest(), &self.author)?;
+        Ok(())
+    }
+}
+
+impl Hash for PayloadReady {
+    fn digest(&self) -> Digest {
+        let mut hasher = Sha512::new();
+        hasher.update(&self.id);
+        hasher.update(self.round.to_le_bytes());
+        hasher.update(self.origin.0);
+        hasher.update(self.author.0);
+        hasher.update(&self.root_hash);
+        Digest(hasher.finalize().as_slice()[..32].try_into().unwrap())
+    }
+}
+
+impl fmt::Debug for PayloadReady {
+    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+        write!(
+            f,
+            "PR({}, {}, {}, {})",
+            self.id, self.round, self.root_hash, self.author
+        )
+    }
+}
+
+pub fn payload_digest(payload: &[Transaction]) -> Digest {
+    let mut hasher = Sha512::new();
+    for x in payload {
+        hasher.update(x);
+    }
+    Digest(hasher.finalize().as_slice()[..32].try_into().unwrap())
 }
 
 impl fmt::Display for Block {
@@ -215,7 +425,6 @@ impl fmt::Debug for Ready {
         write!(f, "R({}, {}, {})", self.hash, self.round, self.author)
     }
 }
-
 
 #[derive(Clone, Serialize, Deserialize, Default)]
 pub struct QC {

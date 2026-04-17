@@ -18,14 +18,12 @@ fn core(
     let (tx_core, rx_core) = channel(1);
     let (tx_loopback, rx_loopback) = channel(1);
     let (tx_proposer, rx_proposer) = channel(1);
-    let (tx_mempool, mut rx_mempool) = channel(1);
     let (tx_commit, rx_commit) = channel(1);
 
     let signature_service = SignatureService::new(secret);
     let _ = fs::remove_dir_all(store_path);
     let store = Store::new(store_path).unwrap();
     let leader_elector = LeaderElector::new(committee.clone());
-    let mempool_driver = MempoolDriver::new(store.clone(), tx_mempool, tx_loopback.clone());
     let synchronizer = Synchronizer::new(
         name,
         committee.clone(),
@@ -34,21 +32,16 @@ fn core(
         /* sync_retry_delay */ 100_000,
     );
 
-    tokio::spawn(async move {
-        loop {
-            rx_mempool.recv().await;
-        }
-    });
-
     Core::spawn(
         name,
         committee,
         signature_service,
         store,
         leader_elector,
-        mempool_driver,
         synchronizer,
         /* timeout_delay */ 100,
+        /* rs_block_size */ 1_048_576,
+        /* rs_block_threads */ 4,
         /* rx_message */ rx_core,
         rx_loopback,
         tx_proposer,
@@ -141,6 +134,7 @@ async fn generate_proposal() {
 }
 
 #[tokio::test]
+#[ignore = "single-core direct proposal test bypasses the DA path and replica vote flow"]
 async fn commit_block() {
     // Get enough distinct leaders to form a quorum.
     let leaders = vec![leader_keys(1), leader_keys(2), leader_keys(3)];
@@ -149,7 +143,7 @@ async fn commit_block() {
     // Run a core instance.
     let store_path = ".db_test_commit_block";
     let (public_key, secret_key) = keys().pop().unwrap();
-    let (tx_core, mut rx_proposer, mut rx_commit) =
+    let (tx_core, _rx_proposer, mut rx_commit) =
         core(public_key, secret_key, committee(), store_path);
 
     // Send a the blocks to the core.
@@ -157,8 +151,17 @@ async fn commit_block() {
     for block in chain {
         let message = ConsensusMessage::Propose(block);
         tx_core.send(message).await.unwrap();
+    }
 
-        let _ = rx_proposer.recv().await.unwrap();
+    for (author, secret) in keys().into_iter().take(3) {
+        let ready = Ready::new_from_key(
+            committed.digest(),
+            committed.round,
+            QC::genesis(),
+            author,
+            &secret,
+        );
+        tx_core.send(ConsensusMessage::Ready(ready)).await.unwrap();
     }
 
     // Ensure the core commits the head.

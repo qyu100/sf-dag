@@ -1,6 +1,6 @@
 use crate::config::Committee;
 use crate::consensus::Round;
-use crate::messages::{Block, Timeout, Vote, QC};
+use crate::messages::{Block, Ready, Timeout, Transaction, Vote, QC};
 use bytes::Bytes;
 use crypto::Hash as _;
 use crypto::{generate_keypair, Digest, PublicKey, SecretKey, Signature};
@@ -50,7 +50,7 @@ impl Block {
         qc: QC,
         author: PublicKey,
         round: Round,
-        payload: Vec<Digest>,
+        payload: Vec<Transaction>,
         secret: &SecretKey,
     ) -> Self {
         let block = Block {
@@ -88,6 +88,26 @@ impl Vote {
 impl PartialEq for Vote {
     fn eq(&self, other: &Self) -> bool {
         self.digest() == other.digest()
+    }
+}
+
+impl Ready {
+    pub fn new_from_key(
+        hash: Digest,
+        round: Round,
+        qc: QC,
+        author: PublicKey,
+        secret: &SecretKey,
+    ) -> Self {
+        let ready = Self {
+            hash,
+            qc,
+            round,
+            author,
+            signature: Signature::default(),
+        };
+        let signature = Signature::new(&ready.digest(), secret);
+        Self { signature, ..ready }
     }
 }
 
