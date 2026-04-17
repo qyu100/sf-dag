@@ -577,7 +577,7 @@ class Bench:
                         faults = bench_parameters.faults
                         await self._download_logs(consensus_only, committee=committee_copy)
                         Print.info('Parsing logs and computing performance...')
-                        logger = LogParser.process(PathMaker.logs_path(), burst, consensus_only=consensus_only)
+                        logger = LogParser.process(PathMaker.logs_path(), faults=faults, consensus_only=consensus_only)
                         logger.print(PathMaker.result_file(
                             faults,
                             n,

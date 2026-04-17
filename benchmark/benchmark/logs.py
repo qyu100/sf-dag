@@ -14,11 +14,16 @@ class ParseError(Exception):
 
 
 class LogParser:
-    def __init__(self, clients, primaries, workers, faults=0):
+    def __init__(self, clients, primaries, workers, faults=0, consensus_only=False):
         inputs = [clients, primaries]
         assert all(isinstance(x, list) for x in inputs)
         assert all(isinstance(x, str) for y in inputs for x in y)
-        assert all(x for x in inputs)
+        if consensus_only:
+            assert primaries
+        else:
+            assert all(x for x in inputs)
+
+        self.consensus_only = consensus_only
 
         self.faults = faults
         if isinstance(faults, int):
@@ -28,15 +33,20 @@ class LogParser:
             self.committee_size = '?'
             self.workers = '?'
 
-        # Parse the clients logs.
-        try:
-            with Pool() as p:
-                results = p.map(self._parse_clients, clients)
-        except (ValueError, IndexError, AttributeError) as e:
-            raise ParseError(f'Failed to parse clients\' logs: {e}')
-        self.size, self.rate, self.start, misses, self.sent_samples \
-            = zip(*results)
-        self.misses = sum(misses)
+        # Parse clients logs unless this is a consensus-only run.
+        if not consensus_only:
+            try:
+                with Pool() as p:
+                    results = p.map(self._parse_clients, clients)
+            except (ValueError, IndexError, AttributeError) as e:
+                raise ParseError(f'Failed to parse clients\' logs: {e}')
+            self.size, self.rate, self.start, misses, self.sent_samples \
+                = zip(*results)
+            self.misses = sum(misses)
+        else:
+            self.size, self.rate, self.start = (), (), ()
+            self.sent_samples = []
+            self.misses = 0
 
         # Parse the primaries logs.
         try:
@@ -50,6 +60,12 @@ class LogParser:
         self.sizes = {
             k: v for x in sizes for k, v in x.items() if k in self.commits
         }
+
+        if consensus_only:
+            tx_size = self.configs[0]['transaction_size'] if self.configs else 1
+            self.size = (tx_size,)
+            start = min(self.proposals.values()) if self.proposals else 0
+            self.start = (start,)
 
         # Payload is produced in the primary, so there are no worker logs to compare against.
         self.collocate = True
@@ -175,6 +191,8 @@ class LogParser:
         return mean(latency) if latency else 0
 
     def _end_to_end_throughput(self):
+        if self.consensus_only:
+            return self._consensus_throughput()
         if not self.commits:
             return 0, 0, 0
         start, end = min(self.start), max(self.commits.values())
@@ -185,6 +203,8 @@ class LogParser:
         return tps, bps, duration
 
     def _end_to_end_latency(self):
+        if self.consensus_only:
+            return 0
         latency = []
         list_latencies = []
         first_start = 0
@@ -274,4 +294,4 @@ class LogParser:
         for filename in sorted(glob(join(directory, 'primary-*.log'))):
             with open(filename, 'r') as f:
                 primaries += [f.read()]
-        return cls(clients, primaries, [], faults=faults)
+        return cls(clients, primaries, [], faults=faults, *args, **kwargs)
