@@ -3,9 +3,9 @@ from fabric.exceptions import GroupException
 from paramiko import RSAKey
 from paramiko.ssh_exception import PasswordRequiredException, SSHException
 from os.path import basename, splitext
-from time import sleep
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from math import ceil
-from os.path import join
+from time import sleep
 import subprocess
 
 from benchmark.config import (
@@ -114,6 +114,14 @@ class Bench:
         output = c.run(cmd, hide=True)
         self._check_stderr(output)
 
+    def _parallel(self, items, worker, prefix):
+        workers = min(32, max(1, len(items)))
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = [executor.submit(worker, item) for item in items]
+            completed = as_completed(futures)
+            for _ in progress_bar(range(len(futures)), prefix=prefix):
+                next(completed).result()
+
     def _update(self, hosts):
         Print.info(f'Updating {len(hosts)} nodes (branch "{self.settings.branch}")...')
         cmd = [
@@ -164,13 +172,15 @@ class Bench:
         g = Group(*hosts, user="ubuntu", connect_kwargs=self.connect)
         g.run(cmd, hide=True)
 
-        # Upload configuration files.
-        progress = progress_bar(hosts, prefix="Uploading config files:")
-        for i, host in enumerate(progress):
+        def upload(item):
+            i, host = item
             c = Connection(host, user="ubuntu", connect_kwargs=self.connect)
             c.put(PathMaker.committee_file(), ".")
             c.put(PathMaker.key_file(i), ".")
             c.put(PathMaker.parameters_file(), ".")
+
+        # Upload configuration files.
+        self._parallel(list(enumerate(hosts)), upload, "Uploading config files:")
 
         return committee
 
@@ -179,20 +189,6 @@ class Bench:
 
         # Kill any potentially unfinished run and delete logs.
         self.kill(hosts=hosts, delete_logs=True)
-
-        # Run the clients (they will wait for the nodes to be ready).
-        # Filter all faulty nodes from the client addresses (or they will wait
-        # for the faulty nodes to be online).
-        committee = Committee.load(PathMaker.committee_file())
-        addresses = [f"{x}:{self.settings.front_port}" for x in hosts]
-        rate_share = ceil(rate / committee.size())  # Take faults into account.
-        timeout = node_parameters.timeout_delay
-        client_logs = [PathMaker.client_log_file(i) for i in range(len(hosts))]
-        for host, addr, log_file in zip(hosts, addresses, client_logs):
-            cmd = CommandMaker.run_client(
-                addr, bench_parameters.tx_size, rate_share, timeout, nodes=addresses
-            )
-            self._background_run(host, cmd, log_file)
 
         # Run the nodes.
         key_files = [PathMaker.key_file(i) for i in range(len(hosts))]
@@ -223,12 +219,13 @@ class Bench:
         cmd = CommandMaker.clean_logs()
         subprocess.run([cmd], shell=True, stderr=subprocess.DEVNULL)
 
-        # Download log files.
-        progress = progress_bar(hosts, prefix="Downloading logs:")
-        for i, host in enumerate(progress):
+        def download(item):
+            i, host = item
             c = Connection(host, user="ubuntu", connect_kwargs=self.connect)
             c.get(PathMaker.node_log_file(i), local=PathMaker.node_log_file(i))
-            c.get(PathMaker.client_log_file(i), local=PathMaker.client_log_file(i))
+
+        # Download log files.
+        self._parallel(list(enumerate(hosts)), download, "Downloading logs:")
 
         # Parse logs and return the parser.
         Print.info("Parsing logs and computing performance...")
