@@ -212,6 +212,7 @@ class LogParser:
         return mean(latency) if latency else 0
 
     def result(self):
+        header_size = self.configs[0]['consensus']['header_size']
         consensus_latency = self._consensus_latency() * 1000
         consensus_tps, consensus_bps, _ = self._consensus_throughput()
         end_to_end_tps, end_to_end_bps, duration = self._end_to_end_throughput()
@@ -235,6 +236,7 @@ class LogParser:
             f' Committee size: {self.committee_size} nodes\n'
             # f' Input rate: {sum(self.rate):,} tx/s\n'
             f' Transaction size: {self.size[0]:,} B\n'
+            f' Header size: {header_size:,} B\n'
             f' Execution time: {round(duration):,} s\n'
             '\n'
             # f' Consensus timeout delay: {consensus_timeout_delay:,} ms\n'

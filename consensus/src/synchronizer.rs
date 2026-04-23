@@ -140,13 +140,16 @@ impl Synchronizer {
         digest: &Digest,
         author: &PublicKey,
     ) -> ConsensusResult<Option<Block>> {
-        debug!("Getting block {:?}", digest);
         if digest == &Digest::default() {
             return Ok(Some(Block::genesis()));
         }
         match self.store.read(digest.to_vec()).await? {
-            Some(bytes) => Ok(Some(bincode::deserialize(&bytes)?)),
+            Some(bytes) => {
+                debug!("Found block {} in local store", digest);
+                Ok(Some(bincode::deserialize(&bytes)?))
+            }
             None => {
+                debug!("Block {} missing locally; requesting sync", digest);
                 let (tx, _rx) = oneshot::channel();
                 if let Err(e) = self
                     .inner_channel

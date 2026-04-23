@@ -1,6 +1,6 @@
 use super::*;
 use crate::common::{chain, committee, committee_with_base_port, keys, listener};
-use crypto::SecretKey;
+use crypto::{Digest, SecretKey};
 use futures::future::try_join_all;
 use std::fs;
 use tokio::sync::mpsc::channel;
@@ -64,11 +64,9 @@ fn leader_keys(round: Round) -> (PublicKey, SecretKey) {
 async fn handle_proposal() {
     let committee = committee_with_base_port(16_000);
 
-    // Make a block and the vote we expect to receive.
+    // Make a block.
     let block = chain(vec![leader_keys(1)]).pop().unwrap();
     let (public_key, secret_key) = keys().pop().unwrap();
-    let vote = Vote::new_from_key(block.digest(), block.round, public_key, &secret_key);
-    let expected = bincode::serialize(&ConsensusMessage::Vote(vote)).unwrap();
 
     // Run a core instance.
     let store_path = ".db_test_handle_proposal";
@@ -79,54 +77,23 @@ async fn handle_proposal() {
     let message = ConsensusMessage::Propose(block.clone());
     tx_core.send(message).await.unwrap();
 
-    // Ensure the next leaders gets the vote.
-    let (next_leader, _) = leader_keys(2);
-    let address = committee.address(&next_leader).unwrap();
-    let handle = listener(address, Some(Bytes::from(expected)));
-    assert!(handle.await.is_ok());
+    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 }
 
 #[tokio::test]
 async fn generate_proposal() {
-    // Get the keys of the leaders of this round and the next.
     let (leader, leader_key) = leader_keys(1);
-    let (next_leader, next_leader_key) = leader_keys(2);
-
-    // Make a block, votes, and QC.
-    let block = Block::new_from_key(QC::genesis(), leader, 1, Vec::new(), &leader_key);
-    let hash = block.digest();
-    let votes: Vec<_> = keys()
-        .iter()
-        .map(|(public_key, secret_key)| {
-            Vote::new_from_key(hash.clone(), block.round, *public_key, &secret_key)
-        })
-        .collect();
-    let hight_qc = QC {
-        hash,
-        round: block.round,
-        votes: votes
-            .iter()
-            .cloned()
-            .map(|x| (x.author, x.signature))
-            .collect(),
-    };
 
     // Run a core instance.
     let store_path = ".db_test_generate_proposal";
-    let (tx_core, mut rx_proposer, _rx_commit) =
-        core(next_leader, next_leader_key, committee(), store_path);
-
-    // Send all votes to the core.
-    for vote in votes.clone() {
-        let message = ConsensusMessage::Vote(vote);
-        tx_core.send(message).await.unwrap();
-    }
+    let (_tx_core, mut rx_proposer, _rx_commit) = core(leader, leader_key, committee(), store_path);
 
     // Ensure the core sends a new block.
     match rx_proposer.recv().await.unwrap() {
-        ProposerMessage::Make(round, qc, tc) => {
-            assert_eq!(round, 2);
-            assert_eq!(qc, hight_qc);
+        ProposerMessage::Make(round, qc, parent, tc) => {
+            assert_eq!(round, 1);
+            assert_eq!(qc, QC::genesis());
+            assert_eq!(parent, Digest::default());
             assert!(tc.is_none());
         }
         _ => panic!("Unexpected protocol message"),
@@ -151,17 +118,6 @@ async fn commit_block() {
     for block in chain {
         let message = ConsensusMessage::Propose(block);
         tx_core.send(message).await.unwrap();
-    }
-
-    for (author, secret) in keys().into_iter().take(3) {
-        let ready = Ready::new_from_key(
-            committed.digest(),
-            committed.round,
-            QC::genesis(),
-            author,
-            &secret,
-        );
-        tx_core.send(ConsensusMessage::Ready(ready)).await.unwrap();
     }
 
     // Ensure the core commits the head.

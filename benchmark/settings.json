@@ -1,5 +1,5 @@
 {
-    // "testbed": "alberto-hotstuff",
+    "testbed": "sf-dag",
     "key": {
         "name": "sf-dag",
         "path": "/Users/alberto/.ssh/aws"

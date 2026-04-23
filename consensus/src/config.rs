@@ -93,10 +93,6 @@ impl Committee {
         2 * total_votes / 3 + 1
     }
 
-    pub fn payload_ready_threshold(&self) -> Stake {
-        (2 * self.max_faults() + 1) as Stake
-    }
-
     pub fn address(&self, name: &PublicKey) -> Option<SocketAddr> {
         self.authorities.get(name).map(|x| x.address)
     }

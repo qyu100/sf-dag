@@ -1,56 +1,43 @@
 use super::*;
-use crate::common::{committee, keys, qc, vote};
+use crate::common::{committee, keys};
+use crate::messages::{Timeout, QC};
 
 #[test]
-fn add_vote() {
+fn add_timeout() {
     let mut aggregator = Aggregator::new(committee());
-    let result = aggregator.add_vote(vote());
+    let (author, secret) = keys().pop().unwrap();
+    let timeout = Timeout::new_from_key(QC::genesis(), 1, author, &secret);
+    let result = aggregator.add_timeout(timeout);
     assert!(result.is_ok());
     assert!(result.unwrap().is_none());
 }
 
 #[test]
-fn make_qc() {
+fn make_tc() {
     let mut aggregator = Aggregator::new(committee());
-    let mut keys = keys();
-    let qc = qc();
-    let hash = qc.digest();
-    let round = qc.round;
 
-    // Add 2f+1 votes to the aggregator and ensure it returns the cryptographic
-    // material to make a valid QC.
-    let (public_key, secret_key) = keys.pop().unwrap();
-    let vote = Vote::new_from_key(hash.clone(), round, public_key, &secret_key);
-    let result = aggregator.add_vote(vote);
-    assert!(result.is_ok());
-    assert!(result.unwrap().is_none());
-
-    let (public_key, secret_key) = keys.pop().unwrap();
-    let vote = Vote::new_from_key(hash.clone(), round, public_key, &secret_key);
-    let result = aggregator.add_vote(vote);
-    assert!(result.is_ok());
-    assert!(result.unwrap().is_none());
-
-    let (public_key, secret_key) = keys.pop().unwrap();
-    let vote = Vote::new_from_key(hash.clone(), round, public_key, &secret_key);
-    match aggregator.add_vote(vote) {
-        Ok(Some(qc)) => assert!(qc.verify(&committee()).is_ok()),
-        _ => assert!(false),
+    for (i, (author, secret)) in keys().into_iter().take(3).enumerate() {
+        let timeout = Timeout::new_from_key(QC::genesis(), 1, author, &secret);
+        let result = aggregator.add_timeout(timeout);
+        assert!(result.is_ok());
+        if i < 2 {
+            assert!(result.unwrap().is_none());
+        } else {
+            assert!(result.unwrap().is_some());
+        }
     }
 }
 
 #[test]
 fn cleanup() {
     let mut aggregator = Aggregator::new(committee());
+    let (author, secret) = keys().pop().unwrap();
+    let timeout = Timeout::new_from_key(QC::genesis(), 1, author, &secret);
 
-    // Add a vote and ensure it is in the aggregator memory.
-    let result = aggregator.add_vote(vote());
+    let result = aggregator.add_timeout(timeout);
     assert!(result.is_ok());
-    assert_eq!(aggregator.votes_aggregators.len(), 1);
-    assert!(aggregator.timeouts_aggregators.is_empty());
+    assert_eq!(aggregator.timeouts_aggregators.len(), 1);
 
-    // Clean up the aggregator.
     aggregator.cleanup(&2);
-    assert!(aggregator.votes_aggregators.is_empty());
     assert!(aggregator.timeouts_aggregators.is_empty());
 }

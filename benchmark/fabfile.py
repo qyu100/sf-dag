@@ -16,16 +16,16 @@ def local(ctx):
         "nodes": 10,
         "rate": 10_000,
         "tx_size": 512,
-        "duration": 20,
+        "duration": 30,
     }
     node_params = {
         "consensus": {
-            "timeout_delay": 1_000,
+            "timeout_delay": 5_000,
             "sync_retry_delay": 10_000,
-            "header_size": 4_096,
+            "header_size": 2_000_000,
             "tx_size": 512,
-            "rs_block_size": 4 * 1024,
-            "rs_block_threads": 4,
+            "rs_block_size": 16 * 1024,
+            "rs_block_threads": 8,
         },
         "mempool": {
             "gc_depth": 50,

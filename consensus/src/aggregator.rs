@@ -2,9 +2,9 @@ use crate::config::{Committee, Stake};
 use crate::consensus::Round;
 use crate::error::ConsensusResult;
 use crate::merkle::Proof;
-use crate::messages::{Echo, PayloadReady, Ready, Timeout, Vote, QC, TC};
-use crypto::Hash as _;
+use crate::messages::{Echo, PayloadReady, Timeout, TC};
 use crypto::{Digest, PublicKey, Signature};
+use log::debug;
 use std::collections::{HashMap, HashSet};
 
 #[cfg(test)]
@@ -13,8 +13,6 @@ pub mod aggregator_tests;
 
 pub struct Aggregator {
     committee: Committee,
-    votes_aggregators: HashMap<Round, HashMap<Digest, Box<QCMaker>>>,
-    ready_aggregators: HashMap<Round, HashMap<Digest, Box<QCMaker>>>,
     echo_aggregators: HashMap<Digest, Box<EchoMaker>>,
     payload_ready_aggregators: HashMap<Digest, Box<PayloadReadyMaker>>,
     timeouts_aggregators: HashMap<Round, Box<TCMaker>>,
@@ -24,8 +22,6 @@ impl Aggregator {
     pub fn new(committee: Committee) -> Self {
         Self {
             committee,
-            votes_aggregators: HashMap::new(),
-            ready_aggregators: HashMap::new(),
             echo_aggregators: HashMap::new(),
             payload_ready_aggregators: HashMap::new(),
             timeouts_aggregators: HashMap::new(),
@@ -50,32 +46,6 @@ impl Aggregator {
             .append(ready, &self.committee)
     }
 
-    pub fn add_vote(&mut self, vote: Vote) -> ConsensusResult<Option<QC>> {
-        // TODO [issue #7]: A bad node may make us run out of memory by sending many votes
-        // with different round numbers or different digests.
-
-        // Add the new vote to our aggregator and see if we have a QC.
-        self.votes_aggregators
-            .entry(vote.round)
-            .or_insert_with(HashMap::new)
-            .entry(vote.digest())
-            .or_insert_with(|| Box::new(QCMaker::new()))
-            .append_vote(vote, &self.committee)
-    }
-
-    pub fn add_ready(&mut self, ready: Ready) -> ConsensusResult<Option<QC>> {
-        // TODO [issue #7]: A bad node may make us run out of memory by sending many votes
-        // with different round numbers or different digests.
-
-        // Add the new vote to our aggregator and see if we have a QC.
-        self.ready_aggregators
-            .entry(ready.round)
-            .or_insert_with(HashMap::new)
-            .entry(ready.digest())
-            .or_insert_with(|| Box::new(QCMaker::new()))
-            .append_ready(ready, &self.committee)
-    }
-
     pub fn add_timeout(&mut self, timeout: Timeout) -> ConsensusResult<Option<TC>> {
         // TODO: A bad node may make us run out of memory by sending many timeouts
         // with different round numbers.
@@ -88,9 +58,14 @@ impl Aggregator {
     }
 
     pub fn cleanup(&mut self, round: &Round) {
-        self.votes_aggregators.retain(|k, _| k >= round);
-        self.ready_aggregators.retain(|k, _| k >= round);
         self.timeouts_aggregators.retain(|k, _| k >= round);
+    }
+
+    pub fn cleanup_payloads(&mut self, live_ids: &HashSet<Digest>) {
+        self.echo_aggregators
+            .retain(|digest, _| live_ids.contains(digest));
+        self.payload_ready_aggregators
+            .retain(|digest, _| live_ids.contains(digest));
     }
 }
 
@@ -116,8 +91,10 @@ impl EchoMaker {
         echo: Echo,
         committee: &Committee,
     ) -> ConsensusResult<Option<(Digest, Vec<Option<Box<[u8]>>>)>> {
+        let id = echo.id.clone();
         let author = echo.author;
         if !self.used.insert(author) {
+            debug!("Ignoring duplicate echo for {:?} from {}", id, author);
             return Ok(None);
         }
 
@@ -126,6 +103,14 @@ impl EchoMaker {
         entry.insert(author, echo.proof);
         let weight = self.weights.entry(root.clone()).or_insert(0);
         *weight += committee.stake(&author);
+        debug!(
+            "Echo weight for {:?} root {:?} is {}/{} after {}",
+            id,
+            root,
+            *weight,
+            committee.quorum_threshold(),
+            author
+        );
 
         if *weight >= committee.quorum_threshold() {
             let mut proofs = self.proofs.remove(&root).expect("proofs exist");
@@ -136,6 +121,7 @@ impl EchoMaker {
                 .take(self.shard_count)
                 .map(|pk| proofs.remove(&pk).map(|p| p.into_value()))
                 .collect();
+            debug!("Echo quorum reached for {:?} root {:?}", id, root);
             return Ok(Some((root, shards)));
         }
         Ok(None)
@@ -166,75 +152,8 @@ impl PayloadReadyMaker {
         }
         let weight = self.weights.entry(ready.root_hash.clone()).or_insert(0);
         *weight += committee.stake(&author);
-        if *weight >= committee.payload_ready_threshold() {
+        if *weight >= committee.quorum_threshold() {
             return Ok(Some(ready.root_hash));
-        }
-        Ok(None)
-    }
-}
-
-struct QCMaker {
-    weight: Stake,
-    votes: Vec<(PublicKey, Signature)>,
-    used: HashSet<PublicKey>,
-}
-
-impl QCMaker {
-    pub fn new() -> Self {
-        Self {
-            weight: 0,
-            votes: Vec::new(),
-            used: HashSet::new(),
-        }
-    }
-
-    /// Try to append a signature to a (partial) quorum.
-    pub fn append_vote(
-        &mut self,
-        vote: Vote,
-        committee: &Committee,
-    ) -> ConsensusResult<Option<QC>> {
-        let author = vote.author;
-
-        // Ensure it is the first time this authority votes.
-        if !self.used.insert(author) {
-            return Ok(None);
-        }
-
-        self.votes.push((author, vote.signature));
-        self.weight += committee.stake(&author);
-        if self.weight >= committee.quorum_threshold() {
-            self.weight = 0; // Ensures QC is only made once.
-            return Ok(Some(QC {
-                hash: vote.hash.clone(),
-                round: vote.round,
-                votes: self.votes.clone(),
-            }));
-        }
-        Ok(None)
-    }
-
-    pub fn append_ready(
-        &mut self,
-        ready: Ready,
-        committee: &Committee,
-    ) -> ConsensusResult<Option<QC>> {
-        let author = ready.author;
-
-        // Ensure it is the first time this authority votes.
-        if !self.used.insert(author) {
-            return Ok(None);
-        }
-
-        self.votes.push((author, ready.signature));
-        self.weight += committee.stake(&author);
-        if self.weight >= committee.quorum_threshold() {
-            self.weight = 0; // Ensures QC is only made once.
-            return Ok(Some(QC {
-                hash: ready.hash.clone(),
-                round: ready.round,
-                votes: self.votes.clone(),
-            }));
         }
         Ok(None)
     }

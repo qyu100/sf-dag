@@ -2,13 +2,13 @@ use crate::consensus::Round;
 use crate::messages::{Block, QC, TC};
 #[cfg(feature = "benchmark")]
 use crypto::Hash as _;
-use crypto::{PublicKey, SignatureService};
+use crypto::{Digest, PublicKey, SignatureService};
 use log::debug;
 use tokio::sync::mpsc::{Receiver, Sender};
 
 #[derive(Debug)]
 pub enum ProposerMessage {
-    Make(Round, QC, Option<TC>),
+    Make(Round, QC, Digest, Option<TC>),
     Cleanup,
 }
 
@@ -44,12 +44,13 @@ impl Proposer {
         });
     }
 
-    async fn make_block(&mut self, round: Round, qc: QC, tc: Option<TC>) {
+    async fn make_block(&mut self, round: Round, qc: QC, parent: Digest, tc: Option<TC>) {
         let payload = vec![vec![0u8; self.tx_size]; self.header_size / self.tx_size];
         // Generate a new block.
         let block = Block::new(
             qc,
             tc,
+            parent,
             self.name,
             round,
             payload,
@@ -84,7 +85,9 @@ impl Proposer {
         loop {
             tokio::select! {
                 Some(message) = self.rx_message.recv() => match message {
-                    ProposerMessage::Make(round, qc, tc) => self.make_block(round, qc, tc).await,
+                    ProposerMessage::Make(round, qc, parent, tc) => {
+                        self.make_block(round, qc, parent, tc).await
+                    }
                     ProposerMessage::Cleanup => {}
                 }
             }

@@ -3,7 +3,7 @@ use crate::core::Core;
 use crate::error::ConsensusError;
 use crate::helper::Helper;
 use crate::leader::LeaderElector;
-use crate::messages::{Block, BlockInfoWithProof, Echo, PayloadReady, Ready, Timeout, Vote, TC};
+use crate::messages::{Block, BlockInfoWithProof, Echo, PayloadReady, Timeout, TC};
 use crate::proposer::Proposer;
 use crate::synchronizer::Synchronizer;
 use async_trait::async_trait;
@@ -33,11 +33,9 @@ pub enum ConsensusMessage {
     ProposeInfo(BlockInfoWithProof),
     Echo(Echo),
     PayloadReady(PayloadReady),
-    Vote(Vote),
     Timeout(Timeout),
     TC(TC),
     SyncRequest(Digest, PublicKey),
-    Ready(Ready),
 }
 
 pub struct Consensus;
