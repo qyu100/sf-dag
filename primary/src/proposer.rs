@@ -75,7 +75,10 @@ impl Proposer {
             .map(|x| x.digest())
             .collect();*/
 
-        let genesis = Certificate::genesis_cert(&committee);
+        let genesis = Certificate::genesis_certs(&committee)
+            .get(&name)
+            .expect("Own genesis certificate should exist")
+            .clone();
 
 
         tokio::spawn(async move {
@@ -89,7 +92,7 @@ impl Proposer {
                 rx_workers,
                 rx_instance,
                 tx_core,
-                height: 0,
+                height: 1,
                 last_parent: Some(genesis),
                 consensus_instances: HashMap::new(),
                 digests: Vec::with_capacity(2 * header_size),
@@ -105,6 +108,8 @@ impl Proposer {
     }
     
     async fn make_header(&mut self) {
+        #[cfg(feature = "benchmark")]
+        let make_start = Instant::now();
         // Make a new header.
         debug!("digests size before is {:?}", self.digests.len());
 
@@ -137,6 +142,16 @@ impl Proposer {
                 header.id,
                 header.payload.len() * self.tx_size
             );
+            info!(
+                "LATENCY_TRACE event=proposer_header_created height={} header={:?} special={} consensus_msgs={} active_instances={} payload_items={} elapsed_ms={}",
+                header.height,
+                header.id,
+                header.special,
+                header.consensus_messages.len(),
+                header.num_active_instances,
+                header.payload.len(),
+                make_start.elapsed().as_millis()
+            );
         }
 
         // Reset last parent
@@ -151,6 +166,11 @@ impl Proposer {
             .send(header)
             .await
             .expect("Failed to send header");
+        #[cfg(feature = "benchmark")]
+        info!(
+            "LATENCY_TRACE event=proposer_header_sent_to_core elapsed_ms={}",
+            make_start.elapsed().as_millis()
+        );
     }
 
     // Main loop listening to incoming messages.
@@ -182,6 +202,17 @@ impl Proposer {
 
                 debug!("New car proposed after {:?} ms", current_time.elapsed().as_millis());
                 debug!("is special is {:?}", self.is_special);
+                #[cfg(feature = "benchmark")]
+                info!(
+                    "LATENCY_TRACE event=proposer_ready height={} reason={} inter_header_ms={} has_parent={} special={} buffered_consensus_msgs={} active_instances={}",
+                    self.height,
+                    if timer_expired { "timer_expired" } else { "parent_or_special" },
+                    current_time.elapsed().as_millis(),
+                    enough_parent,
+                    self.is_special,
+                    self.consensus_instances.len(),
+                    self.num_active_instances
+                );
                 current_time = Instant::now();
                 
                 // Make a new header.

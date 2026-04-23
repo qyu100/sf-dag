@@ -592,7 +592,7 @@ class Bench:
                         Print.error(BenchError('Benchmark failed', e))
                         continue        
 
-    def run(self, bench_parameters_dict, node_parameters_dict, debug=False, consensus_only=False, update=True):
+    def run(self, bench_parameters_dict, node_parameters_dict, debug=False, consensus_only=True, update=True):
         assert isinstance(debug, bool)
         Print.heading('Starting remote benchmark')
         node_parameters_dict = dict(node_parameters_dict)

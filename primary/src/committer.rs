@@ -13,6 +13,7 @@ use log::{debug, info};
 use std::borrow::BorrowMut;
 use std::cmp::max;
 use std::collections::{HashMap, HashSet};
+use std::time::Instant;
 use store::Store;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 
@@ -115,21 +116,46 @@ impl Committer {
     }
 
     async fn process_commit_message(&mut self, state: &mut State, commit_message: ConsensusMessage) {
+        #[cfg(feature = "benchmark")]
+        let committer_start = Instant::now();
         match commit_message.clone() {
-            ConsensusMessage::Commit{slot, view: _, qc: _, proposals: _} => {
+            ConsensusMessage::Commit{slot, view, qc: _, proposals: _} => {
                 if slot <= state.last_executed_slot {
                     debug!("Already committed slot {}", slot);
+                    #[cfg(feature = "benchmark")]
+                    info!(
+                        "LATENCY_TRACE event=committer_skip_old slot={} last_executed_slot={}",
+                        slot,
+                        state.last_executed_slot
+                    );
                     return;
                 }
 
                 // Store the commit message if all proposals are ready to be processed
                 state.log.insert(slot, commit_message);
+                #[cfg(feature = "benchmark")]
+                info!(
+                    "LATENCY_TRACE event=committer_received slot={} view={} buffered_slots={} elapsed_ms={}",
+                    slot,
+                    view,
+                    state.log.len(),
+                    committer_start.elapsed().as_millis()
+                );
 
                 while state.log.contains_key(&(state.last_executed_slot + 1)) {
+                    #[cfg(feature = "benchmark")]
+                    let execute_start = Instant::now();
                     let current_commit_message = state.log.get(&(state.last_executed_slot + 1)).unwrap();
                     debug!("Currently executing slot {:?}", state.last_executed_slot + 1);
                     match current_commit_message {
-                        ConsensusMessage::Commit { slot: _, view: _, qc: _, proposals } => {
+                        ConsensusMessage::Commit { slot, view, qc: _, proposals } => {
+                            #[cfg(feature = "benchmark")]
+                            info!(
+                                "LATENCY_TRACE event=committer_execute_start slot={} view={} proposals={}",
+                                slot,
+                                view,
+                                proposals.len()
+                            );
                             for (pk, proposal) in proposals {
                                 let stop_height = *state.last_executed_heights.get(pk).unwrap();
                                 // Don't execute proposals which are too old
@@ -138,9 +164,23 @@ impl Committer {
                                     continue;
                                 }
 
+                                #[cfg(feature = "benchmark")]
+                                let fetch_start = Instant::now();
                                 let headers = self.synchronizer.get_all_headers_for_proposal(proposal.clone(), stop_height)
                                     .await
                                     .expect("should have ancestors by now");
+                                #[cfg(feature = "benchmark")]
+                                if fetch_start.elapsed().as_millis() >= 10 || headers.len() > 1 {
+                                    info!(
+                                        "LATENCY_TRACE event=committer_headers_ready slot={} author={} from_height={} to_height={} headers={} elapsed_ms={}",
+                                        slot,
+                                        pk,
+                                        stop_height,
+                                        proposal.height,
+                                        headers.len(),
+                                        fetch_start.elapsed().as_millis()
+                                    );
+                                }
 
                                 // Update last executed height for the lane
                                 if proposal.height > stop_height {
@@ -153,6 +193,13 @@ impl Committer {
                                     #[cfg(feature = "benchmark")]
                                     {
                                         info!("Committed {:?} ", header.id);
+                                        info!(
+                                            "LATENCY_TRACE event=committer_header_output slot={} height={} header={:?} payload_items={}",
+                                            slot,
+                                            header.height,
+                                            header.id,
+                                            header.payload.len()
+                                        );
                                         // info!("Header {:?} contains {} B", header.id, header.payload.iter().map(|tx| tx.len()).sum::<usize>());
                                     }
                                     debug!("Finished Commit");
@@ -164,6 +211,13 @@ impl Committer {
                                 }
                             }
                             state.last_executed_slot += 1;
+                            #[cfg(feature = "benchmark")]
+                            info!(
+                                "LATENCY_TRACE event=committer_execute_done slot={} last_executed_slot={} elapsed_ms={}",
+                                slot,
+                                state.last_executed_slot,
+                                execute_start.elapsed().as_millis()
+                            );
                         },
                         _ => {}
                     }
