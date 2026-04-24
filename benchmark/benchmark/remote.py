@@ -6,7 +6,7 @@ import traceback
 from math import ceil
 from os.path import basename, splitext
 from subprocess import SubprocessError
-from time import sleep
+from time import sleep, time
 
 import asyncssh
 from paramiko.ssh_exception import PasswordRequiredException, SSHException
@@ -19,6 +19,9 @@ from benchmark.utils import BenchError, PathMaker, Print, progress_bar
 
 
 class Bench:
+    MIN_STARTUP_DELAY = 30
+    MAX_STARTUP_DELAY = 90
+
     def __init__(self, ctx):
         self.manager = InstanceManager.make()
         self.settings = self.manager.settings
@@ -273,26 +276,36 @@ class Bench:
         return committee
 
     async def _run_nodes(self, hosts, debug=False):
-        Print.info("Booting nodes...")
+        startup_delay = min(
+            self.MAX_STARTUP_DELAY,
+            max(self.MIN_STARTUP_DELAY, len(hosts)),
+        )
+        start_at = int(time()) + startup_delay
+        Print.info(
+            f"Booting nodes at synchronized timestamp {start_at} "
+            f"(in about {startup_delay} sec)..."
+        )
         repo = self.settings.repo_name
         remote_dir = f"/home/ubuntu/{repo}/benchmark"
         tasks = []
         for i, host in enumerate(hosts):
-            cmd = "cd {} && {}".format(
-                remote_dir,
-                CommandMaker.run_node(
-                    PathMaker.key_file(i),
-                    PathMaker.committee_file(),
-                    PathMaker.db_path(i),
-                    PathMaker.parameters_file(),
-                    debug=debug,
-                ),
+            run_cmd = CommandMaker.run_node(
+                PathMaker.key_file(i),
+                PathMaker.committee_file(),
+                PathMaker.db_path(i),
+                PathMaker.parameters_file(),
+                debug=debug,
+            )
+            cmd = (
+                f"while [ $(date +%s) -lt {start_at} ]; do sleep 0.2; done; "
+                f"cd {remote_dir} && {run_cmd}"
             )
             log_file = f"{remote_dir}/{PathMaker.node_log_file(i)}"
             connection = self.hosts_to_connections[host]
             tasks.append(self._run_on_host(host, cmd, log_file, connection))
 
         await self._gather_and_parse(tasks, "Boot Nodes")
+        return start_at
 
     async def _run_single(
         self,
@@ -305,9 +318,12 @@ class Bench:
     ):
         await self._kill(hosts_to_connections=self.hosts_to_connections, delete_logs=True)
         committee = await self._configure(committee_hosts, active_hosts, node_parameters, update)
-        await self._run_nodes(active_hosts, debug)
+        start_at = await self._run_nodes(active_hosts, debug)
 
         Print.info("Waiting for the nodes to synchronize...")
+        remaining_startup_delay = start_at - time()
+        if remaining_startup_delay > 0:
+            sleep(remaining_startup_delay)
         sleep(2 * node_parameters.timeout_delay / 1000)
 
         duration = bench_parameters.duration
