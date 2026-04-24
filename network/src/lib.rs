@@ -1,4 +1,5 @@
 // Copyright(C) Facebook, Inc. and its affiliates.
+mod codec;
 mod error;
 mod receiver;
 mod reliable_sender;

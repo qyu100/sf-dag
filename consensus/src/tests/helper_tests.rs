@@ -1,5 +1,6 @@
 use super::*;
 use crate::common::{block, committee_with_base_port, keys, listener};
+use crate::consensus::ConsensusMessage;
 use crypto::Hash as _;
 use std::fs;
 use tokio::sync::mpsc::channel;

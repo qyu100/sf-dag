@@ -1,5 +1,4 @@
 use crate::config::Committee;
-use crate::consensus::ConsensusMessage;
 use bytes::Bytes;
 use crypto::{Digest, PublicKey};
 use log::warn;
@@ -10,6 +9,13 @@ use tokio::sync::mpsc::Receiver;
 #[cfg(test)]
 #[path = "tests/helper_tests.rs"]
 pub mod helper_tests;
+
+/// Bincode variant index for `ConsensusMessage::Propose`.
+///
+/// The store keeps bincode-serialized `Block`s. A sync reply needs the same
+/// block wrapped as `ConsensusMessage::Propose`, which bincode represents as a
+/// little-endian u32 variant tag followed by the variant payload.
+const PROPOSE_VARIANT_INDEX: u32 = 0;
 
 /// A task dedicated to help other authorities by replying to their sync requests.
 pub struct Helper {
@@ -57,10 +63,9 @@ impl Helper {
                 .await
                 .expect("Failed to read from storage")
             {
-                let block =
-                    bincode::deserialize(&bytes).expect("Failed to deserialize our own block");
-                let message = bincode::serialize(&ConsensusMessage::Propose(block))
-                    .expect("Failed to serialize block");
+                let mut message = Vec::with_capacity(4 + bytes.len());
+                message.extend_from_slice(&PROPOSE_VARIANT_INDEX.to_le_bytes());
+                message.extend_from_slice(&bytes);
                 self.network.send(address, Bytes::from(message)).await;
             }
         }

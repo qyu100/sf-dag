@@ -1,4 +1,5 @@
 // Copyright(C) Facebook, Inc. and its affiliates.
+use crate::codec::large_frame_codec;
 use crate::error::NetworkError;
 use bytes::Bytes;
 use futures::sink::SinkExt as _;
@@ -15,7 +16,7 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::sync::oneshot;
 use tokio::time::{sleep, Duration};
-use tokio_util::codec::{Framed, LengthDelimitedCodec};
+use tokio_util::codec::Framed;
 
 #[cfg(test)]
 #[path = "tests/reliable_sender_tests.rs"]
@@ -187,7 +188,7 @@ impl Connection {
         // which we are still waiting to receive an ACK.
         let mut pending_replies = VecDeque::new();
 
-        let (mut writer, mut reader) = Framed::new(stream, LengthDelimitedCodec::new()).split();
+        let (mut writer, mut reader) = Framed::new(stream, large_frame_codec()).split();
         let error = 'connection: loop {
             // Try to send all messages of the buffer.
             while let Some((data, handler)) = self.buffer.pop_front() {

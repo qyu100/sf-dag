@@ -1,4 +1,5 @@
 // Copyright(C) Facebook, Inc. and its affiliates.
+use crate::codec::large_frame_codec;
 use crate::error::NetworkError;
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -67,7 +68,7 @@ impl<Handler: MessageHandler> Receiver<Handler> {
     /// using the provided handler.
     async fn spawn_runner(socket: TcpStream, peer: SocketAddr, handler: Handler) {
         tokio::spawn(async move {
-            let transport = Framed::new(socket, LengthDelimitedCodec::new());
+            let transport = Framed::new(socket, large_frame_codec());
             let (mut writer, mut reader) = transport.split();
             while let Some(frame) = reader.next().await {
                 match frame.map_err(|e| NetworkError::FailedToReceiveMessage(peer, e)) {
