@@ -181,6 +181,7 @@ class Bench:
     async def _update_one(self, host, connection):
         deploy_key = self.settings.key_name
         repo = self.settings.repo_name
+        repo_url = self.settings.repo_url
         branch = self.settings.branch
         git_ssh = (
             f"GIT_SSH_COMMAND='ssh -i /home/ubuntu/{deploy_key} "
@@ -190,6 +191,7 @@ class Bench:
             [
                 "cd /home/ubuntu",
                 f"chmod 600 {deploy_key} || true",
+                f"(test -d {repo} || {git_ssh} git clone {repo_url} {repo})",
                 f"cd {repo}",
                 f"git checkout {branch}",
                 f"{git_ssh} git pull --ff-only",
@@ -205,10 +207,31 @@ class Bench:
         except Exception as e:
             return host, Exception(f"Failed to update {host} because of {e}")
 
+    @staticmethod
+    def _format_remote_error(result):
+        stderr = getattr(result, "stderr", "")
+        stdout = getattr(result, "stdout", "")
+        status = getattr(result, "exit_status", None)
+        parts = []
+        if status is not None:
+            parts.append(f"exit status {status}")
+        if stderr:
+            parts.append(stderr.strip())
+        if stdout:
+            parts.append(stdout.strip())
+        return "; ".join(parts) if parts else str(result)
+
     async def _upload_config(self, connection, node_id):
         repo = self.settings.repo_name
         remote_dir = f"/home/ubuntu/{repo}/benchmark"
-        await connection.run(f"cd {remote_dir} && ({CommandMaker.cleanup()} || true)")
+        result = await connection.run(f"test -d {remote_dir}")
+        if result.exit_status:
+            raise Exception(
+                f"Remote benchmark directory is missing: {remote_dir}. "
+                "Run fab install or check repo.name/repo.branch. "
+                f"Remote error: {self._format_remote_error(result)}"
+            )
+        await connection.run(f"cd {remote_dir} && ({CommandMaker.cleanup()} || true)", check=True)
         async with connection.start_sftp_client() as sftp:
             await sftp.put(PathMaker.committee_file(), remote_dir, preserve=True)
             await sftp.put(PathMaker.key_file(node_id), remote_dir, preserve=True)
