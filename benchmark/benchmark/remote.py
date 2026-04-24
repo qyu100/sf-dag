@@ -50,6 +50,20 @@ class Bench:
         self._parse_task_results(func, hosts_and_results, verbose)
         return hosts_and_results
 
+    @staticmethod
+    def _format_remote_error(result):
+        status = getattr(result, "exit_status", None)
+        stderr = getattr(result, "stderr", "")
+        stdout = getattr(result, "stdout", "")
+        parts = []
+        if status is not None:
+            parts.append(f"exit status {status}")
+        if stderr:
+            parts.append(stderr.strip())
+        if stdout:
+            parts.append(stdout.strip())
+        return "; ".join(parts) if parts else str(result)
+
     async def _try_connect(self, host):
         failures = 0
         retries = 5
@@ -85,6 +99,7 @@ class Bench:
                 [
                     "cd /home/ubuntu",
                     f"chmod 600 {deploy_key}",
+                    f"rm -f /home/ubuntu/node /home/ubuntu/client || true",
                     f"(test -d {repo} || {git_ssh} git clone {repo_url} {repo})",
                     f"cd {repo}",
                     f"git checkout {branch}",
@@ -191,6 +206,7 @@ class Bench:
             [
                 "cd /home/ubuntu",
                 f"chmod 600 {deploy_key} || true",
+                f"rm -f /home/ubuntu/node /home/ubuntu/client || true",
                 f"(test -d {repo} || {git_ssh} git clone {repo_url} {repo})",
                 f"cd {repo}",
                 f"git checkout {branch}",
@@ -207,20 +223,6 @@ class Bench:
         except Exception as e:
             return host, Exception(f"Failed to update {host} because of {e}")
 
-    @staticmethod
-    def _format_remote_error(result):
-        stderr = getattr(result, "stderr", "")
-        stdout = getattr(result, "stdout", "")
-        status = getattr(result, "exit_status", None)
-        parts = []
-        if status is not None:
-            parts.append(f"exit status {status}")
-        if stderr:
-            parts.append(stderr.strip())
-        if stdout:
-            parts.append(stdout.strip())
-        return "; ".join(parts) if parts else str(result)
-
     async def _upload_config(self, connection, node_id):
         repo = self.settings.repo_name
         remote_dir = f"/home/ubuntu/{repo}/benchmark"
@@ -231,6 +233,7 @@ class Bench:
                 "Run fab install or check repo.name/repo.branch. "
                 f"Remote error: {self._format_remote_error(result)}"
             )
+
         await connection.run(f"cd {remote_dir} && ({CommandMaker.cleanup()} || true)", check=True)
         async with connection.start_sftp_client() as sftp:
             await sftp.put(PathMaker.committee_file(), remote_dir, preserve=True)
