@@ -87,29 +87,32 @@ class Bench:
         repo = self.settings.repo_name
         repo_url = self.settings.repo_url
         branch = self.settings.branch
+        git_ssh = (
+            f"GIT_SSH_COMMAND='ssh -i /home/ubuntu/{deploy_key} "
+            "-o StrictHostKeyChecking=no'"
+        )
+        cmd = " && ".join(
+            [
+                "cd /home/ubuntu",
+                f"chmod 600 {deploy_key} || true",
+                f"rm -f /home/ubuntu/node /home/ubuntu/client || true",
+                (
+                    f"if [ ! -d {repo}/benchmark ]; then "
+                    f"rm -rf {repo}; {git_ssh} git clone {repo_url} {repo}; "
+                    "fi"
+                ),
+                f"cd {repo}",
+                f"{git_ssh} git fetch origin {branch}",
+                f"git checkout -B {branch} FETCH_HEAD",
+                "cd node",
+                CommandMaker.compile(),
+                "cd ../benchmark",
+                CommandMaker.alias_binaries(PathMaker.binary_path()),
+            ]
+        )
         try:
             async with connection.start_sftp_client() as sftp:
                 await sftp.put(self.settings.key_path, f"/home/ubuntu/{deploy_key}", preserve=True)
-
-            git_ssh = (
-                f"GIT_SSH_COMMAND='ssh -i /home/ubuntu/{deploy_key} "
-                "-o StrictHostKeyChecking=no'"
-            )
-            cmd = " && ".join(
-                [
-                    "cd /home/ubuntu",
-                    f"chmod 600 {deploy_key}",
-                    f"rm -f /home/ubuntu/node /home/ubuntu/client || true",
-                    f"(test -d {repo} || {git_ssh} git clone {repo_url} {repo})",
-                    f"cd {repo}",
-                    f"git checkout {branch}",
-                    f"{git_ssh} git pull --ff-only",
-                    "cd node",
-                    CommandMaker.compile(),
-                    "cd ../benchmark",
-                    CommandMaker.alias_binaries(PathMaker.binary_path()),
-                ]
-            )
             result = await connection.run(cmd, check=True)
             return host, result
         except Exception as e:
@@ -207,10 +210,14 @@ class Bench:
                 "cd /home/ubuntu",
                 f"chmod 600 {deploy_key} || true",
                 f"rm -f /home/ubuntu/node /home/ubuntu/client || true",
-                f"(test -d {repo} || {git_ssh} git clone {repo_url} {repo})",
+                (
+                    f"if [ ! -d {repo}/benchmark ]; then "
+                    f"rm -rf {repo}; {git_ssh} git clone {repo_url} {repo}; "
+                    "fi"
+                ),
                 f"cd {repo}",
-                f"git checkout {branch}",
-                f"{git_ssh} git pull --ff-only",
+                f"{git_ssh} git fetch origin {branch}",
+                f"git checkout -B {branch} FETCH_HEAD",
                 "cd node",
                 CommandMaker.compile(),
                 "cd ../benchmark",
@@ -218,6 +225,8 @@ class Bench:
             ]
         )
         try:
+            async with connection.start_sftp_client() as sftp:
+                await sftp.put(self.settings.key_path, f"/home/ubuntu/{deploy_key}", preserve=True)
             result = await connection.run(cmd, check=True)
             return host, result
         except Exception as e:
