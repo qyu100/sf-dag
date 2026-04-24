@@ -11,7 +11,7 @@
     "repo": {
         "name": "sf-dag",
         "url": "https://github.com/qyu100/sf-dag.git",
-        "branch": "autobahn"
+        "branch": "autobahn_noworker"
     },
     "username": "ubuntu",
     "instances": {

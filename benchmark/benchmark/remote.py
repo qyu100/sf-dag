@@ -145,9 +145,18 @@ class Bench:
             return host, result
         except Exception as e:
             return host, Exception(f'Failed to poll {host} because of {e}')
+
+    async def _tail_remote_file(self, host, connection, filename):
+        try:
+            result = await connection.run(f'tail -n 40 {filename} 2>/dev/null || true')
+            return host, result.stdout.strip()
+        except Exception as e:
+            return host, f'Failed to read {filename}: {e}'
         
     async def _poll(self, connections, func):
         poll_interval = 30 # seconds
+        max_wait = 60 * 60 # seconds
+        elapsed = 0
         retry = True
 
         # Poll the given connections until either all nodes have successfully completed the 
@@ -166,7 +175,25 @@ class Bench:
 
             # Wait before polling again.
             sleep(poll_interval)
-            print('Polling...')
+            elapsed += poll_interval
+            if elapsed >= max_wait:
+                out_tasks = [
+                    self._tail_remote_file(host, connection, f'/home/ubuntu/{func}.out')
+                    for host, connection in connections
+                ]
+                err_tasks = [
+                    self._tail_remote_file(host, connection, f'/home/ubuntu/{func}.err')
+                    for host, connection in connections
+                ]
+                out_logs = await asyncio.gather(*out_tasks)
+                err_logs = await asyncio.gather(*err_tasks)
+                details = []
+                for host, output in out_logs:
+                    details.append(f'\n{host} {func}.out tail:\n{output or "<empty>"}')
+                for host, output in err_logs:
+                    details.append(f'\n{host} {func}.err tail:\n{output or "<empty>"}')
+                raise Exception(f'{func} did not complete after {max_wait} seconds.{"".join(details)}')
+            print(f'Polling... ({elapsed}s)')
     
     async def _kill_one(self, host, connection, cmd):
         try:
