@@ -4,7 +4,7 @@ use tokio_util::codec::LengthDelimitedCodec;
 ///
 /// Consensus sync responses can carry full serialized blocks. The default
 /// `LengthDelimitedCodec` limit is too small for larger benchmark payloads.
-pub const MAX_FRAME_LENGTH: usize = 128 * 1024 * 1024;
+pub const MAX_FRAME_LENGTH: usize = 512 * 1024 * 1024;
 
 pub fn large_frame_codec() -> LengthDelimitedCodec {
     LengthDelimitedCodec::builder()

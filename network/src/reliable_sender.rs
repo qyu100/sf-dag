@@ -1,5 +1,5 @@
 // Copyright(C) Facebook, Inc. and its affiliates.
-use crate::codec::large_frame_codec;
+use crate::codec::{large_frame_codec, MAX_FRAME_LENGTH};
 use crate::error::NetworkError;
 use bytes::Bytes;
 use futures::sink::SinkExt as _;
@@ -198,6 +198,7 @@ impl Connection {
                 }
 
                 // Try to send the message.
+                let len = data.len();
                 match writer.send(data.clone()).await {
                     Ok(()) => {
                         // The message has been sent, we remove it from the buffer and add it to
@@ -207,6 +208,13 @@ impl Connection {
                     Err(e) => {
                         // We failed to send the message, we put it back into the buffer.
                         self.buffer.push_front((data, handler));
+                        warn!(
+                            "Failed to send message to {} ({} B, max frame {} B): {}",
+                            self.address,
+                            len,
+                            MAX_FRAME_LENGTH,
+                            e
+                        );
                         break 'connection NetworkError::FailedToSendMessage(self.address, e);
                     }
                 }

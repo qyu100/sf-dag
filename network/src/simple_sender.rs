@@ -1,5 +1,5 @@
 // Copyright(C) Facebook, Inc. and its affiliates.
-use crate::codec::large_frame_codec;
+use crate::codec::{large_frame_codec, MAX_FRAME_LENGTH};
 use crate::error::NetworkError;
 use bytes::Bytes;
 use futures::sink::SinkExt as _;
@@ -121,8 +121,15 @@ impl Connection {
             // Check if there are any new messages to send or if we get an ACK for messages we already sent.
             tokio::select! {
                 Some(data) = self.receiver.recv() => {
+                    let len = data.len();
                     if let Err(e) = writer.send(data).await {
-                        warn!("{}", NetworkError::FailedToSendMessage(self.address, e));
+                        warn!(
+                            "Failed to send message to {} ({} B, max frame {} B): {}",
+                            self.address,
+                            len,
+                            MAX_FRAME_LENGTH,
+                            e
+                        );
                         return;
                     }
                 },
