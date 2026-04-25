@@ -55,7 +55,7 @@ def create(ctx, nodes=1):
 def destroy(ctx):
     """Destroy the testbed"""
     try:
-        InstanceManager.make().terminate_instances()
+        InstanceManager.make().delete_instances()
     except BenchError as e:
         Print.error(e)
 

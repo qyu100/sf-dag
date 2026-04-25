@@ -4,6 +4,7 @@ import shlex
 import subprocess
 import traceback
 from math import ceil
+from os import chmod
 from os.path import basename, splitext
 from subprocess import SubprocessError
 from time import sleep
@@ -16,6 +17,9 @@ from benchmark.config import BenchParameters, Committee, ConfigError, Key, NodeP
 from benchmark.instance import InstanceManager
 from benchmark.logs import LogParser, ParseError
 from benchmark.utils import BenchError, PathMaker, Print, progress_bar
+
+STATUS_FAILURE = 25
+STATUS_SUCCESS = 0
 
 
 class Bench:
@@ -82,49 +86,88 @@ class Bench:
     def install(self):
         asyncio.get_event_loop().run_until_complete(self._install())
 
-    async def _install_one(self, host, connection):
-        deploy_key = self.settings.key_name
-        repo = self.settings.repo_name
-        repo_url = self.settings.repo_url
-        branch = self.settings.branch
-        git_ssh = (
-            f"GIT_SSH_COMMAND='ssh -i /home/ubuntu/{deploy_key} "
-            "-o StrictHostKeyChecking=no'"
-        )
-        cmd = " && ".join(
-            [
-                "cd /home/ubuntu",
-                f"chmod 600 {deploy_key} || true",
-                f"rm -f /home/ubuntu/node /home/ubuntu/client || true",
-                (
-                    f"if [ ! -d {repo}/benchmark ]; then "
-                    f"rm -rf {repo}; {git_ssh} git clone {repo_url} {repo}; "
-                    "fi"
-                ),
-                f"cd {repo}",
-                f"{git_ssh} git fetch origin {branch}",
-                f"git checkout -B {branch} FETCH_HEAD",
-                "cd node",
-                CommandMaker.compile(),
-                "cd ../benchmark",
-                CommandMaker.alias_binaries(PathMaker.binary_path()),
-            ]
-        )
+    async def _install_one(self, host, connection, cmd):
         try:
             async with connection.start_sftp_client() as sftp:
-                await sftp.put(self.settings.key_path, f"/home/ubuntu/{deploy_key}", preserve=True)
-            result = await connection.run(cmd, check=True)
+                await sftp.put(
+                    self.settings.key_path,
+                    f"/home/ubuntu/{self.settings.key_name}",
+                    preserve=True,
+                )
+                await sftp.put(
+                    PathMaker.bootstrap_script_path(),
+                    "/home/ubuntu/bootstrap_node.sh",
+                    preserve=True,
+                )
+                await sftp.put(
+                    PathMaker.update_script_path(),
+                    "/home/ubuntu/update_node.sh",
+                    preserve=True,
+                )
+            result = await connection.create_process(cmd)
             return host, result
         except Exception as e:
             return host, Exception(f"Failed to install on {host} because of {e}")
 
     async def _install(self):
-        Print.info("Installing and compiling the repo...")
+        Print.info("Installing rust and cloning the repo...")
+        deploy_key = self.settings.key_name
+        install_cmd = " && ".join(
+            [
+                "cd /home/ubuntu",
+                (
+                    f"./bootstrap_node.sh {deploy_key} {self.settings.repo_url} "
+                    f"{self.settings.repo_name} 2>./install.err 1>./install.out &"
+                ),
+            ]
+        )
+
+        chmod(self.settings.key_path, 0o600)
+        chmod(PathMaker.bootstrap_script_path(), 0o700)
+        chmod(PathMaker.update_script_path(), 0o700)
+
         hosts = self.manager.hosts(flat=True)
         hosts_and_connections = await self._try_connect_all(hosts)
-        tasks = [self._install_one(h, c) for h, c in hosts_and_connections]
+        tasks = [self._install_one(h, c, install_cmd) for h, c in hosts_and_connections]
         await self._gather_and_parse(tasks, "Install")
+        Print.info("Waiting for installations to complete...")
+        await self._poll(hosts_and_connections, "install")
         Print.heading(f"Initialized testbed of {len(hosts)} nodes")
+
+    async def _poll_one(self, host, connection, func):
+        try:
+            poll = (
+                f'grep "{func} complete" /home/ubuntu/{func}.out || '
+                f'((grep "returned exit code" /home/ubuntu/{func}.err | '
+                f'grep -v "exit code 0") && exit {STATUS_FAILURE})'
+            )
+            result = await connection.run(poll)
+            return host, result
+        except Exception as e:
+            return host, Exception(f"Failed to poll {host} because of {e}")
+
+    async def _poll(self, connections, func):
+        poll_interval = 30
+        while True:
+            tasks = [self._poll_one(host, connection, func) for host, connection in connections]
+            hosts_and_results = await self._gather_and_parse(tasks, "Poll")
+
+            successes = [
+                host for host, result in hosts_and_results
+                if result.exit_status == STATUS_SUCCESS
+            ]
+            if len(successes) == len(connections):
+                return
+
+            failures = [
+                host for host, result in hosts_and_results
+                if result.exit_status == STATUS_FAILURE
+            ]
+            if failures:
+                raise Exception(f"{func} failed on: {failures}")
+
+            sleep(poll_interval)
+            print("Polling...")
 
     def kill(self):
         asyncio.get_event_loop().run_until_complete(self._kill())
@@ -197,37 +240,18 @@ class Bench:
             return host, Exception(f"Failed to run {cmd} on {host} because of {e}")
 
     async def _update_one(self, host, connection):
-        deploy_key = self.settings.key_name
-        repo = self.settings.repo_name
-        repo_url = self.settings.repo_url
-        branch = self.settings.branch
-        git_ssh = (
-            f"GIT_SSH_COMMAND='ssh -i /home/ubuntu/{deploy_key} "
-            "-o StrictHostKeyChecking=no'"
-        )
-        cmd = " && ".join(
+        update_cmd = " && ".join(
             [
                 "cd /home/ubuntu",
-                f"chmod 600 {deploy_key} || true",
-                f"rm -f /home/ubuntu/node /home/ubuntu/client || true",
                 (
-                    f"if [ ! -d {repo}/benchmark ]; then "
-                    f"rm -rf {repo}; {git_ssh} git clone {repo_url} {repo}; "
-                    "fi"
+                    f"./update_node.sh {self.settings.key_name} "
+                    f"{self.settings.repo_name} {self.settings.branch} "
+                    "2>./update.err 1>./update.out &"
                 ),
-                f"cd {repo}",
-                f"{git_ssh} git fetch origin {branch}",
-                f"git checkout -B {branch} FETCH_HEAD",
-                "cd node",
-                CommandMaker.compile(),
-                "cd ../benchmark",
-                CommandMaker.alias_binaries(PathMaker.binary_path()),
             ]
         )
         try:
-            async with connection.start_sftp_client() as sftp:
-                await sftp.put(self.settings.key_path, f"/home/ubuntu/{deploy_key}", preserve=True)
-            result = await connection.run(cmd, check=True)
+            result = await connection.create_process(update_cmd)
             return host, result
         except Exception as e:
             return host, Exception(f"Failed to update {host} because of {e}")
@@ -235,14 +259,6 @@ class Bench:
     async def _upload_config(self, connection, node_id):
         repo = self.settings.repo_name
         remote_dir = f"/home/ubuntu/{repo}/benchmark"
-        result = await connection.run(f"test -d {remote_dir}")
-        if result.exit_status:
-            raise Exception(
-                f"Remote benchmark directory is missing: {remote_dir}. "
-                "Run fab install or check repo.name/repo.branch. "
-                f"Remote error: {self._format_remote_error(result)}"
-            )
-
         await connection.run(f"cd {remote_dir} && ({CommandMaker.cleanup()} || true)", check=True)
         async with connection.start_sftp_client() as sftp:
             await sftp.put(PathMaker.committee_file(), remote_dir, preserve=True)
@@ -276,16 +292,12 @@ class Bench:
         node_parameters.print(PathMaker.parameters_file())
         return committee
 
-    async def _configure_one(self, host, node_id, connection, update=True):
+    async def _upload_config_one(self, host, node_id, connection):
         try:
-            if update:
-                updated = await self._update_one(host, connection)
-                if isinstance(updated[1], Exception):
-                    return updated
             await self._upload_config(connection, node_id)
             return host, None
         except Exception as e:
-            return host, Exception(f"Failed to configure {host} because of {e}")
+            return host, Exception(f"Failed to upload config to {host} because of {e}")
 
     async def _configure(self, committee_hosts, active_hosts, node_parameters, update=True):
         try:
@@ -299,11 +311,22 @@ class Bench:
             msg += f" and updating {self.settings.repo_name}:{self.settings.branch}"
         Print.info(msg + f" on {len(active_hosts)} machines...")
 
+        if update:
+            tasks = [
+                self._update_one(host, self.hosts_to_connections[host])
+                for host in active_hosts
+            ]
+            await self._gather_and_parse(tasks, "Update")
+            await self._poll(
+                [(host, self.hosts_to_connections[host]) for host in active_hosts],
+                "update",
+            )
+
         tasks = [
-            self._configure_one(host, i, self.hosts_to_connections[host], update)
+            self._upload_config_one(host, i, self.hosts_to_connections[host])
             for i, host in enumerate(active_hosts)
         ]
-        await self._gather_and_parse(tasks, "Configure")
+        await self._gather_and_parse(tasks, "Upload Config")
         Print.info(f"Successfully configured {len(active_hosts)} machines")
         return committee
 
