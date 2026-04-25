@@ -164,10 +164,27 @@ class Bench:
                 if result.exit_status == STATUS_FAILURE
             ]
             if failures:
+                await self._print_remote_failures(connections, failures, func)
                 raise Exception(f"{func} failed on: {failures}")
 
             sleep(poll_interval)
             print("Polling...")
+
+    async def _print_remote_failures(self, connections, failures, func):
+        connections_by_host = dict(connections)
+        for host in failures[:5]:
+            connection = connections_by_host.get(host)
+            if not connection:
+                continue
+            result = await connection.run(
+                f"echo '--- {func}.err on {host} ---'; "
+                f"tail -n 80 /home/ubuntu/{func}.err || true; "
+                f"echo '--- {func}.out on {host} ---'; "
+                f"tail -n 40 /home/ubuntu/{func}.out || true"
+            )
+            print(result.stdout, end="")
+            if result.stderr:
+                print(result.stderr, end="")
 
     def kill(self):
         asyncio.get_event_loop().run_until_complete(self._kill())
@@ -243,6 +260,8 @@ class Bench:
         update_cmd = " && ".join(
             [
                 "cd /home/ubuntu",
+                f"chmod 600 /home/ubuntu/.ssh/{self.settings.key_name} || true",
+                "chmod 700 ./update_node.sh",
                 (
                     f"./update_node.sh {self.settings.key_name} "
                     f"{self.settings.repo_name} {self.settings.branch} "
@@ -251,6 +270,21 @@ class Bench:
             ]
         )
         try:
+            await connection.run(
+                "mkdir -p /home/ubuntu/.ssh && chmod 700 /home/ubuntu/.ssh",
+                check=True,
+            )
+            async with connection.start_sftp_client() as sftp:
+                await sftp.put(
+                    self.settings.key_path,
+                    f"/home/ubuntu/.ssh/{self.settings.key_name}",
+                    preserve=True,
+                )
+                await sftp.put(
+                    PathMaker.update_script_path(),
+                    "/home/ubuntu/update_node.sh",
+                    preserve=True,
+                )
             result = await connection.create_process(update_cmd)
             return host, result
         except Exception as e:
