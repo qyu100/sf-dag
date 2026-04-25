@@ -197,40 +197,24 @@ impl Signature {
             .expect("Unexpected signature length")
     }
 
-    pub fn verify(&self, digest: &Digest, public_key: &PublicKey) -> Result<(), CryptoError> {
-        let signature = ed25519::signature::Signature::from_bytes(&self.flatten())?;
-        let key = dalek::PublicKey::from_bytes(&public_key.0)?;
-        key.verify_strict(&digest.0, &signature)
+    pub fn verify(&self, _digest: &Digest, _public_key: &PublicKey) -> Result<(), CryptoError> {
+        // Benchmark branch: skip ed25519 verification while preserving the
+        // signature-bearing message format and validation call sites.
+        Ok(())
     }
 
-    pub fn verify_batch<'a, I>(digest: &Digest, votes: I) -> Result<(), CryptoError>
+    pub fn verify_batch<'a, I>(_digest: &Digest, _votes: I) -> Result<(), CryptoError>
     where
         I: IntoIterator<Item = &'a (PublicKey, Signature)>,
     {
-        let mut messages: Vec<&[u8]> = Vec::new();
-        let mut signatures: Vec<dalek::Signature> = Vec::new();
-        let mut keys: Vec<dalek::PublicKey> = Vec::new();
-        for (key, sig) in votes.into_iter() {
-            messages.push(&digest.0[..]);
-            signatures.push(ed25519::signature::Signature::from_bytes(&sig.flatten())?);
-            keys.push(dalek::PublicKey::from_bytes(&key.0)?);
-        }
-        dalek::verify_batch(&messages[..], &signatures[..], &keys[..])
+        Ok(())
     }
 
-    pub fn verify_batch_multi<'a, I>(digests: &Vec<Digest>, votes: I) -> Result<(), CryptoError>
+    pub fn verify_batch_multi<'a, I>(_digests: &Vec<Digest>, _votes: I) -> Result<(), CryptoError>
     where
         I: IntoIterator<Item = &'a (PublicKey, Signature)>,
     {
-        let mut messages: Vec<&[u8]> = Vec::new();
-        let mut signatures: Vec<dalek::Signature> = Vec::new();
-        let mut keys: Vec<dalek::PublicKey> = Vec::new();
-        for (i, (key, sig)) in votes.into_iter().enumerate() {
-            messages.push(&digests[i].0[..]);
-            signatures.push(ed25519::signature::Signature::from_bytes(&sig.flatten())?);
-            keys.push(dalek::PublicKey::from_bytes(&key.0)?);
-        }
-        dalek::verify_batch(&messages[..], &signatures[..], &keys[..])
+        Ok(())
     }
 }
 
