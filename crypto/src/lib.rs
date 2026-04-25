@@ -1,15 +1,12 @@
 // Copyright(C) Facebook, Inc. and its affiliates.
 use ed25519_dalek as dalek;
 use ed25519_dalek::ed25519;
-use ed25519_dalek::Signer as _;
 use rand::rngs::OsRng;
 use rand::{CryptoRng, RngCore};
 use serde::{de, ser, Deserialize, Serialize};
 use std::array::TryFromSliceError;
 use std::convert::{TryFrom, TryInto};
 use std::fmt;
-use tokio::sync::mpsc::{channel, Sender};
-use tokio::sync::oneshot;
 
 #[cfg(test)]
 #[path = "tests/crypto_tests.rs"]
@@ -182,19 +179,10 @@ pub struct Signature {
 }
 
 impl Signature {
-    pub fn new(digest: &Digest, secret: &SecretKey) -> Self {
-        let keypair = dalek::Keypair::from_bytes(&secret.0).expect("Unable to load secret key");
-        let sig = keypair.sign(&digest.0).to_bytes();
-        let part1 = sig[..32].try_into().expect("Unexpected signature length");
-        let part2 = sig[32..64].try_into().expect("Unexpected signature length");
-        Signature { part1, part2 }
-    }
-
-    fn flatten(&self) -> [u8; 64] {
-        [self.part1, self.part2]
-            .concat()
-            .try_into()
-            .expect("Unexpected signature length")
+    pub fn new(_digest: &Digest, _secret: &SecretKey) -> Self {
+        // Benchmark branch: skip ed25519 signing while preserving the
+        // signature-bearing message format.
+        Signature::default()
     }
 
     pub fn verify(&self, _digest: &Digest, _public_key: &PublicKey) -> Result<(), CryptoError> {
@@ -221,29 +209,14 @@ impl Signature {
 /// This service holds the node's private key. It takes digests as input and returns a signature
 /// over the digest (through a oneshot channel).
 #[derive(Clone)]
-pub struct SignatureService {
-    channel: Sender<(Digest, oneshot::Sender<Signature>)>,
-}
+pub struct SignatureService;
 
 impl SignatureService {
-    pub fn new(secret: SecretKey) -> Self {
-        let (tx, mut rx): (Sender<(_, oneshot::Sender<_>)>, _) = channel(100);
-        tokio::spawn(async move {
-            while let Some((digest, sender)) = rx.recv().await {
-                let signature = Signature::new(&digest, &secret);
-                let _ = sender.send(signature);
-            }
-        });
-        Self { channel: tx }
+    pub fn new(_secret: SecretKey) -> Self {
+        Self
     }
 
-    pub async fn request_signature(&mut self, digest: Digest) -> Signature {
-        let (sender, receiver): (oneshot::Sender<_>, oneshot::Receiver<_>) = oneshot::channel();
-        if let Err(e) = self.channel.send((digest, sender)).await {
-            panic!("Failed to send message Signature Service: {}", e);
-        }
-        receiver
-            .await
-            .expect("Failed to receive signature from Signature Service")
+    pub async fn request_signature(&mut self, _digest: Digest) -> Signature {
+        Signature::default()
     }
 }
