@@ -253,6 +253,7 @@ class LogParser:
             return {
                 'timeout_delay': int(params['timeout_delay']),
                 'header_size': int(params['header_size']),
+                'tx_size': int(params.get('tx_size', 512)),
                 'max_header_delay': int(params['max_header_delay']),
                 'gc_depth': int(params['gc_depth']),
                 'sync_retry_delay': int(params['sync_retry_delay']),
@@ -275,6 +276,9 @@ class LogParser:
             'header_size': int(
                 search(r'Header size .* (\d+)', header).group(1)
             ),
+            'tx_size': int(
+                search(r'Transaction size .* (\d+)', header).group(1)
+            ) if search(r'Transaction size .* (\d+)', header) else 512,
             'max_header_delay': int(
                 search(r'Max header delay .* (\d+)', header).group(1)
             ),
@@ -538,6 +542,8 @@ class LogParser:
 
     def _config_output(self):
         block_size = self.config['block_size']
+        header_size = self.config['header_size']
+        tx_size = self.config.get('tx_size', 512)
         timeout_delay = self.config['timeout_delay']
         sync_retry_delay = self.config['sync_retry_delay']
         sync_retry_nodes = self.config['sync_retry_nodes']
@@ -557,6 +563,8 @@ class LogParser:
                 f" C: {self.config['c']}\n"
                 f" K: {self.config['k']}\n"
                 '\n'
+                f' Header size: {header_size:,} B\n'
+                f' Transaction size: {tx_size:,} B\n'
                 f' Block size: {block_size:,} Certificates\n'
                 f' Timeout delay: {timeout_delay:,} ms\n'
                 f' Sync retry delay: {sync_retry_delay:,} ms\n'

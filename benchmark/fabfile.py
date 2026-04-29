@@ -11,7 +11,7 @@ from math import floor
 
 
 @task
-def local(ctx, debug=True, consensus_only=True, aggregate=False):
+def local(ctx, debug=True, consensus_only=True, aggregate=False, header_size=512_000):
     ''' Run benchmarks on localhost '''
     bench_params = {
         'faults': 0,
@@ -31,7 +31,8 @@ def local(ctx, debug=True, consensus_only=True, aggregate=False):
         'max_block_size': 10,
         'consensus_only': consensus_only,
         'timeout_delay': 1000,  # ms
-        'header_size': 512_000,  # bytes
+        'header_size': header_size,  # bytes
+        'tx_size': bench_params['tx_size'],
         'max_header_delay': 200,  # ms
         'gc_depth': 50,  # rounds
         'sync_retry_delay': 5_000,  # ms
@@ -116,7 +117,7 @@ def create_firewall(ctx):
 
 
 @task
-def remote(ctx, block_size=50, debug=False, consensus_only=True, update=True, aggregate=False):
+def remote(ctx, block_size=50, debug=False, consensus_only=True, update=True, aggregate=False, header_size=1024_000):
     ''' Run benchmarks on GCP '''
     
     bench_params = {
@@ -147,7 +148,8 @@ def remote(ctx, block_size=50, debug=False, consensus_only=True, update=True, ag
         'max_block_size': block_size,
         'consensus_only': consensus_only,
         'timeout_delay': 5_000,  # ms
-        'header_size': 1024_000,  # bytes
+        'header_size': header_size,  # bytes
+        'tx_size': bench_params['tx_size'],
         'max_header_delay': 2000,  # ms
         'gc_depth': 50,  # rounds
         'sync_retry_delay': 5_000,  # ms

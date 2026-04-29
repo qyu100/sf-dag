@@ -141,6 +141,8 @@ impl Consensus {
             name,
             parameters.consensus_only,
             committee.clone(),
+            parameters.header_size,
+            parameters.tx_size,
             parameters.max_block_size,
             parameters.rs_block_size,
             parameters.rs_block_threads,

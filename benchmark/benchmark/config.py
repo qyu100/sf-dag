@@ -255,6 +255,7 @@ class NodeParameters:
             inputs += [json['k']]
             inputs += [json['timeout_delay']]
             inputs += [json['header_size']]
+            inputs += [json['tx_size']]
             inputs += [json['max_header_delay']]
             inputs += [json['gc_depth']]
             inputs += [json['sync_retry_delay']]

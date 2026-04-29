@@ -77,6 +77,8 @@ pub struct Parameters {
     /// The preferred header size. The primary creates a new header when it has enough parents and
     /// enough batches' digests to reach `header_size`. Denominated in bytes.
     pub header_size: usize,
+    /// The size of each synthetic transaction used in consensus-only benchmarks.
+    pub tx_size: usize,
     // The maximum number of Certificates that may be included in a single consensus block.
     pub max_block_size: usize,
     /// The maximum delay that the primary waits between generating two headers, even if the header
@@ -116,6 +118,7 @@ impl Default for Parameters {
             consensus_only: false,
             timeout_delay: 5_000,
             header_size: 1_000,
+            tx_size: 512,
             max_block_size: 1,
             max_header_delay: 100,
             gc_depth: 50,
@@ -149,6 +152,7 @@ impl Parameters {
         info!("Using {:?} leader elector", self.leader_elector);
         info!("Timeout delay set to {} ms", self.timeout_delay);
         info!("Header size set to {} B", self.header_size);
+        info!("Transaction size set to {} B", self.tx_size);
         info!("F value set to {}", self.f);
         info!("C value set to {}", self.c);
         info!("K value set to {}", self.k);

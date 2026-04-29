@@ -34,6 +34,8 @@ pub struct Proposer {
     in_progress: HashMap<Round, Vec<CancelHandler>>,
     last_proposed: Block,
     max_block_delay: u64,
+    header_size: usize,
+    tx_size: usize,
     max_block_size: usize,
     rs_block_size: usize,
     rs_block_threads: usize,
@@ -51,6 +53,8 @@ impl Proposer {
         name: PublicKey,
         consensus_only: bool,
         committee: Committee,
+        header_size: usize,
+        tx_size: usize,
         max_block_size: usize,
         rs_block_size: usize,
         rs_block_threads: usize,
@@ -68,6 +72,8 @@ impl Proposer {
                 last_proposed: Block::genesis(),
                 signature_service,
                 max_block_delay: 2_000,
+                header_size,
+                tx_size,
                 max_block_size,
                 rs_block_size,
                 rs_block_threads,
@@ -90,13 +96,8 @@ impl Proposer {
     // once they have been committed.
     fn get_payload(&mut self) -> Vec<Transaction> {
         if self.consensus_only {
-            let mut payload = Vec::new();
-
-            for _ in 0..self.max_block_size {
-                payload.push(vec![0u8; 512]);
-            }
-
-            payload
+            let tx_count = (self.header_size / self.tx_size).max(1);
+            vec![vec![0u8; self.tx_size]; tx_count]
         } else {
             if self.buffer.len() < self.max_block_size {
                 self.buffer.drain(..).collect()
