@@ -1,5 +1,5 @@
 use crate::consensus::Round;
-use crate::error::ConsensusResult;
+use crate::error::{ConsensusError, ConsensusResult};
 use crate::messages::{Timeout, Vote, VoteType, QC, TC};
 use blsttc::{PublicKeyShareG2, SignatureShareG1};
 use config::{Committee, Stake};
@@ -81,6 +81,7 @@ struct QCMaker {
     weight: Stake,
     agg_sign: SignatureShareG1,
     pk_bit_vec: Vec<u128>,
+    availability_shards: Vec<Option<Box<[u8]>>>,
     is_qc_formed: bool,
 }
 
@@ -92,6 +93,7 @@ impl QCMaker {
             weight: 0,
             agg_sign: SignatureShareG1::default(),
             pk_bit_vec: vec![u128::MAX; (total_nodes + 127) / 128],
+            availability_shards: vec![None; total_nodes],
             is_qc_formed: false,
         }
     }
@@ -112,6 +114,16 @@ impl QCMaker {
             // verification is more expensive).
 
             self.used.insert(author);
+            if vote.kind == VoteType::Normal {
+                let proof = vote.proof.as_ref().ok_or(ConsensusError::InvalidProof)?;
+                ensure!(
+                    proof.index() == committee.id(&author) as usize
+                        && *proof.root_hash() == vote.payload_root
+                        && proof.validate(committee.size()),
+                    ConsensusError::InvalidProof
+                );
+                self.availability_shards[proof.index()] = Some(proof.value().clone());
+            }
             self.votes.push((author_bls_g2, vote.signature.clone()));
 
             if !self.is_qc_formed {
@@ -128,9 +140,9 @@ impl QCMaker {
                 }
 
                 self.weight += committee.stake(&author);
-                if vote.kind == VoteType::Normal && self.weight == committee.quorum_threshold()
-                    || vote.kind == VoteType::Commit
-                        && self.weight == committee.slow_commit_threshold()
+                let ready_threshold = committee.n - committee.f;
+                if vote.kind == VoteType::Normal && self.weight >= committee.quorum_threshold()
+                    || vote.kind == VoteType::Commit && self.weight >= ready_threshold
                 {
                     self.weight = 0; // Ensures QC of this type is only made once.
                     self.is_qc_formed = true;
@@ -153,8 +165,14 @@ impl QCMaker {
 
                     return Ok(Some(QC {
                         blk_hash: vote.blk_hash.clone(),
-                        kind: vote.kind,
+                        payload_root: vote.payload_root,
+                        kind: vote.kind.clone(),
                         round: vote.round,
+                        availability_shards: if vote.kind == VoteType::Normal {
+                            self.availability_shards.clone()
+                        } else {
+                            Vec::new()
+                        },
                         votes: (self.pk_bit_vec.clone(), self.agg_sign.clone()),
                     }));
                 }

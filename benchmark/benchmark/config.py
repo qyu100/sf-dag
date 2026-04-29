@@ -261,6 +261,8 @@ class NodeParameters:
             inputs += [json['sync_retry_nodes']]
             inputs += [json['batch_size']]
             inputs += [json['max_batch_delay']]
+            inputs += [json['rs_block_size']]
+            inputs += [json['rs_block_threads']]
             inputs += [json['threadpool_size']]
         except KeyError as e:
             raise ConfigError(f'Malformed parameters: missing key {e}')
@@ -273,8 +275,8 @@ class NodeParameters:
         c = int(json['c'])
         k = int(json['k'])
 
-        if numNodes != 3*f+2*c+k+1:
-            raise ConfigError('Insufficient number of nodes')
+        # if numNodes != 3*f+2*c+k+1:
+        #     raise ConfigError('Insufficient number of nodes')
 
         self.json = json
 

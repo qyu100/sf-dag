@@ -1,6 +1,7 @@
 # Copyright(C) Facebook, Inc. and its affiliates.
 from datetime import datetime
 from glob import glob
+import json
 from os.path import join
 from re import findall, search
 from statistics import mean, median
@@ -28,11 +29,8 @@ class LogParser:
 
         # Parse the primaries logs.
         try:
-            # Header should be included in the first 1000 characters.
-            header_len = 1100
             # Header is the same for all nodes.
-            header = primaries[0][0:header_len]
-            self.config = self._parse_config(header)
+            self.config = self._parse_config(primaries[0])
 
             if consensus_only:
                 self.committee_size = len(primaries) + self.config['faults']
@@ -65,6 +63,7 @@ class LogParser:
             header_commits, \
             self.received_samples, \
             sizes = zip(*results)
+        all_sizes = {k: v for x in sizes for k, v in x.items()}
 
         if not consensus_only:            
             committed_headers = [x.items() for x in header_commits]
@@ -73,9 +72,7 @@ class LogParser:
             self.header_first_commits = self._representative_results_by_digest(committed_headers, True)
             self.header_last_commits = self._representative_results_by_digest(committed_headers, False)
             
-            self.sizes = {
-                k: v for x in sizes for k, v in x.items() if k in self.header_first_commits
-            }
+            self.sizes = {k: v for k, v in all_sizes.items() if k in self.header_first_commits}
 
             # Parse the clients logs.
             try:
@@ -99,6 +96,8 @@ class LogParser:
         self.block_proposals = self._representative_results_by_digest([x.items() for x in block_proposals], True)
         self.block_first_commits = self._representative_results_by_digest(committed_blocks, True)
         self.block_last_commits = self._representative_results_by_digest(committed_blocks, False)
+        if consensus_only:
+            self.sizes = {k: v for k, v in all_sizes.items() if k in self.block_first_commits}
 
     # Filters the given list of results for each node (where each result
     # set is itself a list of (digest, timestamp) pairs), keeping the 
@@ -207,19 +206,22 @@ class LogParser:
                 else:
                     vote_receipts[d][a] = self._to_posix(t)
 
-        # Consensus block creation
+        # Consensus block creation. Prefer the Lionfish-style compact line
+        # ("Created <digest>") but keep the old Hydrangea CMB line compatible.
         block_proposals = self._map_timestamps_to_digests(
-            r'\[(.*Z) .* Created ([^ ]+): CMB\(.*\)', log)
-        
-        # block_proposals = self._map_timestamps_to_digests(
-        #     r'\[(.*Z) .* Created ([^ ]+): HSB\(.*\)', log)
+            r'\[(.*Z) .* Created ([^ ]+)\n', log)
+        block_proposals.update(self._map_timestamps_to_digests(
+            r'\[(.*Z) .* Created ([^ ]+): CMB\(.*\)', log))
 
-        # Consensus block commit
+        # Consensus block commit. Prefer the Lionfish-style compact line
+        # ("Committed <digest> Leader|NonLeader") but keep the old CMB line compatible.
         block_commits = self._map_timestamps_to_digests(
-            r'\[(.*Z) .* Committed ([^ ]+): CMB\(.*\)', log)
-        
-        # block_commits = self._map_timestamps_to_digests(
-        #     r'\[(.*Z) .* Committed ([^ ]+): HSB\(.*\)', log)
+            r'\[(.*Z) .* Committed ([^ ]+)(?: Leader| NonLeader)?\n', log)
+        block_commits.update(self._map_timestamps_to_digests(
+            r'\[(.*Z) .* Committed ([^ ]+): CMB\(.*\)', log))
+
+        tmp = findall(r'Header ([^ ]+) contains (\d+) B', log)
+        sizes = {d: int(s) for d, s in tmp}
 
         if not self.consensus_only:
             ip = search(r'booted on (\d+.\d+.\d+.\d+)', log).group(1)
@@ -238,14 +240,34 @@ class LogParser:
             tmp = findall(r'Header ([^ ]+) contains sample tx (\d+)', log)
             samples = {int(s): d for d, s in tmp}
 
-            tmp = findall(r'Header ([^ ]+) contains (\d+) B', log)
-            sizes = {d: int(s) for d, s in tmp}
+            sizes.update({d: int(s) for d, s in findall(r'Header ([^ ]+) contains (\d+) B', log)})
 
         return ip, block_proposals, block_commits, block_receipts, block_send_ends, \
             ack_to_receipt_delays, vote_creations, vote_receipts, header_proposals, \
             header_dispatches, header_commits, samples, sizes
     
     def _parse_config(self, header):
+        if search(r'Timeout delay .* (\d+)', header) is None:
+            with open('.parameters.json', 'r') as f:
+                params = json.load(f)
+            return {
+                'timeout_delay': int(params['timeout_delay']),
+                'header_size': int(params['header_size']),
+                'max_header_delay': int(params['max_header_delay']),
+                'gc_depth': int(params['gc_depth']),
+                'sync_retry_delay': int(params['sync_retry_delay']),
+                'sync_retry_nodes': int(params['sync_retry_nodes']),
+                'batch_size': int(params['batch_size']),
+                'block_size': int(params['max_block_size']),
+                'max_batch_delay': int(params['max_batch_delay']),
+                'rs_block_size': int(params['rs_block_size']),
+                'rs_block_threads': int(params['rs_block_threads']),
+                'faults': 0,
+                'leader_elector': str(params['leader_elector']),
+                'f': str(params['f']),
+                'c': str(params['c']),
+                'k': str(params['k']),
+            }
         return {
             'timeout_delay': int(
                 search(r'Timeout delay .* (\d+)', header).group(1)
@@ -274,6 +296,12 @@ class LogParser:
             'max_batch_delay': int(
                 search(r'Max batch delay .* (\d+)', header).group(1)
             ),
+            'rs_block_size': int(
+                search(r'Reed-Solomon block size .* (\d+)', header).group(1)
+            ) if search(r'Reed-Solomon block size .* (\d+)', header) else 0,
+            'rs_block_threads': int(
+                search(r'Reed-Solomon block threads .* (\d+)', header).group(1)
+            ) if search(r'Reed-Solomon block threads .* (\d+)', header) else 0,
             # TODO: Old logs will not have the below two entries so parsing
             # will throw an exception. Set an appropriate default value.
             'faults': int(
@@ -310,6 +338,8 @@ class LogParser:
         block_receipts = {}
         for node_receipts in self.block_receipts:
             for block in node_receipts.keys():
+                if block not in self.block_proposals:
+                    continue
                 if block not in block_receipts:
                     block_receipts[block] = [node_receipts[block] - self.block_proposals[block]]
                 else:
@@ -329,10 +359,10 @@ class LogParser:
         mins = [ stats['min'] for stats in all_block_receipt_stats.values() ]
         maxs = [ stats['max'] for stats in all_block_receipt_stats.values() ]
         block_receipt_stats = {
-            'average': mean(averages),
-            'median': mean(medians),
-            'min': mean(mins),
-            'max': mean(maxs)
+            'average': mean(averages) if averages else 0,
+            'median': mean(medians) if medians else 0,
+            'min': mean(mins) if mins else 0,
+            'max': mean(maxs) if maxs else 0
         }
         
         print('Block receipt delay (ms): ' + str(block_receipt_stats))
@@ -350,7 +380,11 @@ class LogParser:
         vote_receipt_delays = {}
         for node_receipts in self.vote_receipts:
             for block in node_receipts.keys():
+                if block not in vote_creations:
+                    continue
                 for id in node_receipts[block].keys():
+                    if id not in vote_creations[block]:
+                        continue
                     delivery_time = node_receipts[block][id] - vote_creations[block][id]
 
                     if id not in vote_receipt_delays:
@@ -388,10 +422,10 @@ class LogParser:
                 }
         
         vote_receipt_stats = {
-            'average': mean(averages),
-            'median': mean(medians),
-            'min': mean(mins),
-            'max': mean(maxs)
+            'average': mean(averages) if averages else 0,
+            'median': mean(medians) if medians else 0,
+            'min': mean(mins) if mins else 0,
+            'max': mean(maxs) if maxs else 0
         }
 
         print('Vote receipt delay (ms): ' + str(vote_receipt_stats))
@@ -415,10 +449,10 @@ class LogParser:
             maxs[block] = max(agg_delays)
 
         ack_to_receipt_delay_stats = {
-            'average': mean(averages.values()),
-            'median': mean(medians.values()),
-            'min': mean(mins.values()),
-            'max': mean(maxs.values())
+            'average': mean(averages.values()) if averages else 0,
+            'median': mean(medians.values()) if medians else 0,
+            'min': mean(mins.values()) if mins else 0,
+            'max': mean(maxs.values()) if maxs else 0
         }
         # Time between a node sending ACK for a Block and when the Core actually starts
         # processing the Block. If this is non-zero then it indicates that the node has
@@ -444,8 +478,10 @@ class LogParser:
         return datetime.timestamp(x)
 
     def _latency(self, proposals, commits: map):
-        latency = [c - proposals[d] for d, c in commits.items()]
-        return mean(latency) * 1000, median(latency) * 1000 if latency else 0
+        latency = [c - proposals[d] for d, c in commits.items() if d in proposals]
+        if not latency:
+            return 0, 0
+        return mean(latency) * 1000, median(latency) * 1000
 
     def _narwhal_throughput(self, start, commits: map):
         if not commits:
@@ -463,9 +499,27 @@ class LogParser:
             return 0, 0, 0
         end = max(commits.values())
         duration = end - start
+        if duration <= 0:
+            return len(commits.keys()), 0, 0
         total_commits = len(commits.keys())
         commits_per_second = total_commits / duration
         return total_commits, commits_per_second, duration
+
+    def _consensus_tps(self, start, commits):
+        if not commits:
+            return 0
+        end = max(commits.values())
+        duration = end - start
+        if duration <= 0:
+            return 0
+
+        committed = [digest for digest in commits.keys() if digest in self.block_proposals]
+        if self.sizes:
+            tx_size = self.config.get('tx_size', 512)
+            total_tx = sum(self.sizes.get(digest, 0) for digest in committed) / tx_size
+        else:
+            total_tx = len(committed) * self.config['block_size']
+        return total_tx / duration
 
     # Latency from the time a client sent a transaction to that the header 
     # containing that transaction was committed.
@@ -478,13 +532,17 @@ class LogParser:
                     start = sent[tx_id]
                     end = commits[header_id]
                     latency += [end-start]
-        return mean(latency) * 1000, median(latency) * 1000 if latency else 0
+        if not latency:
+            return 0, 0
+        return mean(latency) * 1000, median(latency) * 1000
 
     def _config_output(self):
         block_size = self.config['block_size']
         timeout_delay = self.config['timeout_delay']
         sync_retry_delay = self.config['sync_retry_delay']
         sync_retry_nodes = self.config['sync_retry_nodes']
+        rs_block_size = self.config.get('rs_block_size', 0)
+        rs_block_threads = self.config.get('rs_block_threads', 0)
         faults = self.config['faults']
         leader_elector = self.config['leader_elector']
 
@@ -503,6 +561,8 @@ class LogParser:
                 f' Timeout delay: {timeout_delay:,} ms\n'
                 f' Sync retry delay: {sync_retry_delay:,} ms\n'
                 f' Sync retry nodes: {sync_retry_nodes:,} node(s)\n'
+                f' Reed-Solomon block size: {rs_block_size:,} B\n'
+                f' Reed-Solomon block threads: {rs_block_threads:,}\n'
                 '\n'
             )
         else:
@@ -535,33 +595,34 @@ class LogParser:
             )
 
     def _block_consensus_output(self):
+        if not self.block_proposals:
+            return (
+                ' Execution time: 0 s\n'
+                '\n'
+                f' Consensus BLPS: 0 Block/s\n'
+                f' Consensus TPS: 0 tx/s\n'
+                f' Consensus latency: 0 ms\n'
+            )
+
         first_proposal_time = min(self.block_proposals.values())
 
-        _, blps_first, _ = self._throughput(first_proposal_time, self.block_first_commits)
-        committed, blps_last, duration = \
-            self._throughput(first_proposal_time, self.block_last_commits)
-        bcl_mean_first, bcl_median_first = \
+        committed, blps, duration = \
+            self._throughput(first_proposal_time, self.block_first_commits)
+        consensus_latency, _ = \
             self._latency(self.block_proposals, self.block_first_commits)
-        bcl_mean_last, bcl_median_last = \
-            self._latency(self.block_proposals, self.block_last_commits)  
+        consensus_tps = self._consensus_tps(first_proposal_time, self.block_first_commits)
          
         csv_file_path = f'benchmark_{self.committee_size}_{self.config["header_size"]}_{self.config["block_size"]}.csv'
 
-        write_consensus_to_csv(round(bcl_mean_first), round(bcl_median_first), round(blps_first), round(bcl_mean_last), round(bcl_median_last), round(blps_last), csv_file_path)
+        write_consensus_to_csv(round(consensus_latency), round(consensus_latency), round(blps), round(consensus_latency), round(consensus_latency), round(blps), csv_file_path)
         
         return (
             f' Execution time: {round(duration):,} s\n'
             f'\n'
-            f' Block Commit:\n'
-            f'   To First Commit:\n'
-            f'     Mean Latency: {round(bcl_mean_first):,} ms\n'
-            f'     Median Latency: {round(bcl_median_first):,} ms\n'
-            f'     BLPS: {round(blps_first):,} blocks/s\n'
-            f'   To Last Commit:\n'
-            f'     Mean Latency: {round(bcl_mean_last):,} ms\n'
-            f'     Median Latency: {round(bcl_median_last):,} ms\n'
-            f'     BLPS: {round(blps_last):,} blocks/s\n'
-            f'   Total Blocks Committed: {round(committed):,}\n'
+            f' Consensus BLPS: {round(blps):,} Block/s\n'
+            f' Consensus TPS: {round(consensus_tps):,} tx/s\n'
+            f' Consensus latency: {round(consensus_latency):,} ms\n'
+            f' Total Blocks Committed: {round(committed):,}\n'
         )
     
     def _narwhal_output(self):

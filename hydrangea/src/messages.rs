@@ -1,5 +1,6 @@
 use crate::consensus::Round;
 use crate::error::{ConsensusError, ConsensusResult};
+use crate::merkle::Proof;
 use blsttc::{PublicKeyShareG2, SignatureShareG1};
 use config::Committee;
 use crypto::{
@@ -7,7 +8,6 @@ use crypto::{
 };
 use ed25519_dalek::Digest as _;
 use ed25519_dalek::Sha512;
-use primary::Certificate;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::convert::TryInto;
@@ -17,11 +17,33 @@ use std::fmt;
 // #[path = "tests/messages_tests.rs"]
 // pub mod messages_tests;
 
+pub type Transaction = Vec<u8>;
+
+#[derive(Serialize, Deserialize, Default, Clone)]
+pub struct Header {
+    pub author: PublicKey,
+    pub parent: Digest,
+    pub payload: Vec<Transaction>,
+    pub round: Round,
+}
+
+impl Header {
+    pub fn new(author: PublicKey, parent: Digest, payload: Vec<Transaction>, round: Round) -> Self {
+        Self {
+            author,
+            parent,
+            payload,
+            round,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Default, Clone)]
 pub struct Block {
     pub author: PublicKey,
     pub parent: Digest,
-    pub payload: Vec<Certificate>,
+    pub payload_root: Digest,
+    pub payload_len: usize,
     pub round: Round,
     pub signature: Signature,
 }
@@ -30,14 +52,16 @@ impl Block {
     pub async fn new(
         author: PublicKey,
         parent: Digest,
-        payload: Vec<Certificate>,
+        payload_root: Digest,
+        payload_len: usize,
         round: Round,
         mut signature_service: SignatureService,
     ) -> Self {
         let mut b = Block {
             author,
             parent,
-            payload,
+            payload_root,
+            payload_len,
             round,
             signature: Signature::default(),
         };
@@ -49,7 +73,8 @@ impl Block {
         Self {
             author: PublicKey::default(),
             parent: Digest::default(),
-            payload: Vec::default(),
+            payload_root: Digest::default(),
+            payload_len: 0,
             round: 0,
             signature: Signature::default(),
         }
@@ -76,11 +101,9 @@ impl Hash for Block {
         let mut hasher = Sha512::new();
         hasher.update(self.author.0);
         hasher.update(self.parent.clone());
+        hasher.update(&self.payload_root);
+        hasher.update(self.payload_len.to_le_bytes());
         hasher.update(self.round.to_le_bytes());
-
-        for x in &self.payload {
-            hasher.update(&x.id);
-        }
 
         Digest(hasher.finalize().as_slice()[..32].try_into().unwrap())
     }
@@ -95,7 +118,7 @@ impl fmt::Debug for Block {
             self.author,
             self.parent,
             self.round,
-            self.payload.len()
+            self.payload_len
         )
     }
 }
@@ -112,15 +135,21 @@ pub struct NormalProposal {
     // QC for block.parent, which must have been proposed in block.round - 1.
     //Todo: replace the following with progress certificate
     pub qc: QC,
+    pub proof: Proof,
 }
 
 impl NormalProposal {
-    pub fn new(block: Block, qc: QC) -> Self {
-        Self { block, qc }
+    pub fn new(block: Block, qc: QC, proof: Proof) -> Self {
+        Self { block, qc, proof }
     }
 
     pub fn is_well_formed(&self, committee: &Committee) -> ConsensusResult<()> {
         self.block.is_well_formed(committee)?;
+        ensure!(
+            *self.proof.root_hash() == self.block.payload_root
+                && self.proof.validate(committee.size()),
+            ConsensusError::InvalidProof
+        );
 
         // QC must be for the parent of this block, which must have been proposed
         // for the round before this block.
@@ -168,15 +197,21 @@ pub struct FallbackRecoveryProposal {
     pub block: Block,
     // TC for block.round - 1, the highest QC of which must certify block.parent.
     pub tc: TC,
+    pub proof: Proof,
 }
 
 impl FallbackRecoveryProposal {
-    pub fn new(block: Block, tc: TC) -> Self {
-        Self { block, tc }
+    pub fn new(block: Block, tc: TC, proof: Proof) -> Self {
+        Self { block, tc, proof }
     }
 
     pub fn is_well_formed(&self, committee: &Committee) -> ConsensusResult<()> {
         self.block.is_well_formed(committee)?;
+        ensure!(
+            *self.proof.root_hash() == self.block.payload_root
+                && self.proof.validate(committee.size()),
+            ConsensusError::InvalidProof
+        );
 
         // Ensure that the correct TC has been used to justify this proposal.
         ensure!(
@@ -281,8 +316,10 @@ impl fmt::Display for VoteType {
 pub struct Vote {
     pub author: PublicKey,
     pub blk_hash: Digest,
+    pub payload_root: Digest,
     pub kind: VoteType,
     pub round: Round,
+    pub proof: Option<Proof>,
     pub signature: SignatureShareG1,
 }
 
@@ -290,15 +327,19 @@ impl Vote {
     pub async fn new(
         author: PublicKey,
         blk_hash: Digest,
+        payload_root: Digest,
         kind: VoteType,
         round: Round,
+        proof: Option<Proof>,
         bls_signature_service: &mut BlsSignatureService,
     ) -> Self {
         let vote = Self {
             author,
             blk_hash: blk_hash.clone(),
+            payload_root,
             kind,
             round,
+            proof,
             signature: SignatureShareG1::default(),
         };
         // Only sign the block. The network channels are already authenticated so
@@ -327,6 +368,7 @@ impl Hash for Vote {
     fn digest(&self) -> Digest {
         let mut hasher = Sha512::new();
         hasher.update(&self.blk_hash);
+        hasher.update(&self.payload_root);
         hasher.update(self.kind.digest());
         hasher.update(self.round.to_le_bytes());
         Digest(hasher.finalize().as_slice()[..32].try_into().unwrap())
@@ -346,8 +388,10 @@ impl fmt::Debug for Vote {
 #[derive(Clone, Serialize, Deserialize, Default)]
 pub struct QC {
     pub blk_hash: Digest,
+    pub payload_root: Digest,
     pub kind: VoteType,
     pub round: Round,
+    pub availability_shards: Vec<Option<Box<[u8]>>>,
     pub votes: (Vec<u128>, SignatureShareG1),
 }
 
@@ -355,8 +399,10 @@ impl QC {
     pub fn genesis() -> Self {
         QC {
             blk_hash: Block::genesis().digest(),
+            payload_root: Digest::default(),
             kind: VoteType::Commit,
             round: 0,
+            availability_shards: Vec::new(),
             votes: (Vec::new(), SignatureShareG1::default()),
         }
     }
@@ -404,6 +450,7 @@ impl Hash for QC {
     fn digest(&self) -> Digest {
         let mut hasher = Sha512::new();
         hasher.update(&self.blk_hash);
+        hasher.update(&self.payload_root);
         hasher.update(&self.kind.digest());
         hasher.update(self.round.to_le_bytes());
         Digest(hasher.finalize().as_slice()[..32].try_into().unwrap())

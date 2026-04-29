@@ -95,6 +95,10 @@ pub struct Parameters {
     /// The delay after which the workers seal a batch of transactions, even if `max_batch_size`
     /// is not reached. Denominated in ms.
     pub max_batch_delay: u64,
+    /// Reed-Solomon block size used when splitting shard encoding/decoding work. Denominated in bytes.
+    pub rs_block_size: usize,
+    /// Number of threads used for Reed-Solomon block-level parallelism.
+    pub rs_block_threads: usize,
     /// Causes Prepare messages to be unicast to a designated aggregator rather than broadcast.
     pub use_vote_aggregator: bool,
     /// The type of leader election function to use. See leader.rs.
@@ -119,6 +123,8 @@ impl Default for Parameters {
             sync_retry_nodes: 3,
             batch_size: 500_000,
             max_batch_delay: 100,
+            rs_block_size: 16 * 1024,
+            rs_block_threads: 4,
             use_vote_aggregator: false,
             leader_elector: LeaderElectorKind::Simple,
             n: 15,
@@ -153,6 +159,8 @@ impl Parameters {
         info!("Batch size set to {} B", self.batch_size);
         info!("Block size set to {} Certificates", self.max_block_size);
         info!("Max batch delay set to {} ms", self.max_batch_delay);
+        info!("Reed-Solomon block size set to {} B", self.rs_block_size);
+        info!("Reed-Solomon block threads set to {}", self.rs_block_threads);
     }
 }
 

@@ -96,6 +96,12 @@ pub enum ConsensusError {
     #[error("Invalid payload")]
     InvalidPayload,
 
+    #[error("Proof construction failed")]
+    ProofConstructionFailed,
+
+    #[error("Invalid erasure-coding proof")]
+    InvalidProof,
+
     #[error("Message {0} (round {1}) too old")]
     TooOld(Digest, Round),
 

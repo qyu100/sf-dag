@@ -1,8 +1,11 @@
 use crate::aggregator::Aggregator;
+use crate::coding::{shard_hashes, Coding};
 use crate::consensus::{ConsensusMessage, ProposalMessage, Round};
 use crate::error::{ConsensusError, ConsensusResult};
 use crate::leader::LeaderElector;
 use crate::mempool::MempoolDriver;
+use crate::merkle::MerkleTree;
+use crate::merkle::Proof;
 use crate::messages::{
     Block, FallbackRecoveryProposal, NormalProposal, Timeout, Vote, VoteType, QC, TC,
 };
@@ -51,9 +54,12 @@ pub struct Core {
     // Each round may have at most one Normal or one Fallback Proposal,
     // and up to two Optimistic Proposals.
     pending_proposals: HashMap<Round, Digest>,
+    pending_proofs: HashMap<Digest, Proof>,
     qc_sender: SimpleSender,
     qc_syncs: HashMap<PublicKey, Instant>,
     round: Round,
+    rs_block_size: usize,
+    rs_block_threads: usize,
     rx_proposer: Receiver<ProposalMessage>,
     tx_message: Sender<ConsensusMessage>,
     rx_message: Receiver<ConsensusMessage>,
@@ -92,6 +98,8 @@ impl Core {
         mempool_driver: MempoolDriver,
         synchronizer: Synchronizer,
         timeout_delay: u64,
+        rs_block_size: usize,
+        rs_block_threads: usize,
         tx_message: Sender<ConsensusMessage>,
         rx_message: Receiver<ConsensusMessage>,
         rx_proposer: Receiver<ProposalMessage>,
@@ -103,6 +111,7 @@ impl Core {
         tokio::spawn(async move {
             let mut uncommitted_blocks = HashMap::new();
             let mut pending_proposals = HashMap::new();
+            let pending_proofs = HashMap::new();
             let mut uncommitted_qcs = HashMap::new();
             let genesis_block = Block::genesis();
             let genesis_qc = QC::genesis();
@@ -125,6 +134,8 @@ impl Core {
                 qc_sender: SimpleSender::new(),
                 qc_syncs: HashMap::new(),
                 round: 1,
+                rs_block_size,
+                rs_block_threads,
                 rx_proposer,
                 tx_message,
                 rx_message,
@@ -141,6 +152,7 @@ impl Core {
                 tx_output,
                 tx_proposer,
                 pending_proposals,
+                pending_proofs,
                 uncommitted_blocks,
                 uncommitted_qcs,
                 vote_sender: SimpleSender::new(),
@@ -233,7 +245,7 @@ impl Core {
 
         // Trace the chain of ancestors back to our most recently committed block.
         loop {
-            let maybe_parent = 
+            let maybe_parent =
                 // Check the in-memory index to avoid IO.
                 match self.uncommitted_blocks.get(&b.parent)
                 {
@@ -333,13 +345,16 @@ impl Core {
         }
     }
 
-    async fn store_block(&mut self, block: &Block) {
+    async fn store_block(&mut self, block: &Block, proof: Option<Proof>) {
         // Should only ever call this function with recent blocks.
         assert!(block.round > self.last_commit.round);
         // Store in-memory.
         self.update_pending_proposals(block);
         self.uncommitted_blocks
             .insert(block.digest(), block.clone());
+        if let Some(proof) = proof {
+            self.pending_proofs.insert(block.digest(), proof);
+        }
 
         let _ = self.observe_payload(block).await;
         // Write to disk
@@ -392,12 +407,15 @@ impl Core {
         while let Some(committing) = to_commit.pop() {
             // This log is required for generating benchmark outputs.
             info!("Committed {:?}", committing);
+            if committing.author == self.name {
+                info!("Committed {} Leader", committing.digest());
+            } else {
+                info!("Committed {} NonLeader", committing.digest());
+            }
 
             if !self.consensus_only {
-                let payload = committing.payload.clone();
-                // Send the payload to the committer.
                 self.tx_commit
-                    .send(payload)
+                    .send(Vec::new())
                     .await
                     .expect("Failed to send payload");
                 //     let payload = committing.payload.clone();
@@ -423,6 +441,11 @@ impl Core {
             .retain(|_, b| b.round > committing_round);
         self.uncommitted_qcs
             .retain(|_, qc| qc.round > committing_round);
+        self.pending_proofs.retain(|_, proof| {
+            self.uncommitted_blocks
+                .values()
+                .any(|block| block.payload_root == *proof.root_hash())
+        });
 
         // TODO: Remove uncommittable blocks from disk.
         Ok(())
@@ -451,8 +474,23 @@ impl Core {
         Ok(())
     }
 
+    fn has_voting_parent_delivered(&self, block: &Block) -> bool {
+        block.parent == self.last_commit.digest()
+            || self.uncommitted_blocks.contains_key(&block.parent)
+    }
+
+    async fn sync_voting_parent(&mut self, block: &Block) -> ConsensusResult<()> {
+        if !self.has_voting_parent_delivered(block) && !self.sync_requests.contains(&block.parent) {
+            self.synchronizer
+                .get_block(&block.parent, &block.author, None)
+                .await?;
+            self.sync_requests.insert(block.parent.clone());
+        }
+        Ok(())
+    }
+
     fn can_vote(&self, b: &Block) -> bool {
-        self.last_timeout < b.round
+        self.last_timeout < b.round && self.has_voting_parent_delivered(b)
     }
 
     async fn try_vote(&mut self) -> ConsensusResult<()> {
@@ -463,8 +501,14 @@ impl Core {
                 .cloned()
                 .expect("Fatal: Block in pending_proposals not in uncommitted_blocks.");
 
+            if self.round == b.round && self.last_timeout < b.round {
+                self.sync_voting_parent(&b).await?;
+            }
+
             if self.round == b.round && self.can_vote(&b) {
-                self.send_prepare_vote(&b).await?;
+                if let Some(proof) = self.pending_proofs.get(&accepted).cloned() {
+                    self.send_prepare_vote(&b, proof).await?;
+                }
             }
         }
         Ok(())
@@ -485,8 +529,24 @@ impl Core {
         Ok(())
     }
 
-    async fn send_vote(&mut self, b: Digest, r: Round, t: VoteType) -> ConsensusResult<()> {
-        let vote = Vote::new(self.name, b, t.clone(), r, &mut self.bls_signature_service).await;
+    async fn send_vote(
+        &mut self,
+        b: Digest,
+        payload_root: Digest,
+        r: Round,
+        t: VoteType,
+        proof: Option<Proof>,
+    ) -> ConsensusResult<()> {
+        let vote = Vote::new(
+            self.name,
+            b,
+            payload_root,
+            t.clone(),
+            r,
+            proof,
+            &mut self.bls_signature_service,
+        )
+        .await;
         debug!("Created {:?}", vote);
 
         let _ = self.handle_vote(&vote).await;
@@ -496,9 +556,15 @@ impl Core {
         Ok(())
     }
 
-    async fn send_prepare_vote(&mut self, block: &Block) -> ConsensusResult<()> {
-        self.send_vote(block.digest(), block.round, VoteType::Normal)
-            .await
+    async fn send_prepare_vote(&mut self, block: &Block, proof: Proof) -> ConsensusResult<()> {
+        self.send_vote(
+            block.digest(),
+            block.payload_root.clone(),
+            block.round,
+            VoteType::Normal,
+            Some(proof),
+        )
+        .await
     }
 
     async fn send_timeout(&mut self, round: Round) -> ConsensusResult<()> {
@@ -639,16 +705,34 @@ impl Core {
             .await
     }
 
-    async fn observe_payload(&mut self, block: &Block) -> ConsensusResult<()> {
+    async fn observe_payload(&mut self, _block: &Block) -> ConsensusResult<()> {
         self.tx_proposer
-            .send(ProposerMessage::Observed(block.payload.clone()))
+            .send(ProposerMessage::Observed(Vec::new()))
             .await
             .expect("Failed to send message to proposer");
         Ok(())
     }
 
+    fn verify_availability(&self, qc: &QC) -> ConsensusResult<()> {
+        if qc.round == GENESIS {
+            return Ok(());
+        }
+        let data_shards = (self.committee.n - 2 * self.committee.f) as usize;
+        let parity_shards = (2 * self.committee.f) as usize;
+        let coding = Coding::new(data_shards, parity_shards);
+        let mut shards = qc.availability_shards.clone();
+        coding.reconstruct_shards(&mut shards, self.rs_block_size, self.rs_block_threads)?;
+        let mtree = MerkleTree::from_hashes(shard_hashes(&shards)?);
+        ensure!(
+            mtree.root_hash() == &qc.payload_root,
+            ConsensusError::InvalidProof
+        );
+        Ok(())
+    }
+
     async fn handle_prepare_qc(&mut self, qc: &QC) -> ConsensusResult<()> {
         if !self.uncommitted_qcs.contains_key(&qc.round) {
+            self.verify_availability(qc)?;
             // Ensure QC is valid (has a quorum). This is a relatively expensive check.
             // qc.is_well_formed(&self.committee, &self.sorted_keys, &self.combined_pubkey)?;
             debug!("Processing new QC {:?}", qc);
@@ -666,8 +750,14 @@ impl Core {
 
                 if self.last_timeout < qc.round {
                     // Send a Commit Vote.
-                    self.send_vote(qc.blk_hash.clone(), qc.round, VoteType::Commit)
-                        .await?
+                    self.send_vote(
+                        qc.blk_hash.clone(),
+                        qc.payload_root.clone(),
+                        qc.round,
+                        VoteType::Commit,
+                        None,
+                    )
+                    .await?
                 }
             }
 
@@ -786,11 +876,11 @@ impl Core {
         Ok(self.is_non_equivocal_and_certifiable(block))
     }
 
-    async fn process_block(&mut self, block: &Block) -> ConsensusResult<()> {
+    async fn process_block(&mut self, block: &Block, proof: Option<Proof>) -> ConsensusResult<()> {
         debug!("Received Block {:?}", block);
 
         if self.can_accept_block(block).await? {
-            self.store_block(block).await;
+            self.store_block(block, proof).await;
             self.try_commit_or_sync_ancestor(block).await?;
             self.try_vote().await?;
         }
@@ -806,7 +896,12 @@ impl Core {
         //   2. Proposal includes a QC p.block.round - 1 and this QC certifies block.parent.
         //   3. Block is signed by the proposer.
         p.is_well_formed(&self.committee)?;
-        self.process_block(&p.block).await
+        ensure!(
+            p.proof.index() == self.committee.id(&self.name) as usize,
+            ConsensusError::InvalidProof
+        );
+        let proof = p.proof.clone();
+        self.process_block(&p.block, Some(proof)).await
     }
 
     async fn process_fallback_recovery_proposal(
@@ -823,7 +918,12 @@ impl Core {
         //   4. The parent of the included block is the block certified by
         //      the QC with the highest round included in the included TC.
         p.is_well_formed(&self.committee)?;
-        self.process_block(&p.block).await
+        ensure!(
+            p.proof.index() == self.committee.id(&self.name) as usize,
+            ConsensusError::InvalidProof
+        );
+        let proof = p.proof.clone();
+        self.process_block(&p.block, Some(proof)).await
     }
 
     async fn handle_proposal(&mut self, proposal: ProposalMessage) -> ConsensusResult<()> {
@@ -855,8 +955,9 @@ impl Core {
             // (B_a) when the Synchronizer sends B' to us via loopback, which will trigger a
             // second SyncRequest for B_a (unless we get B_a before making this second request,
             // which should not happen when network latency is non-trivial).
-            self.store_block(&block).await;
+            self.store_block(&block, None).await;
             self.try_commit_or_sync_ancestor(&block).await?;
+            self.try_vote().await?;
         }
         Ok(())
     }

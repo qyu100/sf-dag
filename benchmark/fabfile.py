@@ -11,13 +11,13 @@ from math import floor
 
 
 @task
-def local(ctx, debug=False, consensus_only=True, aggregate=False):
+def local(ctx, debug=True, consensus_only=True, aggregate=False):
     ''' Run benchmarks on localhost '''
     bench_params = {
-        'faults': 1,
-        'nodes': 15,
+        'faults': 0,
+        'nodes': 50,
         'workers': 1,
-        'rate': 100_000,
+        'rate': 10_000,
         'tx_size': 512,
         'duration': 20,
         'burst': 50,
@@ -25,9 +25,9 @@ def local(ctx, debug=False, consensus_only=True, aggregate=False):
     }
     node_params = {
         'n': bench_params['nodes'], # Number of nodes
-        'f': 2, #Number of Byzantine parties tolerated
-        'c': 2, # Number of crash faults,
-        'k': 4, # a parameter
+        'f': 16, #Number of Byzantine parties tolerated
+        'c': 0, # Number of crash faults,
+        'k': 0, # a parameter
         'max_block_size': 10,
         'consensus_only': consensus_only,
         'timeout_delay': 1000,  # ms
@@ -38,6 +38,8 @@ def local(ctx, debug=False, consensus_only=True, aggregate=False):
         'sync_retry_nodes': 3,  # number of nodes
         'batch_size': 512_000,  # bytes
         'max_batch_delay': 200,  # ms
+        'rs_block_size': 16 * 1024,  # bytes
+        'rs_block_threads': 8,
         'use_vote_aggregator': aggregate,
         # FailureBestCase | FailureMidCase | FailureWorstCase | FairSuccession | Simple
         'leader_elector': 'Simple',
@@ -119,7 +121,7 @@ def remote(ctx, block_size=50, debug=False, consensus_only=True, update=True, ag
     
     bench_params = {
         'faults': 0,
-        'nodes': [100],
+        'nodes': [50],
         'workers': 1,
         'collocate': True,
         'rate': [100_000],
@@ -139,9 +141,9 @@ def remote(ctx, block_size=50, debug=False, consensus_only=True, update=True, ag
  
     node_params = {
         'n': bench_params['nodes'][0], # Number of nodes
-        'f': 19, #Number of Byzantine parties tolerated
-        'c': 20, # Number of crash faults,
-        'k': 2, # a parameter
+        'f': 16, #Number of Byzantine parties tolerated
+        'c': 0, # Number of crash faults,
+        'k': 0, # a parameter
         'max_block_size': block_size,
         'consensus_only': consensus_only,
         'timeout_delay': 5_000,  # ms
@@ -152,6 +154,8 @@ def remote(ctx, block_size=50, debug=False, consensus_only=True, update=True, ag
         'sync_retry_nodes': 3,  # number of nodes
         'batch_size': 1024_000,  # bytes
         'max_batch_delay': 2000,  # ms
+        'rs_block_size': 16 * 1024,  # bytes
+        'rs_block_threads': 8,
         'use_vote_aggregator': aggregate,
         # FailureBestCase | FailureMidCase | FailureWorstCase | FairSuccession | Simple
         'leader_elector': 'Simple',

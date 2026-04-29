@@ -315,7 +315,10 @@ impl Core {
 
         pool.execute(move || {
             let _ = certificate.verify(&committee).map_err(DagError::from);
-            let rt = tokio::runtime::Runtime::new().unwrap();
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
             rt.block_on(async {
                 let _ = tx_primaries
                     .send(PrimaryMessage::VerifiedCertificate(certificate))

@@ -18,7 +18,11 @@ async-recursion = "0.3.1"
 base64 = "0.13.0"
 async-trait = "0.1.50"
 threadpool = "1.8.1"
-blsttc = {package = "blsttc", git = "ssh://git@github.com/naitik-supraoracles/blsttc-supra-for-moonshot.git", rev = "4ca8a9d97893e2dfd74eee427400ac119e3e9dd9"}
+blake3 = "1.4"
+rayon = "1.7"
+reed-solomon-simd = "3.1"
+rs_merkle = "1.4.2"
+blsttc = { git = "https://github.com/naitik-supraoracles/blsttc-supra-for-moonshot.git", rev = "4ca8a9d97893e2dfd74eee427400ac119e3e9dd9"}
 
 store = { path = "../store" }
 crypto = { path = "../crypto" }
