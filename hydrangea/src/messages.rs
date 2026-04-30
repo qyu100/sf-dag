@@ -391,6 +391,7 @@ pub struct QC {
     pub payload_root: Digest,
     pub kind: VoteType,
     pub round: Round,
+    pub block: Option<Block>,
     pub availability_shards: Vec<Option<Box<[u8]>>>,
     pub votes: (Vec<u128>, SignatureShareG1),
 }
@@ -402,6 +403,7 @@ impl QC {
             payload_root: Digest::default(),
             kind: VoteType::Commit,
             round: 0,
+            block: None,
             availability_shards: Vec::new(),
             votes: (Vec::new(), SignatureShareG1::default()),
         }

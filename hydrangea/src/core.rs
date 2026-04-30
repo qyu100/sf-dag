@@ -364,6 +364,37 @@ impl Core {
         debug!("Stored block {:?}", block);
     }
 
+    async fn store_qc_block(&mut self, qc: &QC) -> ConsensusResult<()> {
+        let Some(block) = &qc.block else {
+            return Ok(());
+        };
+
+        ensure!(
+            block.digest() == qc.blk_hash
+                && block.payload_root == qc.payload_root
+                && block.round == qc.round,
+            ConsensusError::InvalidProof
+        );
+        block.is_well_formed(&self.committee)?;
+
+        if block.round > self.last_commit.round
+            && !self.uncommitted_blocks.contains_key(&qc.blk_hash)
+        {
+            self.store_block(block, None).await;
+        }
+        Ok(())
+    }
+
+    fn attach_block_to_qc(&self, qc: &mut QC) {
+        if qc.block.is_none() {
+            if let Some(block) = self.uncommitted_blocks.get(&qc.blk_hash) {
+                qc.block = Some(block.clone());
+            } else if self.last_commit.digest() == qc.blk_hash {
+                qc.block = Some(self.last_commit.clone());
+            }
+        }
+    }
+
     async fn commit(&mut self, block: Block) -> ConsensusResult<()> {
         if block.round == GENESIS {
             // Ignore the Genesis block.
@@ -604,15 +635,17 @@ impl Core {
             debug!("Processing {:?}", vote);
             match vote.kind {
                 VoteType::Commit => {
-                    if let Some(qc) = self.aggregator.add_commit_vote(vote.clone())? {
+                    if let Some(mut qc) = self.aggregator.add_commit_vote(vote.clone())? {
                         debug!("Assembled {:?}", qc);
+                        self.attach_block_to_qc(&mut qc);
                         self.handle_qc(&qc).await?;
                     }
                 }
                 VoteType::Normal => {
-                    if let Some((qc, shards)) = self.aggregator.add_normal_vote(vote.clone())? {
+                    if let Some((mut qc, shards)) = self.aggregator.add_normal_vote(vote.clone())? {
                         debug!("Assembled {:?}", qc);
-                        self.verify_availability(&qc.payload_root, shards)?;
+                        self.verify_availability(&qc.payload_root, shards).await?;
+                        self.attach_block_to_qc(&mut qc);
                         self.handle_qc(&qc).await?;
                     }
                 }
@@ -720,25 +753,34 @@ impl Core {
         Ok(())
     }
 
-    fn verify_availability(
+    async fn verify_availability(
         &self,
         payload_root: &Digest,
         availability_shards: Vec<Option<Box<[u8]>>>,
     ) -> ConsensusResult<()> {
         let data_shards = (self.committee.n - 2 * self.committee.f) as usize;
         let parity_shards = (2 * self.committee.f) as usize;
-        let coding = Coding::new(data_shards, parity_shards);
-        let mut shards = availability_shards;
-        coding.reconstruct_shards(&mut shards, self.rs_block_size, self.rs_block_threads)?;
-        let mtree = MerkleTree::from_hashes(shard_hashes(&shards)?);
-        ensure!(
-            mtree.root_hash() == payload_root,
-            ConsensusError::InvalidProof
-        );
-        Ok(())
+        let rs_block_size = self.rs_block_size;
+        let rs_block_threads = self.rs_block_threads;
+        let payload_root = payload_root.clone();
+
+        tokio::task::spawn_blocking(move || {
+            let coding = Coding::new(data_shards, parity_shards);
+            let mut shards = availability_shards;
+            coding.reconstruct_shards(&mut shards, rs_block_size, rs_block_threads)?;
+            let mtree = MerkleTree::from_hashes(shard_hashes(&shards)?);
+            ensure!(
+                mtree.root_hash() == &payload_root,
+                ConsensusError::InvalidProof
+            );
+            Ok(())
+        })
+        .await
+        .map_err(|_| ConsensusError::ProofConstructionFailed)?
     }
 
     async fn handle_prepare_qc(&mut self, qc: &QC) -> ConsensusResult<()> {
+        self.store_qc_block(qc).await?;
         if !self.uncommitted_qcs.contains_key(&qc.round) {
             // Ensure QC is valid (has a quorum). This is a relatively expensive check.
             // qc.is_well_formed(&self.committee, &self.sorted_keys, &self.combined_pubkey)?;
@@ -777,6 +819,7 @@ impl Core {
     }
 
     async fn handle_commit_qc(&mut self, qc: &QC) -> ConsensusResult<()> {
+        self.store_qc_block(qc).await?;
         if !self.committable_blocks.contains_key(&qc.blk_hash) {
             // Ensure QC is valid (has a quorum). This is a relatively expensive check.
             // qc.is_well_formed(&self.committee, &self.sorted_keys, &self.combined_pubkey)?;

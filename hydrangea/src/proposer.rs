@@ -10,6 +10,7 @@ use crypto::{Hash as _, PublicKey, SignatureService};
 use log::{debug, info};
 use network::{CancelHandler, ReliableSender};
 use primary::Certificate;
+use rayon::prelude::*;
 use std::collections::HashMap;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::time::{sleep, Duration, Instant};
@@ -107,7 +108,7 @@ impl Proposer {
         }
     }
 
-    async fn send_proposals(&mut self, proposals: Vec<(PublicKey, ProposalMessage)>) {
+    async fn send_proposals(&mut self, proposals: Vec<(PublicKey, Bytes)>) {
         let peers: HashMap<PublicKey, _> = self
             .committee
             .others_consensus(&self.name)
@@ -122,18 +123,15 @@ impl Proposer {
         //   3. we observe a TC for the round (indicating the network is asynchronous), or;
         //   4. we replace it with another proposal for this round (only occurs if Optimistic).
         let mut handles = Vec::new();
-        for (recipient, proposal) in proposals {
+        for (recipient, message) in proposals {
             if recipient == self.name {
                 continue;
             }
             let Some(address) = peers.get(&recipient).cloned() else {
                 continue;
             };
-            info!("Proposing {:?}", proposal);
-            let message = bincode::serialize(&ConsensusMessage::Propose(proposal))
-                .expect("Failed to serialize block");
-            debug!("Proposal size is {}B", message.len());
-            handles.push(self.network.send(address, Bytes::from(message)).await);
+            debug!("Proposing to {}. Proposal size is {}B", recipient, message.len());
+            handles.push(self.network.send(address, message).await);
         }
         self.in_progress.insert(self.last_proposed.round, handles);
     }
@@ -148,7 +146,7 @@ impl Proposer {
     async fn make_proposals(
         &mut self,
         trigger: ProposalTrigger,
-    ) -> (ProposalMessage, Vec<(PublicKey, ProposalMessage)>) {
+    ) -> (ProposalMessage, Vec<(PublicKey, Bytes)>) {
         let (parent, round) = match &trigger {
             ProposalTrigger::QC(qc) => (qc.blk_hash.clone(), qc.round + 1),
             ProposalTrigger::TC(tc) => (tc.high_qc.blk_hash.clone(), tc.round + 1),
@@ -197,25 +195,44 @@ impl Proposer {
         let mut recipients: Vec<PublicKey> = self.committee.authorities.keys().cloned().collect();
         recipients.sort_by_key(|pk| self.committee.id(pk));
 
+        enum ProposalTarget {
+            Local(ProposalMessage),
+            Remote(PublicKey, Bytes),
+        }
+
+        let my_name = self.name;
+        let shard_refs: Vec<&[u8]> = shards.iter().map(|s| &**s).collect();
+        let targets: Vec<ProposalTarget> = recipients
+            .into_par_iter()
+            .enumerate()
+            .map(|(index, recipient)| {
+                let proof = mtree
+                    .proof_with_leaf(index, shard_refs[index])
+                    .expect("Failed to build proof");
+                let proposal = match trigger.clone() {
+                    ProposalTrigger::QC(qc) => {
+                        ProposalMessage::N(NormalProposal::new(block.clone(), qc, proof))
+                    }
+                    ProposalTrigger::TC(tc) => {
+                        ProposalMessage::F(FallbackRecoveryProposal::new(block.clone(), tc, proof))
+                    }
+                };
+                if recipient == my_name {
+                    ProposalTarget::Local(proposal)
+                } else {
+                    let message = bincode::serialize(&ConsensusMessage::Propose(proposal))
+                        .expect("Failed to serialize block");
+                    ProposalTarget::Remote(recipient, Bytes::from(message))
+                }
+            })
+            .collect();
+
         let mut local = None;
         let mut remote = Vec::new();
-        for recipient in recipients {
-            let index = self.committee.id(&recipient) as usize;
-            let proof = mtree
-                .proof_with_leaf(index, shards[index])
-                .expect("Failed to build proof");
-            let proposal = match trigger.clone() {
-                ProposalTrigger::QC(qc) => {
-                    ProposalMessage::N(NormalProposal::new(block.clone(), qc, proof))
-                }
-                ProposalTrigger::TC(tc) => {
-                    ProposalMessage::F(FallbackRecoveryProposal::new(block.clone(), tc, proof))
-                }
-            };
-            if recipient == self.name {
-                local = Some(proposal);
-            } else {
-                remote.push((recipient, proposal));
+        for target in targets {
+            match target {
+                ProposalTarget::Local(proposal) => local = Some(proposal),
+                ProposalTarget::Remote(recipient, message) => remote.push((recipient, message)),
             }
         }
         (local.expect("missing local proposal"), remote)

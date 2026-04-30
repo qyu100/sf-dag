@@ -181,6 +181,7 @@ impl QCMaker {
                         payload_root: vote.payload_root,
                         kind: vote.kind.clone(),
                         round: vote.round,
+                        block: None,
                         availability_shards: Vec::new(),
                         votes: (self.pk_bit_vec.clone(), self.agg_sign.clone()),
                     };
