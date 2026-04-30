@@ -29,7 +29,10 @@ impl Aggregator {
         }
     }
 
-    pub fn add_normal_vote(&mut self, vote: Vote) -> ConsensusResult<Option<QC>> {
+    pub fn add_normal_vote(
+        &mut self,
+        vote: Vote,
+    ) -> ConsensusResult<Option<(QC, Vec<Option<Box<[u8]>>>)>> {
         // TODO [issue #7]: A bad node may make us run out of memory by sending many votes
         // with different round numbers or different digests.
 
@@ -51,6 +54,7 @@ impl Aggregator {
             .entry(vote.round)
             .or_insert_with(|| Box::new(QCMaker::new(total_nodes)))
             .append(vote, &self.committee)
+            .map(|maybe| maybe.map(|(qc, _)| qc))
     }
 
     pub fn add_timeout(&mut self, timeout: Timeout) -> ConsensusResult<(Stake, Option<TC>)> {
@@ -103,7 +107,11 @@ impl QCMaker {
     }
 
     /// Try to append a signature to a (partial) quorum.
-    pub fn append(&mut self, vote: Vote, committee: &Committee) -> ConsensusResult<Option<QC>> {
+    pub fn append(
+        &mut self,
+        vote: Vote,
+        committee: &Committee,
+    ) -> ConsensusResult<Option<(QC, Vec<Option<Box<[u8]>>>)>> {
         let author = vote.author;
         let author_bls_g2 = committee.get_bls_public_g2(&vote.author);
         if self.is_valid(&vote) {
@@ -163,18 +171,20 @@ impl QCMaker {
 
                     info!("Constructed {} QC. Votes: {} ", vote.kind, self.votes.len(),);
 
-                    return Ok(Some(QC {
+                    let availability_shards = if vote.kind == VoteType::Normal {
+                        self.availability_shards.clone()
+                    } else {
+                        Vec::new()
+                    };
+                    let qc = QC {
                         blk_hash: vote.blk_hash.clone(),
                         payload_root: vote.payload_root,
                         kind: vote.kind.clone(),
                         round: vote.round,
-                        availability_shards: if vote.kind == VoteType::Normal {
-                            self.availability_shards.clone()
-                        } else {
-                            Vec::new()
-                        },
+                        availability_shards: Vec::new(),
                         votes: (self.pk_bit_vec.clone(), self.agg_sign.clone()),
-                    }));
+                    };
+                    return Ok(Some((qc, availability_shards)));
                 }
             }
         }

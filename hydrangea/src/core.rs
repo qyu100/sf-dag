@@ -602,13 +602,20 @@ impl Core {
         debug!("Received {:?}", vote);
         if vote.round > self.last_commit.round {
             debug!("Processing {:?}", vote);
-            let qc = match vote.kind {
-                VoteType::Commit => self.aggregator.add_commit_vote(vote.clone())?,
-                _ => self.aggregator.add_normal_vote(vote.clone())?,
-            };
-            if let Some(qc) = qc {
-                debug!("Assembled {:?}", qc);
-                self.handle_qc(&qc).await?;
+            match vote.kind {
+                VoteType::Commit => {
+                    if let Some(qc) = self.aggregator.add_commit_vote(vote.clone())? {
+                        debug!("Assembled {:?}", qc);
+                        self.handle_qc(&qc).await?;
+                    }
+                }
+                VoteType::Normal => {
+                    if let Some((qc, shards)) = self.aggregator.add_normal_vote(vote.clone())? {
+                        debug!("Assembled {:?}", qc);
+                        self.verify_availability(&qc.payload_root, shards)?;
+                        self.handle_qc(&qc).await?;
+                    }
+                }
             }
             // Add the new vote to our aggregator and see if we have a quorum.
             // Validation is done inside the aggregator.
@@ -713,18 +720,19 @@ impl Core {
         Ok(())
     }
 
-    fn verify_availability(&self, qc: &QC) -> ConsensusResult<()> {
-        if qc.round == GENESIS {
-            return Ok(());
-        }
+    fn verify_availability(
+        &self,
+        payload_root: &Digest,
+        availability_shards: Vec<Option<Box<[u8]>>>,
+    ) -> ConsensusResult<()> {
         let data_shards = (self.committee.n - 2 * self.committee.f) as usize;
         let parity_shards = (2 * self.committee.f) as usize;
         let coding = Coding::new(data_shards, parity_shards);
-        let mut shards = qc.availability_shards.clone();
+        let mut shards = availability_shards;
         coding.reconstruct_shards(&mut shards, self.rs_block_size, self.rs_block_threads)?;
         let mtree = MerkleTree::from_hashes(shard_hashes(&shards)?);
         ensure!(
-            mtree.root_hash() == &qc.payload_root,
+            mtree.root_hash() == payload_root,
             ConsensusError::InvalidProof
         );
         Ok(())
@@ -732,7 +740,6 @@ impl Core {
 
     async fn handle_prepare_qc(&mut self, qc: &QC) -> ConsensusResult<()> {
         if !self.uncommitted_qcs.contains_key(&qc.round) {
-            self.verify_availability(qc)?;
             // Ensure QC is valid (has a quorum). This is a relatively expensive check.
             // qc.is_well_formed(&self.committee, &self.sorted_keys, &self.combined_pubkey)?;
             debug!("Processing new QC {:?}", qc);
