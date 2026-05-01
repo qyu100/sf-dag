@@ -42,6 +42,19 @@ pub enum ConsensusMessage {
     SyncResponse(Block),
 }
 
+#[allow(dead_code)]
+#[derive(Serialize)]
+pub enum ConsensusMessageRef<'a> {
+    Propose(&'a ProposalMessage),
+    Vote(&'a Vote),
+    VerifiedVote(&'a Vote),
+    Timeout(&'a Timeout),
+    QC(&'a QC),
+    TC(&'a TC),
+    SyncRequest(&'a Digest, &'a PublicKey),
+    SyncResponse(&'a Block),
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum ProposalMessage {
     F(FallbackRecoveryProposal),

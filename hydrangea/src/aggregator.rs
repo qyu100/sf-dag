@@ -45,7 +45,7 @@ impl Aggregator {
             .or_insert_with(HashMap::new)
             .entry(vote.blk_hash.clone())
             .or_insert_with(|| Box::new(QCMaker::new(total_nodes)))
-            .append(vote, &self.committee)
+            .append(vote, &self.committee, false)
     }
 
     pub fn add_commit_vote(&mut self, vote: Vote) -> ConsensusResult<Option<QC>> {
@@ -53,7 +53,7 @@ impl Aggregator {
         self.commit_aggregators
             .entry(vote.round)
             .or_insert_with(|| Box::new(QCMaker::new(total_nodes)))
-            .append(vote, &self.committee)
+            .append(vote, &self.committee, true)
             .map(|maybe| maybe.map(|(qc, _)| qc))
     }
 
@@ -111,9 +111,13 @@ impl QCMaker {
         &mut self,
         vote: Vote,
         committee: &Committee,
+        verify_aggregate: bool,
     ) -> ConsensusResult<Option<(QC, Vec<Option<Box<[u8]>>>)>> {
         let author = vote.author;
         let author_bls_g2 = committee.get_bls_public_g2(&vote.author);
+        if self.is_qc_formed {
+            return Ok(None);
+        }
         if self.is_valid(&vote) {
             // Verify the signature and voting rights before storing to prevent DoS
             // by unauthorised nodes. Verification is done after membership check on
@@ -134,27 +138,27 @@ impl QCMaker {
             }
             self.votes.push((author_bls_g2, vote.signature.clone()));
 
-            if !self.is_qc_formed {
-                let id = committee.sorted_keys.binary_search(&author_bls_g2).unwrap();
-                let chunk = id / 128;
-                let bit = id % 128;
-                self.pk_bit_vec[chunk] &= !(1 << bit);
+            let id = committee.sorted_keys.binary_search(&author_bls_g2).unwrap();
+            let chunk = id / 128;
+            let bit = id % 128;
+            self.pk_bit_vec[chunk] &= !(1 << bit);
 
-                if self.votes.len() == 1 {
-                    self.agg_sign = vote.signature;
-                } else if self.votes.len() >= 2 {
-                    let new_agg_sign = aggregate_sign(&self.agg_sign, &vote.signature);
-                    self.agg_sign = new_agg_sign;
-                }
+            if self.votes.len() == 1 {
+                self.agg_sign = vote.signature;
+            } else if self.votes.len() >= 2 {
+                let new_agg_sign = aggregate_sign(&self.agg_sign, &vote.signature);
+                self.agg_sign = new_agg_sign;
+            }
 
-                self.weight += committee.stake(&author);
-                let ready_threshold = committee.n - committee.f;
-                if vote.kind == VoteType::Normal && self.weight >= committee.quorum_threshold()
-                    || vote.kind == VoteType::Commit && self.weight >= ready_threshold
-                {
-                    self.weight = 0; // Ensures QC of this type is only made once.
-                    self.is_qc_formed = true;
+            self.weight += committee.stake(&author);
+            let ready_threshold = committee.n - committee.f;
+            if vote.kind == VoteType::Normal && self.weight >= ready_threshold
+                || vote.kind == VoteType::Commit && self.weight >= ready_threshold
+            {
+                self.weight = 0; // Ensures QC of this type is only made once.
+                self.is_qc_formed = true;
 
+                if verify_aggregate {
                     let mut ids = Vec::new();
 
                     for idx in 0..committee.size() {
@@ -168,25 +172,25 @@ impl QCMaker {
                     let agg_pk =
                         remove_pubkeys(&committee.combined_pubkey, ids, &committee.sorted_keys);
                     SignatureShareG1::verify_batch(&vote.digest().0, &agg_pk, &self.agg_sign)?;
-
-                    info!("Constructed {} QC. Votes: {} ", vote.kind, self.votes.len(),);
-
-                    let availability_shards = if vote.kind == VoteType::Normal {
-                        self.availability_shards.clone()
-                    } else {
-                        Vec::new()
-                    };
-                    let qc = QC {
-                        blk_hash: vote.blk_hash.clone(),
-                        payload_root: vote.payload_root,
-                        kind: vote.kind.clone(),
-                        round: vote.round,
-                        block: None,
-                        availability_shards: Vec::new(),
-                        votes: (self.pk_bit_vec.clone(), self.agg_sign.clone()),
-                    };
-                    return Ok(Some((qc, availability_shards)));
                 }
+
+                info!("Constructed {} QC. Votes: {} ", vote.kind, self.votes.len(),);
+
+                let availability_shards = if vote.kind == VoteType::Normal {
+                    std::mem::take(&mut self.availability_shards)
+                } else {
+                    Vec::new()
+                };
+                let qc = QC {
+                    blk_hash: vote.blk_hash.clone(),
+                    payload_root: vote.payload_root,
+                    kind: vote.kind.clone(),
+                    round: vote.round,
+                    block: None,
+                    availability_shards: Vec::new(),
+                    votes: (self.pk_bit_vec.clone(), self.agg_sign.clone()),
+                };
+                return Ok(Some((qc, availability_shards)));
             }
         }
 

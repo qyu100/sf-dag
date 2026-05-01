@@ -78,10 +78,7 @@ impl Coding {
         let block_size = normalized_block_size(rs_block_size);
         let num_blocks = (shard_len + block_size - 1) / block_size;
         let (data_slices, parity_slices) = slices.split_at_mut(self.data_shards);
-        let originals: Vec<&[u8]> = data_slices
-            .iter()
-            .map(|s| &s[..])
-            .collect();
+        let originals: Vec<&[u8]> = data_slices.iter().map(|s| &s[..]).collect();
         let parity_ptrs: Vec<usize> = parity_slices
             .iter_mut()
             .map(|s| s.as_mut_ptr() as usize)
@@ -199,9 +196,8 @@ impl Coding {
 
             rs_block_pool(rs_block_threads)
                 .install(|| {
-                    (0..num_blocks)
-                        .into_par_iter()
-                        .try_for_each(|block_idx| -> ConsensusResult<()> {
+                    (0..num_blocks).into_par_iter().try_for_each(
+                        |block_idx| -> ConsensusResult<()> {
                             let offset = block_idx * block_size;
                             let block_len = std::cmp::min(block_size, shard_len - offset);
                             if block_len % 64 != 0 {
@@ -243,7 +239,8 @@ impl Coding {
                                 }
                             }
                             Ok(())
-                        })
+                        },
+                    )
                 })
                 .map_err(|_| ConsensusError::ProofConstructionFailed)?;
         }
@@ -278,9 +275,8 @@ impl Coding {
 
             rs_block_pool(rs_block_threads)
                 .install(|| {
-                    (0..num_blocks)
-                        .into_par_iter()
-                        .try_for_each(|block_idx| -> ConsensusResult<()> {
+                    (0..num_blocks).into_par_iter().try_for_each(
+                        |block_idx| -> ConsensusResult<()> {
                             let offset = block_idx * block_size;
                             let block_len = std::cmp::min(block_size, shard_len - offset);
                             if block_len % 64 != 0 {
@@ -312,7 +308,8 @@ impl Coding {
                                 }
                             }
                             Ok(())
-                        })
+                        },
+                    )
                 })
                 .map_err(|_| ConsensusError::ProofConstructionFailed)?;
         }

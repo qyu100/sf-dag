@@ -1,6 +1,6 @@
 use crate::aggregator::Aggregator;
 use crate::coding::{shard_hashes, Coding};
-use crate::consensus::{ConsensusMessage, ProposalMessage, Round};
+use crate::consensus::{ConsensusMessage, ConsensusMessageRef, ProposalMessage, Round};
 use crate::error::{ConsensusError, ConsensusResult};
 use crate::leader::LeaderElector;
 use crate::mempool::MempoolDriver;
@@ -37,9 +37,11 @@ use tokio::time::Instant;
 
 pub struct Core {
     aggregator: Aggregator,
+    available_payloads: HashSet<(Round, Digest, Digest)>,
     committee: Committee,
     committable_blocks: HashMap<Digest, Round>,
     consensus_only: bool,
+    decoded_payloads: HashSet<(Round, Digest, Digest)>,
     last_commit: Block,
     // t_l
     last_timeout: Round,
@@ -122,9 +124,11 @@ impl Core {
 
             Self {
                 aggregator: Aggregator::new(committee.clone()),
+                available_payloads: HashSet::new(),
                 committee,
                 committable_blocks: HashMap::new(),
                 consensus_only,
+                decoded_payloads: HashSet::new(),
                 last_commit: genesis_block.clone(),
                 last_timeout: GENESIS,
                 leader_elector,
@@ -176,6 +180,16 @@ impl Core {
             ConsensusMessage::Timeout(_) => self.vote_sender.broadcast(addresses, m_bytes).await,
             _ => (),
         }
+    }
+
+    async fn broadcast_vote_ref(&mut self, vote: &Vote) {
+        debug!("Broadcasting {:?}", vote);
+        let addresses = self.committee.others_consensus_sockets(&self.name);
+        let message = bincode::serialize(&ConsensusMessageRef::Vote(vote))
+            .expect(format!("Failed to serialize vote {:?}", vote).as_str());
+        self.vote_sender
+            .broadcast(addresses, Bytes::from(message))
+            .await;
     }
 
     // Unicasts the given ConsensusMessage to the given recipient if recipient is not self.
@@ -291,6 +305,10 @@ impl Core {
         if self.committable_blocks.contains_key(&block.digest()) {
             // Have the QC for this block and its immediate successor by round number.
             if self.have_all_ancestors(block.clone()).await? {
+                if !self.ensure_payload_decoded(block).await? {
+                    debug!("Waiting for NormalVote shards to decode {:?}", block);
+                    return Ok(());
+                }
                 // This block and all of its uncommitted ancestors are safe to commit.
                 debug!("Late commit");
                 self.commit(block.clone()).await?;
@@ -300,6 +318,44 @@ impl Core {
         // commit rule. If we eventually do, then we will commit it at that time.
 
         Ok(())
+    }
+
+    async fn retry_commit_if_ready(
+        &mut self,
+        round: Round,
+        digest: &Digest,
+    ) -> ConsensusResult<()> {
+        if !self.committable_blocks.contains_key(digest) {
+            return Ok(());
+        }
+        if let Some(block) = self.uncommitted_blocks.get(digest).cloned() {
+            if block.round == round
+                && self.ensure_payload_decoded(&block).await?
+                && self.have_all_ancestors(block.clone()).await?
+            {
+                debug!("Commit unblocked by payload decode");
+                self.commit(block).await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn ensure_payload_decoded(&mut self, block: &Block) -> ConsensusResult<bool> {
+        if block.payload_len == 0 {
+            return Ok(true);
+        }
+        let key = Self::availability_key(block.round, &block.digest(), &block.payload_root);
+        if self.decoded_payloads.contains(&key) {
+            return Ok(true);
+        }
+
+        if !self.available_payloads.contains(&key) {
+            return Ok(false);
+        }
+
+        self.decoded_payloads.insert(key);
+        info!("Payload available for round {} at commit", block.round);
+        Ok(true)
     }
 
     // Unicasts self.locked to the given peer to allow it to enter self.locked.round + 1.
@@ -468,6 +524,10 @@ impl Core {
         // Clean up in-memory storage.
         self.committable_blocks.retain(|_, r| *r > committing_round);
         self.pending_proposals.retain(|r, _| *r > committing_round);
+        self.available_payloads
+            .retain(|(round, _, _)| *round > committing_round);
+        self.decoded_payloads
+            .retain(|(round, _, _)| *round > committing_round);
         self.uncommitted_blocks
             .retain(|_, b| b.round > committing_round);
         self.uncommitted_qcs
@@ -487,6 +547,10 @@ impl Core {
         self.committable_blocks.insert(d.clone(), r);
 
         if let Some(block) = self.uncommitted_blocks.get(&d).cloned() {
+            if !self.ensure_payload_decoded(&block).await? {
+                debug!("Waiting for NormalVote shards to decode {:?}", block);
+                return Ok(());
+            }
             if self.have_all_ancestors(block.clone()).await? {
                 debug!("Immediate commit");
                 // Have all uncommitted ancestors of this block.
@@ -522,6 +586,14 @@ impl Core {
 
     fn can_vote(&self, b: &Block) -> bool {
         self.last_timeout < b.round && self.has_voting_parent_delivered(b)
+    }
+
+    fn availability_key(
+        round: Round,
+        blk_hash: &Digest,
+        payload_root: &Digest,
+    ) -> (Round, Digest, Digest) {
+        (round, blk_hash.clone(), payload_root.clone())
     }
 
     async fn try_vote(&mut self) -> ConsensusResult<()> {
@@ -568,6 +640,7 @@ impl Core {
         t: VoteType,
         proof: Option<Proof>,
     ) -> ConsensusResult<()> {
+        let sign_start = Instant::now();
         let vote = Vote::new(
             self.name,
             b,
@@ -578,11 +651,24 @@ impl Core {
             &mut self.bls_signature_service,
         )
         .await;
+        debug!(
+            "Created {} vote for round {} in {} ms",
+            t,
+            r,
+            sign_start.elapsed().as_millis()
+        );
         debug!("Created {:?}", vote);
 
         let _ = self.handle_vote(&vote).await;
 
-        self.broadcast(ConsensusMessage::Vote(vote)).await;
+        let broadcast_start = Instant::now();
+        self.broadcast_vote_ref(&vote).await;
+        debug!(
+            "Scheduled {} vote broadcast for round {} in {} ms",
+            t,
+            r,
+            broadcast_start.elapsed().as_millis()
+        );
 
         Ok(())
     }
@@ -644,9 +730,20 @@ impl Core {
                 VoteType::Normal => {
                     if let Some((mut qc, shards)) = self.aggregator.add_normal_vote(vote.clone())? {
                         debug!("Assembled {:?}", qc);
-                        self.verify_availability(&qc.payload_root, shards).await?;
+                        let verify_start = Instant::now();
+                        self.verify_normal_qc_and_availability(&qc, shards).await?;
+                        let key = Self::availability_key(qc.round, &qc.blk_hash, &qc.payload_root);
+                        self.available_payloads.insert(key);
+                        info!(
+                            "Verified NQC and recomputed payload root for round {} in {} ms",
+                            qc.round,
+                            verify_start.elapsed().as_millis()
+                        );
                         self.attach_block_to_qc(&mut qc);
                         self.handle_qc(&qc).await?;
+                    } else {
+                        self.retry_commit_if_ready(vote.round, &vote.blk_hash)
+                            .await?;
                     }
                 }
             }
@@ -733,6 +830,8 @@ impl Core {
             .send(ProposerMessage::Cleanup(r))
             .await
             .expect("Failed to send message to proposer");
+        self.available_payloads.retain(|(round, _, _)| round > &r);
+        self.decoded_payloads.retain(|(round, _, _)| round > &r);
     }
 
     async fn propose_fallback(&mut self, tc: TC) {
@@ -777,6 +876,24 @@ impl Core {
         })
         .await
         .map_err(|_| ConsensusError::ProofConstructionFailed)?
+    }
+
+    async fn verify_normal_qc_and_availability(
+        &self,
+        qc: &QC,
+        availability_shards: Vec<Option<Box<[u8]>>>,
+    ) -> ConsensusResult<()> {
+        let qc_for_verify = qc.clone();
+        let payload_root = qc.payload_root.clone();
+        let committee = self.committee.clone();
+        let verify_qc = async move {
+            tokio::task::spawn_blocking(move || qc_for_verify.is_well_formed(&committee))
+                .await
+                .map_err(|_| ConsensusError::ProofConstructionFailed)?
+        };
+        let verify_payload = self.verify_availability(&payload_root, availability_shards);
+        tokio::try_join!(verify_qc, verify_payload)?;
+        Ok(())
     }
 
     async fn handle_prepare_qc(&mut self, qc: &QC) -> ConsensusResult<()> {
@@ -833,6 +950,7 @@ impl Core {
     }
 
     // TODO: Change to return a bool based on whether QC quorum is valid once panics have been removed.
+    #[async_recursion]
     async fn handle_qc(&mut self, qc: &QC) -> ConsensusResult<()> {
         if qc.round > self.last_commit.round {
             if qc.kind == VoteType::Commit {
