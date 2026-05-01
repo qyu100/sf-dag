@@ -10,13 +10,14 @@ use crate::synchronizer::Synchronizer;
 use async_trait::async_trait;
 use bytes::Bytes;
 use config::{Committee, Parameters};
-use crypto::{BlsSignatureService, Digest, PublicKey, SignatureService};
+use crypto::{BlsSignatureService, Digest, Hash as _, PublicKey, SignatureService};
 use futures::SinkExt as _;
 use log::{debug, info};
 use network::{MessageHandler, Receiver as NetworkReceiver, Writer};
 use primary::Certificate;
 use serde::{Deserialize, Serialize};
 use std::error::Error;
+use std::time::Instant;
 use store::Store;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 
@@ -180,33 +181,132 @@ struct ConsensusReceiverHandler {
 #[async_trait]
 impl MessageHandler for ConsensusReceiverHandler {
     async fn dispatch(&self, writer: &mut Writer, serialized: Bytes) -> Result<(), Box<dyn Error>> {
-        // Deserialize and parse the message.
-        match bincode::deserialize(&serialized).map_err(ConsensusError::SerializationError)? {
-            ConsensusMessage::SyncRequest(missing, origin) => self
-                .tx_helper
-                .send((missing, origin))
-                .await
-                .expect("Failed to send consensus message"),
+        let total_start = Instant::now();
+        let bytes = serialized.len();
+        let deserialize_start = Instant::now();
+        let message: ConsensusMessage =
+            bincode::deserialize(&serialized).map_err(ConsensusError::SerializationError)?;
+        let deserialize_ms = deserialize_start.elapsed().as_millis();
+        let label = match &message {
+            ConsensusMessage::Propose(ProposalMessage::N(p)) => {
+                format!(
+                    "Propose(Normal),round={},digest={}",
+                    p.block.round,
+                    p.block.digest()
+                )
+            }
+            ConsensusMessage::Propose(ProposalMessage::F(p)) => {
+                format!(
+                    "Propose(Fallback),round={},digest={}",
+                    p.block.round,
+                    p.block.digest()
+                )
+            }
+            ConsensusMessage::Vote(v) => format!(
+                "Vote({}),round={},digest={},root={}",
+                v.kind, v.round, v.blk_hash, v.payload_root
+            ),
+            ConsensusMessage::VerifiedVote(v) => format!(
+                "VerifiedVote({}),round={},digest={},root={}",
+                v.kind, v.round, v.blk_hash, v.payload_root
+            ),
+            ConsensusMessage::Timeout(t) => format!("Timeout,round={}", t.round),
+            ConsensusMessage::QC(qc) => format!(
+                "QC({}),round={},digest={},root={}",
+                qc.kind, qc.round, qc.blk_hash, qc.payload_root
+            ),
+            ConsensusMessage::TC(tc) => format!("TC,round={}", tc.round),
+            ConsensusMessage::SyncRequest(missing, _) => {
+                format!("SyncRequest,digest={}", missing)
+            }
+            ConsensusMessage::SyncResponse(block) => {
+                format!(
+                    "SyncResponse,round={},digest={}",
+                    block.round,
+                    block.digest()
+                )
+            }
+        };
+
+        match message {
+            ConsensusMessage::SyncRequest(missing, origin) => {
+                let send_start = Instant::now();
+                self.tx_helper
+                    .send((missing, origin))
+                    .await
+                    .expect("Failed to send consensus message");
+                Self::log_dispatch_timing(
+                    &label,
+                    bytes,
+                    deserialize_ms,
+                    0,
+                    send_start.elapsed().as_millis(),
+                    total_start.elapsed().as_millis(),
+                );
+            }
             message @ ConsensusMessage::Propose(..) => {
                 // TODO: Remove
                 debug!("Acking Proposal: {:?}", message);
+                let ack_start = Instant::now();
                 // Reply with an ACK.
                 let _ = writer.send(Bytes::from("Ack")).await;
+                let ack_ms = ack_start.elapsed().as_millis();
 
                 // Pass the message to the consensus core.
+                let send_start = Instant::now();
                 self.tx_consensus
                     .send(message)
                     .await
-                    .expect("Failed to consensus message")
+                    .expect("Failed to consensus message");
+                Self::log_dispatch_timing(
+                    &label,
+                    bytes,
+                    deserialize_ms,
+                    ack_ms,
+                    send_start.elapsed().as_millis(),
+                    total_start.elapsed().as_millis(),
+                );
             }
             message => {
                 // debug!("Received message from peer: {:?}", message);
+                let send_start = Instant::now();
                 self.tx_consensus
                     .send(message)
                     .await
-                    .expect("Failed to consensus message")
+                    .expect("Failed to consensus message");
+                Self::log_dispatch_timing(
+                    &label,
+                    bytes,
+                    deserialize_ms,
+                    0,
+                    send_start.elapsed().as_millis(),
+                    total_start.elapsed().as_millis(),
+                );
             }
         }
         Ok(())
+    }
+}
+
+impl ConsensusReceiverHandler {
+    fn log_dispatch_timing(
+        label: &str,
+        bytes: usize,
+        deserialize_ms: u128,
+        ack_ms: u128,
+        core_send_ms: u128,
+        total_ms: u128,
+    ) {
+        if total_ms >= 10 || deserialize_ms >= 10 || core_send_ms >= 10 {
+            info!(
+                "TIMING consensus_receive label={} bytes={} deserialize_ms={} ack_ms={} core_send_ms={} total_ms={}",
+                label, bytes, deserialize_ms, ack_ms, core_send_ms, total_ms
+            );
+        } else {
+            debug!(
+                "TIMING consensus_receive label={} bytes={} deserialize_ms={} ack_ms={} core_send_ms={} total_ms={}",
+                label, bytes, deserialize_ms, ack_ms, core_send_ms, total_ms
+            );
+        }
     }
 }

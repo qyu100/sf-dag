@@ -109,6 +109,7 @@ impl Proposer {
     }
 
     async fn send_proposals(&mut self, proposals: Vec<(PublicKey, Bytes)>) {
+        let send_start = Instant::now();
         let peers: HashMap<PublicKey, _> = self
             .committee
             .others_consensus(&self.name)
@@ -137,6 +138,12 @@ impl Proposer {
             );
             handles.push(self.network.send(address, message).await);
         }
+        info!(
+            "TIMING proposal_send round={} remotes={} enqueue_ms={}",
+            self.last_proposed.round,
+            handles.len(),
+            send_start.elapsed().as_millis()
+        );
         self.in_progress.insert(self.last_proposed.round, handles);
     }
 
@@ -144,6 +151,14 @@ impl Proposer {
         info!("Created {:?}", b);
         info!("Created {}", b.digest());
         info!("Header {} contains {} B", b.digest(), b.payload_len);
+        info!(
+            "TIMELINE event=block_created node={} author={} round={} digest={} payload_bytes={}",
+            self.name,
+            b.author,
+            b.round,
+            b.digest(),
+            b.payload_len
+        );
         self.last_proposed = b;
     }
 
@@ -151,15 +166,20 @@ impl Proposer {
         &mut self,
         trigger: ProposalTrigger,
     ) -> (ProposalMessage, Vec<(PublicKey, Bytes)>) {
+        let total_start = Instant::now();
         let (parent, round) = match &trigger {
             ProposalTrigger::QC(qc) => (qc.blk_hash.clone(), qc.round + 1),
             ProposalTrigger::TC(tc) => (tc.high_qc.blk_hash.clone(), tc.round + 1),
         };
 
+        let payload_start = Instant::now();
         let header = Header::new(self.name, parent, self.get_payload(), round);
         let payload_bytes =
             bincode::serialize(&header.payload).expect("Failed to serialize payload");
         let payload_len = payload_bytes.len();
+        let payload_ms = payload_start.elapsed().as_millis();
+
+        let encode_start = Instant::now();
         let data_shards = (self.committee.n - 2 * self.committee.f) as usize;
         let parity_shards = (2 * self.committee.f) as usize;
         let coding = Coding::new(data_shards, parity_shards);
@@ -177,14 +197,18 @@ impl Proposer {
         coding
             .encode(&mut shards, self.rs_block_size, self.rs_block_threads)
             .expect("Failed to encode payload");
+        let encode_ms = encode_start.elapsed().as_millis();
 
+        let merkle_start = Instant::now();
         let shard_options: Vec<Option<Box<[u8]>>> = shards
             .iter()
             .map(|s| Some(s.to_vec().into_boxed_slice()))
             .collect();
         let mtree =
             MerkleTree::from_hashes(shard_hashes(&shard_options).expect("Failed to hash shards"));
+        let merkle_ms = merkle_start.elapsed().as_millis();
 
+        let sign_start = Instant::now();
         let block = Block::new(
             self.name,
             header.parent,
@@ -194,6 +218,7 @@ impl Proposer {
             self.signature_service.clone(),
         )
         .await;
+        let sign_ms = sign_start.elapsed().as_millis();
         self.record_proposal(block.clone());
 
         let mut recipients: Vec<PublicKey> = self.committee.authorities.keys().cloned().collect();
@@ -206,6 +231,7 @@ impl Proposer {
 
         let my_name = self.name;
         let shard_refs: Vec<&[u8]> = shards.iter().map(|s| &**s).collect();
+        let proof_serialize_start = Instant::now();
         let targets: Vec<ProposalTarget> = recipients
             .into_par_iter()
             .enumerate()
@@ -230,6 +256,7 @@ impl Proposer {
                 }
             })
             .collect();
+        let proof_serialize_ms = proof_serialize_start.elapsed().as_millis();
 
         let mut local = None;
         let mut remote = Vec::new();
@@ -239,18 +266,42 @@ impl Proposer {
                 ProposalTarget::Remote(recipient, message) => remote.push((recipient, message)),
             }
         }
+        let total_bytes: usize = remote.iter().map(|(_, message)| message.len()).sum();
+        info!(
+            "TIMING proposal_make round={} payload_bytes={} shard_len={} remote_count={} remote_bytes={} payload_ms={} encode_ms={} merkle_ms={} sign_ms={} proof_serialize_ms={} total_ms={}",
+            round,
+            payload_len,
+            shard_len,
+            remote.len(),
+            total_bytes,
+            payload_ms,
+            encode_ms,
+            merkle_ms,
+            sign_ms,
+            proof_serialize_ms,
+            total_start.elapsed().as_millis()
+        );
         (local.expect("missing local proposal"), remote)
     }
 
     async fn propose(&mut self, trigger: ProposalTrigger) {
+        let propose_start = Instant::now();
         let (local, remote) = self.make_proposals(trigger).await;
         // Send the Proposal to the Core for local processing.
+        let local_start = Instant::now();
         self.tx_proposer_core
             .send(local)
             .await
             .expect("Failed to send block");
+        let local_ms = local_start.elapsed().as_millis();
         // Broadcast the Proposal.
         self.send_proposals(remote).await;
+        info!(
+            "TIMING propose_done round={} local_send_ms={} total_ms={}",
+            self.last_proposed.round,
+            local_ms,
+            propose_start.elapsed().as_millis()
+        );
     }
 
     fn cleanup(&mut self, r: Round) {

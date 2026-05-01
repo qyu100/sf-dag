@@ -6,6 +6,7 @@ use config::{Committee, Stake};
 use crypto::{aggregate_sign, remove_pubkeys, Digest, Hash, PublicKey, Signature};
 use log::info;
 use std::collections::{HashMap, HashSet};
+use std::time::Instant;
 
 // #[cfg(test)]
 // #[path = "tests/aggregator_tests.rs"]
@@ -113,6 +114,9 @@ impl QCMaker {
         committee: &Committee,
         verify_aggregate: bool,
     ) -> ConsensusResult<Option<(QC, Vec<Option<Box<[u8]>>>)>> {
+        let append_start = Instant::now();
+        let mut proof_ms = 0;
+        let mut aggregate_verify_ms = 0;
         let author = vote.author;
         let author_bls_g2 = committee.get_bls_public_g2(&vote.author);
         if self.is_qc_formed {
@@ -127,6 +131,7 @@ impl QCMaker {
 
             self.used.insert(author);
             if vote.kind == VoteType::Normal {
+                let proof_start = Instant::now();
                 let proof = vote.proof.as_ref().ok_or(ConsensusError::InvalidProof)?;
                 ensure!(
                     proof.index() == committee.id(&author) as usize
@@ -135,6 +140,7 @@ impl QCMaker {
                     ConsensusError::InvalidProof
                 );
                 self.availability_shards[proof.index()] = Some(proof.value().clone());
+                proof_ms = proof_start.elapsed().as_millis();
             }
             self.votes.push((author_bls_g2, vote.signature.clone()));
 
@@ -159,6 +165,7 @@ impl QCMaker {
                 self.is_qc_formed = true;
 
                 if verify_aggregate {
+                    let aggregate_verify_start = Instant::now();
                     let mut ids = Vec::new();
 
                     for idx in 0..committee.size() {
@@ -172,9 +179,20 @@ impl QCMaker {
                     let agg_pk =
                         remove_pubkeys(&committee.combined_pubkey, ids, &committee.sorted_keys);
                     SignatureShareG1::verify_batch(&vote.digest().0, &agg_pk, &self.agg_sign)?;
+                    aggregate_verify_ms = aggregate_verify_start.elapsed().as_millis();
                 }
 
                 info!("Constructed {} QC. Votes: {} ", vote.kind, self.votes.len(),);
+                info!(
+                    "TIMING qc_construct kind={} round={} digest={} votes={} proof_ms={} aggregate_verify_ms={} total_ms={}",
+                    vote.kind,
+                    vote.round,
+                    vote.blk_hash,
+                    self.votes.len(),
+                    proof_ms,
+                    aggregate_verify_ms,
+                    append_start.elapsed().as_millis()
+                );
 
                 let availability_shards = if vote.kind == VoteType::Normal {
                     std::mem::take(&mut self.availability_shards)
