@@ -310,6 +310,53 @@ impl fmt::Display for VoteType {
     }
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Echo {
+    pub author: PublicKey,
+    pub blk_hash: Digest,
+    pub payload_root: Digest,
+    pub round: Round,
+    pub proof: Proof,
+}
+
+impl Echo {
+    pub fn new(
+        author: PublicKey,
+        blk_hash: Digest,
+        payload_root: Digest,
+        round: Round,
+        proof: Proof,
+    ) -> Self {
+        Self {
+            author,
+            blk_hash,
+            payload_root,
+            round,
+            proof,
+        }
+    }
+
+    pub fn is_well_formed(&self, committee: &Committee) -> ConsensusResult<()> {
+        ensure!(
+            committee.stake(&self.author) > 0,
+            ConsensusError::UnknownAuthority(self.author)
+        );
+        ensure!(
+            self.proof.index() == committee.id(&self.author) as usize
+                && *self.proof.root_hash() == self.payload_root
+                && self.proof.validate(committee.size()),
+            ConsensusError::InvalidProof
+        );
+        Ok(())
+    }
+}
+
+impl fmt::Debug for Echo {
+    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+        write!(f, "E({}, {}, {})", self.author, self.round, self.blk_hash)
+    }
+}
+
 // TODO: Timeouts and Prepares should come with justification to prevent
 // Byzantine nodes spamming messages for higher rounds.
 #[derive(Clone, Serialize, Deserialize)]

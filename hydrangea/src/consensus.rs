@@ -4,7 +4,9 @@ use crate::error::ConsensusError;
 use crate::helper::Helper;
 use crate::leader::LeaderElector;
 use crate::mempool::MempoolDriver;
-use crate::messages::{Block, FallbackRecoveryProposal, NormalProposal, Timeout, Vote, QC, TC};
+use crate::messages::{
+    Block, Echo, FallbackRecoveryProposal, NormalProposal, Timeout, Vote, QC, TC,
+};
 use crate::proposer::Proposer;
 use crate::synchronizer::Synchronizer;
 use async_trait::async_trait;
@@ -33,6 +35,7 @@ pub type Round = u64;
 #[derive(Serialize, Deserialize, Debug)]
 pub enum ConsensusMessage {
     Propose(ProposalMessage),
+    Echo(Echo),
     Vote(Vote),
     VerifiedVote(Vote),
     Timeout(Timeout),

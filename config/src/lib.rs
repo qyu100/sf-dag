@@ -164,7 +164,10 @@ impl Parameters {
         info!("Block size set to {} Certificates", self.max_block_size);
         info!("Max batch delay set to {} ms", self.max_batch_delay);
         info!("Reed-Solomon block size set to {} B", self.rs_block_size);
-        info!("Reed-Solomon block threads set to {}", self.rs_block_threads);
+        info!(
+            "Reed-Solomon block threads set to {}",
+            self.rs_block_threads
+        );
     }
 }
 

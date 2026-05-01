@@ -1,6 +1,6 @@
 use crate::consensus::Round;
-use crate::error::{ConsensusError, ConsensusResult};
-use crate::messages::{Timeout, Vote, VoteType, QC, TC};
+use crate::error::ConsensusResult;
+use crate::messages::{Echo, Timeout, Vote, VoteType, QC, TC};
 use blsttc::{PublicKeyShareG2, SignatureShareG1};
 use config::{Committee, Stake};
 use crypto::{aggregate_sign, remove_pubkeys, Digest, Hash, PublicKey, Signature};
@@ -13,6 +13,7 @@ use std::collections::{HashMap, HashSet};
 
 pub struct Aggregator {
     committee: Committee,
+    echo_aggregators: HashMap<Round, HashMap<Digest, Box<EchoMaker>>>,
     // Proposals indexed by round and block digest.
     votes_aggregators: HashMap<Round, HashMap<Digest, Box<QCMaker>>>,
     commit_aggregators: HashMap<Round, Box<QCMaker>>,
@@ -23,16 +24,27 @@ impl Aggregator {
     pub fn new(committee: Committee) -> Self {
         Self {
             committee,
+            echo_aggregators: HashMap::new(),
             votes_aggregators: HashMap::new(),
             commit_aggregators: HashMap::new(),
             timeouts_aggregators: HashMap::new(),
         }
     }
 
-    pub fn add_normal_vote(
+    pub fn add_echo(
         &mut self,
-        vote: Vote,
-    ) -> ConsensusResult<Option<(QC, Vec<Option<Box<[u8]>>>)>> {
+        echo: Echo,
+    ) -> ConsensusResult<Option<(Digest, Digest, Vec<Option<Box<[u8]>>>)>> {
+        let total_nodes = self.committee.n as usize;
+        self.echo_aggregators
+            .entry(echo.round)
+            .or_insert_with(HashMap::new)
+            .entry(echo.blk_hash.clone())
+            .or_insert_with(|| Box::new(EchoMaker::new(total_nodes)))
+            .append(echo, &self.committee)
+    }
+
+    pub fn add_normal_vote(&mut self, vote: Vote) -> ConsensusResult<Option<QC>> {
         // TODO [issue #7]: A bad node may make us run out of memory by sending many votes
         // with different round numbers or different digests.
 
@@ -54,7 +66,6 @@ impl Aggregator {
             .entry(vote.round)
             .or_insert_with(|| Box::new(QCMaker::new(total_nodes)))
             .append(vote, &self.committee)
-            .map(|maybe| maybe.map(|(qc, _)| qc))
     }
 
     pub fn add_timeout(&mut self, timeout: Timeout) -> ConsensusResult<(Stake, Option<TC>)> {
@@ -70,6 +81,8 @@ impl Aggregator {
     pub fn cleanup_prepares(&mut self, r: &Round) {
         self.votes_aggregators
             .retain(|block_round, _| block_round > r);
+        self.echo_aggregators
+            .retain(|block_round, _| block_round > r);
         self.commit_aggregators
             .retain(|block_round, _| block_round > r);
     }
@@ -79,13 +92,60 @@ impl Aggregator {
     }
 }
 
+struct EchoMaker {
+    used: HashSet<PublicKey>,
+    weight: Stake,
+    availability_shards: Vec<Option<Box<[u8]>>>,
+    is_available: bool,
+}
+
+impl EchoMaker {
+    pub fn new(total_nodes: usize) -> Self {
+        Self {
+            used: HashSet::new(),
+            weight: 0,
+            availability_shards: vec![None; total_nodes],
+            is_available: false,
+        }
+    }
+
+    pub fn append(
+        &mut self,
+        echo: Echo,
+        committee: &Committee,
+    ) -> ConsensusResult<Option<(Digest, Digest, Vec<Option<Box<[u8]>>>)>> {
+        let author = echo.author;
+        if !self.used.contains(&author) {
+            echo.is_well_formed(committee)?;
+            self.used.insert(author);
+            self.weight += committee.stake(&author);
+            self.availability_shards[echo.proof.index()] = Some(echo.proof.value().clone());
+
+            let availability_threshold = committee.n - committee.f;
+            if !self.is_available && self.weight >= availability_threshold {
+                self.is_available = true;
+                info!(
+                    "Constructed Echo quorum. Echoes: {} round {}",
+                    self.used.len(),
+                    echo.round
+                );
+                return Ok(Some((
+                    echo.blk_hash,
+                    echo.payload_root,
+                    self.availability_shards.clone(),
+                )));
+            }
+        }
+        Ok(None)
+    }
+}
+
 struct QCMaker {
     used: HashSet<PublicKey>,
     votes: Vec<(PublicKeyShareG2, SignatureShareG1)>,
     weight: Stake,
     agg_sign: SignatureShareG1,
     pk_bit_vec: Vec<u128>,
-    availability_shards: Vec<Option<Box<[u8]>>>,
     is_qc_formed: bool,
 }
 
@@ -97,7 +157,6 @@ impl QCMaker {
             weight: 0,
             agg_sign: SignatureShareG1::default(),
             pk_bit_vec: vec![u128::MAX; (total_nodes + 127) / 128],
-            availability_shards: vec![None; total_nodes],
             is_qc_formed: false,
         }
     }
@@ -107,11 +166,7 @@ impl QCMaker {
     }
 
     /// Try to append a signature to a (partial) quorum.
-    pub fn append(
-        &mut self,
-        vote: Vote,
-        committee: &Committee,
-    ) -> ConsensusResult<Option<(QC, Vec<Option<Box<[u8]>>>)>> {
+    pub fn append(&mut self, vote: Vote, committee: &Committee) -> ConsensusResult<Option<QC>> {
         let author = vote.author;
         let author_bls_g2 = committee.get_bls_public_g2(&vote.author);
         if self.is_valid(&vote) {
@@ -122,16 +177,6 @@ impl QCMaker {
             // verification is more expensive).
 
             self.used.insert(author);
-            if vote.kind == VoteType::Normal {
-                let proof = vote.proof.as_ref().ok_or(ConsensusError::InvalidProof)?;
-                ensure!(
-                    proof.index() == committee.id(&author) as usize
-                        && *proof.root_hash() == vote.payload_root
-                        && proof.validate(committee.size()),
-                    ConsensusError::InvalidProof
-                );
-                self.availability_shards[proof.index()] = Some(proof.value().clone());
-            }
             self.votes.push((author_bls_g2, vote.signature.clone()));
 
             if !self.is_qc_formed {
@@ -171,11 +216,6 @@ impl QCMaker {
 
                     info!("Constructed {} QC. Votes: {} ", vote.kind, self.votes.len(),);
 
-                    let availability_shards = if vote.kind == VoteType::Normal {
-                        self.availability_shards.clone()
-                    } else {
-                        Vec::new()
-                    };
                     let qc = QC {
                         blk_hash: vote.blk_hash.clone(),
                         payload_root: vote.payload_root,
@@ -185,7 +225,7 @@ impl QCMaker {
                         availability_shards: Vec::new(),
                         votes: (self.pk_bit_vec.clone(), self.agg_sign.clone()),
                     };
-                    return Ok(Some((qc, availability_shards)));
+                    return Ok(Some(qc));
                 }
             }
         }

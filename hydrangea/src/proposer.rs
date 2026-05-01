@@ -130,7 +130,11 @@ impl Proposer {
             let Some(address) = peers.get(&recipient).cloned() else {
                 continue;
             };
-            debug!("Proposing to {}. Proposal size is {}B", recipient, message.len());
+            debug!(
+                "Proposing to {}. Proposal size is {}B",
+                recipient,
+                message.len()
+            );
             handles.push(self.network.send(address, message).await);
         }
         self.in_progress.insert(self.last_proposed.round, handles);
