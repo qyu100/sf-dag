@@ -6,7 +6,8 @@ use crate::garbage_collector::GarbageCollector;
 use crate::header_waiter::HeaderWaiter;
 use crate::helper::Helper;
 use crate::messages::{
-    Certificate, Header, HeaderInfo, HeaderInfoWithCertificate, HeaderWithCertificate, Timeout, Vote, Support,
+    Certificate, Header, HeaderInfo, HeaderInfoWithCertificate, HeaderWithCertificate, Support,
+    Timeout, Vote,
 };
 use crate::proposer::Proposer;
 use crate::synchronizer::Synchronizer;
@@ -206,6 +207,7 @@ impl Primary {
             tx_consensus_header_msg,
             sorted_keys.clone(),
             combined_key.clone(),
+            parameters.parent_quorum_delay_ms,
         );
 
         // Keeps track of the latest consensus round and allows other tasks to clean up their their internal state

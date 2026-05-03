@@ -205,6 +205,7 @@ class LocalCommittee(Committee):
 
 class NodeParameters:
     def __init__(self, json):
+        json.setdefault('parent_quorum_delay_ms', 50)
         inputs = []
         try:
             inputs += [json['header_size']]
@@ -217,6 +218,7 @@ class NodeParameters:
             inputs += [json['tx_size']]
             inputs += [json['propose_rate']]
             inputs += [json['f_num']]
+            inputs += [json['parent_quorum_delay_ms']]
         except KeyError as e:
             raise ConfigError(f'Malformed parameters: missing key {e}')
 

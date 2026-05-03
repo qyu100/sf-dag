@@ -1,11 +1,11 @@
 // Copyright(C) Facebook, Inc. and its affiliates.
 use crate::error::{DagError, DagResult};
-use crate::messages::{Certificate, Timeout, TimeoutCert, Vote, Support};
+use crate::messages::{Certificate, Support, Timeout, TimeoutCert, Vote};
 use blsttc::{PublicKeyShareG2, SignatureShareG1};
 use config::{Committee, Stake};
 use crypto::{aggregate_sign, PublicKey, Signature};
-use log::debug;
 use std::collections::HashSet;
+use std::time::Duration;
 
 /// Aggregates votes for a particular header into a certificate.
 pub struct VotesAggregator {
@@ -73,16 +73,18 @@ pub struct CertificatesAggregator {
     supports: Vec<Support>,
     used: HashSet<PublicKey>,
     certificate_weight: Stake,
+    parent_quorum_delay_ms: u64,
 }
 
 impl CertificatesAggregator {
-    pub fn new() -> Self {
+    pub fn new(parent_quorum_delay_ms: u64) -> Self {
         Self {
             weight: 0,
             certificates: Vec::new(),
             supports: Vec::new(),
             used: HashSet::new(),
             certificate_weight: 0,
+            parent_quorum_delay_ms,
         }
     }
 
@@ -111,17 +113,15 @@ impl CertificatesAggregator {
         // }
         // Enter round if 1) weight >= 2f+1 - votes number
         // and 2) weight >= max (propose_num - f, 0)
-        if self.weight >= committee.quorum_threshold()
-            && self.used.contains(&leader)
-        {
-            std::thread::sleep(std::time::Duration::from_millis(50));
+        if self.weight >= committee.quorum_threshold() && self.used.contains(&leader) {
+            std::thread::sleep(Duration::from_millis(self.parent_quorum_delay_ms));
             self.weight = 0;
             return Ok(Some(self.certificates.drain(..).collect()));
         }
         Ok(None)
     }
 
-    pub fn append_support(        
+    pub fn append_support(
         &mut self,
         support: &Support,
         committee: &Committee,
@@ -145,10 +145,8 @@ impl CertificatesAggregator {
         // }
         // Enter round if 1) weight >= 2f+1 - votes number
         // and 2) certificate_weight >= max (propose_num - f, 0)
-        if self.weight >= committee.quorum_threshold()
-            && self.used.contains(&leader)
-        {
-            std::thread::sleep(std::time::Duration::from_millis(50));
+        if self.weight >= committee.quorum_threshold() && self.used.contains(&leader) {
+            std::thread::sleep(Duration::from_millis(self.parent_quorum_delay_ms));
             self.weight = 0;
             return Ok(Some(self.certificates.drain(..).collect()));
         }

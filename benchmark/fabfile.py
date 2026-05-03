@@ -10,7 +10,7 @@ from benchmark.remote import Bench, BenchError
 
 
 @task
-def local(ctx, debug=True, consensus_only=True, header_size=512):
+def local(ctx, debug=True, consensus_only=True, header_size=512, parent_quorum_delay_ms=50):
     ''' Run benchmarks on localhost '''
     bench_params = {
         'faults': 0,
@@ -33,6 +33,7 @@ def local(ctx, debug=True, consensus_only=True, header_size=512):
         'max_batch_delay': 200,  # ms
         'propose_rate': 0.8,  # rate of proposing a header
         'f_num': 3,
+        'parent_quorum_delay_ms': parent_quorum_delay_ms,
     }
     try:
         ret = LocalBench(bench_params, node_params).run(debug, consensus_only)
@@ -96,7 +97,7 @@ def install(ctx):
 
 
 @task
-def remote(ctx, burst = 50, debug=False, consensus_only=False, header_size=512):
+def remote(ctx, burst = 50, debug=False, consensus_only=False, header_size=512, parent_quorum_delay_ms=50):
     ''' Run benchmarks on GCP '''
     bench_params = {
         'faults': 0,
@@ -127,6 +128,7 @@ def remote(ctx, burst = 50, debug=False, consensus_only=False, header_size=512):
         'leaders_per_round': 67,
         'propose_rate': 1,  # rate of proposing a header
         'f_num': 3,
+        'parent_quorum_delay_ms': parent_quorum_delay_ms,
     }
     try:
         Bench(ctx).run(bench_params, node_params, debug, consensus_only)

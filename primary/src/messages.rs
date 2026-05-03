@@ -220,7 +220,7 @@ impl Support {
         vote: bool,
         propose_next_round: bool,
     ) -> Self {
-        let support= Self {
+        let support = Self {
             author,
             round,
             signature: Signature::default(),
@@ -256,7 +256,6 @@ impl Hash for Support {
         Digest(hasher.finalize().as_slice()[..32].try_into().unwrap())
     }
 }
-
 
 impl fmt::Debug for Support {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
@@ -462,7 +461,6 @@ impl TimeoutCert {
         Ok(())
     }
 }
-
 
 #[derive(Clone, Serialize, Deserialize, Default)]
 pub struct Certificate {
