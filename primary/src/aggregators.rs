@@ -115,7 +115,7 @@ impl CertificatesAggregator {
             && self.used.contains(&leader)
             // && self.certificate_weight >= propose_num.saturating_sub(committee.f_num as usize) as u32
         {
-            std::thread::sleep(std::time::Duration::from_millis(50));
+            // std::thread::sleep(std::time::Duration::from_millis(50));
             self.weight = 0;
             return Ok(Some(self.certificates.drain(..).collect()));
         }
