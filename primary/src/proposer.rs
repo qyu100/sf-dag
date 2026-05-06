@@ -1,7 +1,5 @@
 use crate::batch_maker::Transaction;
-use crate::messages::{
-    Certificate, Header, HeaderWithCertificate, Timeout, TimeoutCert, Support,
-};
+use crate::messages::{Certificate, Header, HeaderWithCertificate, Support, Timeout, TimeoutCert};
 use crate::primary::Round;
 use config::Committee;
 use crypto::{PublicKey, SignatureService};
@@ -9,6 +7,7 @@ use crypto::{PublicKey, SignatureService};
 use log::info;
 use log::{debug, warn};
 use std::cmp::Ordering;
+#[cfg(feature = "benchmark")]
 use std::convert::TryInto;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::time::{sleep, Duration, Instant};
@@ -58,7 +57,7 @@ pub struct Proposer {
     /// Holds the Timeout certificate for the latest round.
     last_timeout_cert: TimeoutCert,
     // Rate of proposing a header
-    propose_rate: f64, 
+    propose_rate: f64,
     /// Whether the proposer should propose in the this round.
     propose_this_round: bool,
 }
@@ -124,11 +123,7 @@ impl Proposer {
             .expect("Failed to send timeout");
     }
 
-    async fn make_support_msg(
-        &mut self,
-        vote: bool,
-        propose_next_round: bool, 
-    ) {
+    async fn make_support_msg(&mut self, vote: bool, propose_next_round: bool) {
         self.last_parents.clear();
         let support = Support::new(
             self.name,
@@ -148,7 +143,7 @@ impl Proposer {
             .expect("Failed to send support message");
     }
 
-    async fn make_header(&mut self, propose_next_round: bool) {
+    async fn make_header(&mut self, propose_next_round: bool, empty_payload: bool) {
         // Make a new header.
         // Prepare the timeout and no vote certificates
         let timeout_cert = if self.last_timeout_cert.round == self.round - 1 {
@@ -163,15 +158,17 @@ impl Proposer {
             self.header_size / self.tx_size
         };
 
-        let mut payload;
-        if self.consensus_only {
+        let payload;
+        if empty_payload {
+            payload = Vec::new();
+        } else if self.consensus_only {
             payload = vec![vec![0u8; self.tx_size]; self.header_size / self.tx_size];
         } else {
             payload = self.txns.drain(..limit).collect();
         }
 
         let parents: Vec<Certificate> = self.last_parents.drain(..).collect();
-        
+
         let header = Header::new(
             self.name,
             self.round,
@@ -263,24 +260,28 @@ impl Proposer {
                 timeout_sent = true;
             }
 
-            if ((timer_expired
-                && timeout_cert_gathered
-                && (!is_next_leader))
+            if ((timer_expired && timeout_cert_gathered && (!is_next_leader))
                 || ((enough_digests || self.consensus_only) && advance))
                 && enough_parents
             {
-                if timer_expired && self.last_leader.is_none() && !is_next_leader {
-                }
+                if timer_expired && self.last_leader.is_none() && !is_next_leader {}
 
                 // Advance to the next round.
                 self.round += 1;
                 debug!("Dag moved to round {}", self.round);
 
-                let header_proposers = self.committee.header_proposers((self.round) as usize, self.propose_rate);
+                let header_proposers = self
+                    .committee
+                    .header_proposers((self.round) as usize, self.propose_rate);
                 let propose_next_round = header_proposers.contains(&self.name);
+                let empty_payload_proposers = self
+                    .committee
+                    .empty_payload_proposers((self.round) as usize, self.propose_rate);
+                let empty_payload =
+                    propose_next_round && empty_payload_proposers.contains(&self.name);
                 // If propose this round or is the leader of the next round, make a new header; otherwise, send a support message.
                 if self.propose_this_round || is_next_leader {
-                    self.make_header(propose_next_round).await;
+                    self.make_header(propose_next_round, empty_payload).await;
                 } else {
                     let vote = if self.last_leader.is_none() {
                         false
@@ -290,7 +291,7 @@ impl Proposer {
                     self.make_support_msg(vote, propose_next_round).await;
                 }
                 self.propose_this_round = propose_next_round;
-                self.payload_size = 0;
+                self.payload_size = self.txns.iter().map(|txn| txn.len()).sum();
 
                 // Reschedule the timer.
                 let deadline = Instant::now() + Duration::from_millis(self.max_header_delay);

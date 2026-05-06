@@ -6,7 +6,8 @@ use crate::garbage_collector::GarbageCollector;
 use crate::header_waiter::HeaderWaiter;
 use crate::helper::Helper;
 use crate::messages::{
-    Certificate, Header, HeaderInfo, HeaderInfoWithCertificate, HeaderWithCertificate, Timeout, Vote, Support,
+    Certificate, Header, HeaderInfo, HeaderInfoWithCertificate, HeaderWithCertificate, Support,
+    Timeout, Vote,
 };
 use crate::proposer::Proposer;
 use crate::synchronizer::Synchronizer;

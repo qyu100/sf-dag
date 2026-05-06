@@ -1,6 +1,6 @@
 // Copyright(C) Facebook, Inc. and its affiliates.
 use crate::error::{DagError, DagResult};
-use crate::messages::{Certificate, Timeout, TimeoutCert, Vote, Support};
+use crate::messages::{Certificate, Support, Timeout, TimeoutCert, Vote};
 use blsttc::{PublicKeyShareG2, SignatureShareG1};
 use config::{Committee, Stake};
 use crypto::{aggregate_sign, PublicKey, Signature};
@@ -113,7 +113,8 @@ impl CertificatesAggregator {
         // and 2) weight >= max (propose_num - f, 0)
         if self.weight >= committee.quorum_threshold()
             && self.used.contains(&leader)
-            && self.certificate_weight >= propose_num.saturating_sub(committee.f_num as usize) as u32
+            && self.certificate_weight
+                >= propose_num.saturating_sub(committee.f_num as usize) as u32
         {
             self.weight = 0;
             return Ok(Some(self.certificates.drain(..).collect()));
@@ -121,7 +122,7 @@ impl CertificatesAggregator {
         Ok(None)
     }
 
-    pub fn append_support(        
+    pub fn append_support(
         &mut self,
         support: &Support,
         committee: &Committee,
@@ -147,7 +148,8 @@ impl CertificatesAggregator {
         // and 2) certificate_weight >= max (propose_num - f, 0)
         if self.weight >= committee.quorum_threshold()
             && self.used.contains(&leader)
-            && self.certificate_weight >= propose_num.saturating_sub(committee.f_num as usize) as u32
+            && self.certificate_weight
+                >= propose_num.saturating_sub(committee.f_num as usize) as u32
         {
             // std::thread::sleep(std::time::Duration::from_millis(50));
             self.weight = 0;

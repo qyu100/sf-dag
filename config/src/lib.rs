@@ -2,6 +2,8 @@
 use blsttc::{PublicKeyShareG2, SecretKeyShare};
 use crypto::{generate_production_keypair, PublicKey, SecretKey};
 use log::info;
+use rand::rngs::StdRng;
+use rand::{seq::SliceRandom, SeedableRng};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
@@ -10,8 +12,6 @@ use std::io::BufWriter;
 use std::io::Write as _;
 use std::net::SocketAddr;
 use thiserror::Error;
-use rand::{SeedableRng, seq::SliceRandom};
-use rand::rngs::StdRng;
 
 #[derive(Error, Debug)]
 pub enum ConfigError {
@@ -86,7 +86,7 @@ pub struct Parameters {
     /// is not reached. Denominated in ms.
     pub max_batch_delay: u64,
     pub propose_rate: f64, // rate of proposing a header
-    pub f_num: u32, // number of faulty nodes
+    pub f_num: u32,        // number of faulty nodes
 }
 
 impl Default for Parameters {
@@ -228,7 +228,7 @@ impl Committee {
     pub fn header_proposers(&self, seed: usize, propose_rate: f64) -> Vec<PublicKey> {
         let mut keys: Vec<PublicKey> = self.authorities.keys().cloned().collect();
         keys.sort();
-        
+
         let n = keys.len();
         let k = (propose_rate * n as f64).floor() as usize;
 
@@ -238,6 +238,17 @@ impl Committee {
         keys.truncate(k);
 
         keys
+    }
+
+    pub fn empty_payload_proposers(&self, seed: usize, propose_rate: f64) -> Vec<PublicKey> {
+        let mut proposers = self.header_proposers(seed, propose_rate);
+        let k = proposers.len() / 2;
+
+        let mut rng = StdRng::seed_from_u64(seed as u64 ^ 0x9e37_79b9_7f4a_7c15);
+        proposers.shuffle(&mut rng);
+        proposers.truncate(k);
+
+        proposers
     }
 
     pub fn sub_leaders(&self, seed: usize, num_leaders: usize) -> Vec<PublicKey> {
