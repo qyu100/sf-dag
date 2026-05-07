@@ -58,6 +58,8 @@ pub struct Proposer {
     last_timeout_cert: TimeoutCert,
     // Rate of proposing a header
     propose_rate: f64,
+    /// Number of propose_flag=true nodes that should propose an empty payload.
+    empty_payload_proposers: usize,
     /// Whether the proposer should propose in the this round.
     propose_this_round: bool,
 }
@@ -78,6 +80,7 @@ impl Proposer {
         tx_core_timeout: Sender<Timeout>,
         rx_timeout_cert: Receiver<(TimeoutCert, Round)>,
         propose_rate: f64,
+        empty_payload_proposers: usize,
         tx_core_support: Sender<Support>,
     ) {
         let genesis = Certificate::genesis(&committee);
@@ -103,6 +106,7 @@ impl Proposer {
                 payload_size: 0,
                 last_timeout_cert: TimeoutCert::new(0),
                 propose_rate,
+                empty_payload_proposers,
                 propose_this_round: true,
             }
             .run()
@@ -274,9 +278,11 @@ impl Proposer {
                     .committee
                     .header_proposers((self.round) as usize, self.propose_rate);
                 let propose_next_round = header_proposers.contains(&self.name);
-                let empty_payload_proposers = self
-                    .committee
-                    .empty_payload_proposers((self.round) as usize, self.propose_rate);
+                let empty_payload_proposers = self.committee.empty_payload_proposers(
+                    (self.round) as usize,
+                    self.propose_rate,
+                    self.empty_payload_proposers,
+                );
                 let empty_payload =
                     propose_next_round && empty_payload_proposers.contains(&self.name);
                 // If propose this round or is the leader of the next round, make a new header; otherwise, send a support message.

@@ -86,7 +86,8 @@ pub struct Parameters {
     /// is not reached. Denominated in ms.
     pub max_batch_delay: u64,
     pub propose_rate: f64, // rate of proposing a header
-    pub f_num: u32,        // number of faulty nodes
+    pub empty_payload_proposers: usize,
+    pub f_num: u32, // number of faulty nodes
 }
 
 impl Default for Parameters {
@@ -102,6 +103,7 @@ impl Default for Parameters {
             tx_size: 512,
             max_batch_delay: 100,
             propose_rate: 0.1,
+            empty_payload_proposers: 0,
             f_num: 3,
         }
     }
@@ -123,6 +125,10 @@ impl Parameters {
         info!("Max batch delay set to {} ms", self.max_batch_delay);
         info!("Transaction size set to {} B", self.tx_size);
         info!("Rate of proposing a header set to {}", self.propose_rate);
+        info!(
+            "Empty payload proposers set to {} nodes",
+            self.empty_payload_proposers
+        );
     }
 }
 
@@ -240,9 +246,14 @@ impl Committee {
         keys
     }
 
-    pub fn empty_payload_proposers(&self, seed: usize, propose_rate: f64) -> Vec<PublicKey> {
+    pub fn empty_payload_proposers(
+        &self,
+        seed: usize,
+        propose_rate: f64,
+        empty_payload_proposers: usize,
+    ) -> Vec<PublicKey> {
         let mut proposers = self.header_proposers(seed, propose_rate);
-        let k = proposers.len() / 2;
+        let k = empty_payload_proposers.min(proposers.len());
 
         let mut rng = StdRng::seed_from_u64(seed as u64 ^ 0x9e37_79b9_7f4a_7c15);
         proposers.shuffle(&mut rng);

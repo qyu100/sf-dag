@@ -254,6 +254,7 @@ impl Primary {
             /* tx_core_timeout */ tx_timeout,
             rx_timeout_cert,
             parameters.propose_rate,
+            parameters.empty_payload_proposers,
             tx_support,
         );
 
