@@ -32,6 +32,7 @@ def local(ctx, debug=True, consensus_only=True, header_size=512):
         'tx_size': bench_params['tx_size'],
         'max_batch_delay': 200,  # ms
         'propose_rate': 0.8,  # rate of proposing a header
+        'empty_payload_proposers': 3,
         'f_num': 3,
     }
     try:
@@ -96,7 +97,7 @@ def install(ctx):
 
 
 @task
-def remote(ctx, burst = 50, debug=False, consensus_only=False, header_size=512):
+def remote(ctx, burst=50, debug=False, consensus_only=False, header_size=512, empty_payload_proposers=3):
     ''' Run benchmarks on GCP '''
     bench_params = {
         'faults': 0,
@@ -126,6 +127,7 @@ def remote(ctx, burst = 50, debug=False, consensus_only=False, header_size=512):
         'max_batch_delay': 200,  # ms
         'leaders_per_round': 67,
         'propose_rate': 1,  # rate of proposing a header
+        'empty_payload_proposers': empty_payload_proposers,  # number of propose_flag=true nodes with empty payload
         'f_num': 3,
     }
     try:
