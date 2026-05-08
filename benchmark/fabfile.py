@@ -11,7 +11,7 @@ from math import floor
 
 
 @task
-def local(ctx, debug=True, consensus_only=True, aggregate=False, header_size=512_000):
+def local(ctx, debug=False, consensus_only=True, aggregate=False, header_size=512_000):
     ''' Run benchmarks on localhost '''
     bench_params = {
         'faults': 0,
@@ -19,7 +19,7 @@ def local(ctx, debug=True, consensus_only=True, aggregate=False, header_size=512
         'workers': 1,
         'rate': 10_000,
         'tx_size': 512,
-        'duration': 20,
+        'duration': 30,
         'burst': 50,
         'bls_threshold' : 2,
     }

@@ -49,6 +49,24 @@ impl MerkleTree {
         })
     }
 
+    /// Like `proof_with_leaf` but omits the raw shard bytes (`value = []`).
+    /// `validate()` still works because it uses `value_hash`, not `value`.
+    /// Use in consensus-only benchmarks to avoid sending ~shard_size bytes per NV.
+    pub fn proof_hash_only(&self, index: usize, leaf: &[u8]) -> Option<Proof> {
+        if index >= self.leaf_count {
+            return None;
+        }
+        let proof = self.inner.proof(&[index]);
+        let digests = proof.proof_hashes().iter().map(|h| Digest(*h)).collect();
+        Some(Proof {
+            value: Box::new([]),
+            index,
+            digests,
+            root_hash: self.root_hash.clone(),
+            value_hash: Self::digest(leaf),
+        })
+    }
+
     pub fn root_hash(&self) -> &Digest {
         &self.root_hash
     }

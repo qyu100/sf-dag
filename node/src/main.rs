@@ -14,7 +14,7 @@ use tokio::sync::mpsc::{channel, Receiver};
 /// The default channel capacity.
 pub const CHANNEL_CAPACITY: usize = 1_000;
 
-#[tokio::main]
+#[tokio::main(worker_threads = 2)]
 async fn main() -> Result<()> {
     let matches = App::new(crate_name!())
         .version(crate_version!())

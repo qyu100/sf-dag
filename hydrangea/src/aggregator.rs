@@ -110,7 +110,7 @@ impl QCMaker {
     /// Try to append a signature to a (partial) quorum.
     pub fn append(
         &mut self,
-        vote: Vote,
+        mut vote: Vote,
         committee: &Committee,
         verify_aggregate: bool,
     ) -> ConsensusResult<Option<(QC, Vec<Option<Box<[u8]>>>)>> {
@@ -132,14 +132,15 @@ impl QCMaker {
             self.used.insert(author);
             if vote.kind == VoteType::Normal {
                 let proof_start = Instant::now();
-                let proof = vote.proof.as_ref().ok_or(ConsensusError::InvalidProof)?;
+                let proof = vote.proof.take().ok_or(ConsensusError::InvalidProof)?;
                 ensure!(
                     proof.index() == committee.id(&author) as usize
                         && *proof.root_hash() == vote.payload_root
                         && proof.validate(committee.size()),
                     ConsensusError::InvalidProof
                 );
-                self.availability_shards[proof.index()] = Some(proof.value().clone());
+                let index = proof.index();
+                self.availability_shards[index] = Some(proof.into_value());
                 proof_ms = proof_start.elapsed().as_millis();
             }
             self.votes.push((author_bls_g2, vote.signature.clone()));

@@ -11,6 +11,7 @@ use std::cmp::min;
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Debug;
 use std::net::SocketAddr;
+use std::time::Instant;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::sync::oneshot;
@@ -63,6 +64,16 @@ impl ReliableSender {
 
     /// Reliably send a message to a specific address.
     pub async fn send(&mut self, address: SocketAddr, data: Bytes) -> CancelHandler {
+        self.send_with_label(address, data, None).await
+    }
+
+    /// Reliably send a message to a specific address with an optional benchmark label.
+    pub async fn send_with_label(
+        &mut self,
+        address: SocketAddr,
+        data: Bytes,
+        label: Option<String>,
+    ) -> CancelHandler {
         // TODO: Remove
         self.sent += 1;
 
@@ -72,6 +83,7 @@ impl ReliableSender {
             .or_insert_with(|| Self::spawn_connection(address))
             .send(InnerMessage {
                 data,
+                label,
                 cancel_handler: sender,
             })
             .await
@@ -120,6 +132,8 @@ impl ReliableSender {
 struct InnerMessage {
     /// The data to transmit.
     data: Bytes,
+    /// Optional benchmark label for tracing a message across the network path.
+    label: Option<String>,
     /// The cancel handler allowing the caller task to cancel the transmission of this message
     /// and to be notified of its successfully transmission.
     cancel_handler: oneshot::Sender<Bytes>,
@@ -134,7 +148,7 @@ struct Connection {
     /// The initial delay to wait before re-attempting a connection (in ms).
     retry_delay: u64,
     /// Buffer keeping all messages that need to be re-transmitted.
-    buffer: VecDeque<(Bytes, oneshot::Sender<Bytes>)>,
+    buffer: VecDeque<(Bytes, Option<String>, oneshot::Sender<Bytes>)>,
 }
 
 impl Connection {
@@ -186,9 +200,9 @@ impl Connection {
 
                             // Drain the channel into the buffer to not saturate the channel and block the caller task.
                             // The caller is responsible to cleanup the buffer through the cancel handlers.
-                            Some(InnerMessage{data, cancel_handler}) = self.receiver.recv() => {
-                                self.buffer.push_back((data, cancel_handler));
-                                self.buffer.retain(|(_, handler)| !handler.is_closed());
+                            Some(InnerMessage{data, label, cancel_handler}) = self.receiver.recv() => {
+                                self.buffer.push_back((data, label, cancel_handler));
+                                self.buffer.retain(|(_, _, handler)| !handler.is_closed());
                             }
                         }
                     }
@@ -211,7 +225,7 @@ impl Connection {
         let (mut writer, mut reader) = Framed::new(stream, codec).split();
         let error = 'connection: loop {
             // Try to send all messages of the buffer.
-            while let Some((data, handler)) = self.buffer.pop_front() {
+            while let Some((data, label, handler)) = self.buffer.pop_front() {
                 // Skip messages that have been cancelled.
                 if handler.is_closed() {
                     continue;
@@ -222,8 +236,36 @@ impl Connection {
                 // debug!("Sending Proposal to {:?}. Size is {}", peer_addr, data.len());
 
                 // Try to send the message.
+                let bytes = data.len();
+                let write_start = Instant::now();
+                if let Some(label) = label.as_deref() {
+                    if bytes >= 10_000 {
+                        info!(
+                            "TIMELINE event=reliable_sender_write_started label={} address={} bytes={}",
+                            label, self.address, bytes
+                        );
+                    }
+                }
                 match writer.send(data.clone()).await {
                     Ok(()) => {
+                        let write_ms = write_start.elapsed().as_millis();
+                        if bytes >= 10_000 || write_ms >= 10 {
+                            if let Some(label) = label.as_deref() {
+                                info!(
+                                    "TIMING reliable_sender_write label={} address={} bytes={} write_ms={}",
+                                    label, self.address, bytes, write_ms
+                                );
+                                info!(
+                                    "TIMELINE event=reliable_sender_write_finished label={} address={} bytes={} write_ms={}",
+                                    label, self.address, bytes, write_ms
+                                );
+                            } else {
+                                info!(
+                                    "TIMING reliable_sender_write address={} bytes={} write_ms={}",
+                                    self.address, bytes, write_ms
+                                );
+                            }
+                        }
                         // TODO: REMOVE
                         debug!(
                             "Sent Proposal to {:?}. Buffer size: {}",
@@ -232,11 +274,11 @@ impl Connection {
                         );
                         // The message has been sent, we remove it from the buffer and add it to
                         // `pending_replies` while we wait for an ACK.
-                        pending_replies.push_back((data, handler));
+                        pending_replies.push_back((data, label, handler, Instant::now()));
                     }
                     Err(e) => {
                         // We failed to send the message, we put it back into the buffer.
-                        self.buffer.push_front((data, handler));
+                        self.buffer.push_front((data, label, handler));
                         break 'connection NetworkError::FailedToSendMessage(self.address, e);
                     }
                 }
@@ -244,24 +286,35 @@ impl Connection {
 
             // Check if there are any new messages to send or if we get an ACK for messages we already sent.
             tokio::select! {
-                Some(InnerMessage{data, cancel_handler}) = self.receiver.recv() => {
+                Some(InnerMessage{data, label, cancel_handler}) = self.receiver.recv() => {
                     // Add the message to the buffer of messages to send.
-                    self.buffer.push_back((data, cancel_handler));
+                    self.buffer.push_back((data, label, cancel_handler));
                 },
                 response = reader.next() => {
-                    let (data, handler) = match pending_replies.pop_front() {
+                    let (data, label, handler, sent_at) = match pending_replies.pop_front() {
                         Some(message) => message,
                         None => break 'connection NetworkError::UnexpectedAck(self.address)
                     };
                     match response {
                         Some(Ok(bytes)) => {
+                            let ack_wait_ms = sent_at.elapsed().as_millis();
+                            if let Some(label) = label.as_deref() {
+                                info!(
+                                    "TIMING reliable_sender_ack label={} address={} ack_wait_ms={}",
+                                    label, self.address, ack_wait_ms
+                                );
+                                info!(
+                                    "TIMELINE event=reliable_sender_ack_received label={} address={} ack_wait_ms={}",
+                                    label, self.address, ack_wait_ms
+                                );
+                            }
                             // Notify the handler that the message has been successfully sent.
                             let _ = handler.send(bytes.freeze());
                         },
                         _ => {
                             // Something has gone wrong (either the channel dropped or we failed to read from it).
                             // Put the message back in the buffer, we will try to send it again.
-                            pending_replies.push_front((data, handler));
+                            pending_replies.push_front((data, label, handler, sent_at));
                             break 'connection NetworkError::FailedToReceiveAck(self.address);
                         }
                     }
@@ -271,8 +324,8 @@ impl Connection {
 
         // If we reach this code, it means something went wrong. Put the messages for which we didn't receive an ACK
         // back into the sending buffer, we will try to send them again once we manage to establish a new connection.
-        while let Some(message) = pending_replies.pop_back() {
-            self.buffer.push_front(message);
+        while let Some((data, label, handler, _sent_at)) = pending_replies.pop_back() {
+            self.buffer.push_front((data, label, handler));
         }
         error
     }

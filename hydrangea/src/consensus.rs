@@ -98,7 +98,9 @@ impl Consensus {
             address,
             /* handler */
             ConsensusReceiverHandler {
+                name,
                 tx_consensus: tx_consensus.clone(),
+                tx_proposals: tx_proposer_core.clone(),
                 tx_helper,
             },
         );
@@ -174,7 +176,9 @@ impl Consensus {
 /// Defines how the network receiver handles incoming primary messages.
 #[derive(Clone)]
 struct ConsensusReceiverHandler {
+    name: PublicKey,
     tx_consensus: Sender<ConsensusMessage>,
+    tx_proposals: Sender<ProposalMessage>,
     tx_helper: Sender<(Digest, PublicKey)>,
 }
 
@@ -183,6 +187,10 @@ impl MessageHandler for ConsensusReceiverHandler {
     async fn dispatch(&self, writer: &mut Writer, serialized: Bytes) -> Result<(), Box<dyn Error>> {
         let total_start = Instant::now();
         let bytes = serialized.len();
+        let ack_start = Instant::now();
+        let _ = writer.send(Bytes::from("Ack")).await;
+        let ack_ms = ack_start.elapsed().as_millis();
+
         let deserialize_start = Instant::now();
         let message: ConsensusMessage =
             bincode::deserialize(&serialized).map_err(ConsensusError::SerializationError)?;
@@ -239,31 +247,46 @@ impl MessageHandler for ConsensusReceiverHandler {
                     &label,
                     bytes,
                     deserialize_ms,
-                    0,
+                    ack_ms,
                     send_start.elapsed().as_millis(),
                     total_start.elapsed().as_millis(),
                 );
             }
-            message @ ConsensusMessage::Propose(..) => {
-                // TODO: Remove
-                debug!("Acking Proposal: {:?}", message);
-                let ack_start = Instant::now();
-                // Reply with an ACK.
-                let _ = writer.send(Bytes::from("Ack")).await;
-                let ack_ms = ack_start.elapsed().as_millis();
-
-                // Pass the message to the consensus core.
+            ConsensusMessage::Propose(proposal) => {
+                // Keep proposals off the shared consensus queue so large vote bursts do not
+                // delay the proposal-to-vote path.
+                let (author, round, digest, payload_bytes) = Self::proposal_metadata(&proposal);
+                info!(
+                    "TIMELINE event=proposal_frame_received node={} author={} round={} digest={} bytes={} payload_bytes={} deserialize_ms={} ack_ms={}",
+                    self.name,
+                    author,
+                    round,
+                    digest,
+                    bytes,
+                    payload_bytes,
+                    deserialize_ms,
+                    ack_ms
+                );
                 let send_start = Instant::now();
-                self.tx_consensus
-                    .send(message)
+                self.tx_proposals
+                    .send(proposal)
                     .await
-                    .expect("Failed to consensus message");
+                    .expect("Failed to send proposal message");
+                let core_send_ms = send_start.elapsed().as_millis();
+                info!(
+                    "TIMELINE event=proposal_core_queued node={} author={} round={} digest={} core_send_ms={}",
+                    self.name,
+                    author,
+                    round,
+                    digest,
+                    core_send_ms
+                );
                 Self::log_dispatch_timing(
                     &label,
                     bytes,
                     deserialize_ms,
                     ack_ms,
-                    send_start.elapsed().as_millis(),
+                    core_send_ms,
                     total_start.elapsed().as_millis(),
                 );
             }
@@ -278,7 +301,7 @@ impl MessageHandler for ConsensusReceiverHandler {
                     &label,
                     bytes,
                     deserialize_ms,
-                    0,
+                    ack_ms,
                     send_start.elapsed().as_millis(),
                     total_start.elapsed().as_millis(),
                 );
@@ -289,6 +312,23 @@ impl MessageHandler for ConsensusReceiverHandler {
 }
 
 impl ConsensusReceiverHandler {
+    fn proposal_metadata(proposal: &ProposalMessage) -> (PublicKey, Round, Digest, usize) {
+        match proposal {
+            ProposalMessage::N(proposal) => (
+                proposal.block.author,
+                proposal.block.round,
+                proposal.block.digest(),
+                proposal.block.payload_len,
+            ),
+            ProposalMessage::F(proposal) => (
+                proposal.block.author,
+                proposal.block.round,
+                proposal.block.digest(),
+                proposal.block.payload_len,
+            ),
+        }
+    }
+
     fn log_dispatch_timing(
         label: &str,
         bytes: usize,
@@ -303,10 +343,6 @@ impl ConsensusReceiverHandler {
                 label, bytes, deserialize_ms, ack_ms, core_send_ms, total_ms
             );
         } else {
-            debug!(
-                "TIMING consensus_receive label={} bytes={} deserialize_ms={} ack_ms={} core_send_ms={} total_ms={}",
-                label, bytes, deserialize_ms, ack_ms, core_send_ms, total_ms
-            );
         }
     }
 }

@@ -151,13 +151,17 @@ impl NormalProposal {
             ConsensusError::InvalidProof
         );
 
-        // QC must be for the parent of this block, which must have been proposed
-        // for the round before this block.
+        // A normal proposal can either be chained directly from a normal QC for
+        // its parent, or optimistically extend the previous round while carrying
+        // a commit QC two rounds behind the parent.
+        let chained_qc = self.qc.blk_hash == self.block.parent
+            && self.qc.round == self.block.round - 1
+            && (self.qc.kind == VoteType::Normal || self.qc.round == 0);
+        let optimistic_qc = self.qc.kind == VoteType::Commit
+            && (self.qc.round + 3 == self.block.round
+                || (self.qc.round == 0 && self.block.round == 2));
         ensure!(
-            // Check parent relationship and round numbers.
-            // We check QC validity whilst processing the QC itself, which
-            // happens before we invoke this function, so we don't check again here.
-            self.qc.blk_hash == self.block.parent && self.qc.round == self.block.round - 1,
+            chained_qc || optimistic_qc,
             ConsensusError::MalformedNormalProposal(self.digest())
         );
 
