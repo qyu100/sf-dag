@@ -4,7 +4,7 @@ use crate::messages::{Timeout, Vote, VoteType, QC, TC};
 use blsttc::{PublicKeyShareG2, SignatureShareG1};
 use config::{Committee, Stake};
 use crypto::{aggregate_sign, remove_pubkeys, Digest, Hash, PublicKey, Signature};
-use log::info;
+use log::{debug, info};
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
@@ -184,7 +184,7 @@ impl QCMaker {
                 }
 
                 info!("Constructed {} QC. Votes: {} ", vote.kind, self.votes.len(),);
-                info!(
+                debug!(
                     "TIMING qc_construct kind={} round={} digest={} votes={} proof_ms={} aggregate_verify_ms={} total_ms={}",
                     vote.kind,
                     vote.round,

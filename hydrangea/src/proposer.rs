@@ -216,7 +216,7 @@ impl Proposer {
                 .network
                 .send_with_label(address, message, Some(label.clone()))
                 .await;
-            info!(
+            debug!(
                 "TIMELINE event=proposal_remote_enqueued label={} recipient={} address={} bytes={} enqueue_ms={}",
                 label,
                 recipient,
@@ -226,7 +226,7 @@ impl Proposer {
             );
             handles.push(handle);
         }
-        info!(
+        debug!(
             "TIMING proposal_send round={} remotes={} enqueue_ms={}",
             round,
             handles.len(),
@@ -239,7 +239,7 @@ impl Proposer {
         info!("Created {:?}", b);
         info!("Created {}", b.digest());
         info!("Header {} contains {} B", b.digest(), b.payload_len);
-        info!(
+        debug!(
             "TIMELINE event=block_created node={} author={} round={} digest={} payload_bytes={}",
             self.name,
             b.author,
@@ -347,7 +347,7 @@ impl Proposer {
     fn start_phase1(&mut self, trigger: ProposalTrigger) {
         if let Some(spec) = self.speculative_payload.take() {
             // Fast path: encoding already done, just attach the trigger.
-            info!(
+            debug!(
                 "TIMING speculative_phase1_hit round={}",
                 Self::trigger_parent_and_round(&trigger).1
             );
@@ -367,7 +367,7 @@ impl Proposer {
     // Called when speculative encoding completes.
     fn handle_speculative_result(&mut self, spec: SpeculativeEncoding) {
         self.speculative_in_flight = false;
-        info!(
+        debug!(
             "TIMING speculative_phase1_done encode_blocking_ms={}",
             spec.encode_blocking_ms
         );
@@ -484,7 +484,7 @@ impl Proposer {
     async fn handle_phase2_result(&mut self, p2: Phase2Result) {
         let round = p2.round;
         let digest = p2.block.digest();
-        info!(
+        debug!(
             "TIMELINE event=proposal_messages_ready node={} author={} round={} digest={} remotes={} proof_blocking_ms={}",
             self.name,
             p2.block.author,
@@ -493,7 +493,7 @@ impl Proposer {
             p2.remote.len(),
             p2.proof_blocking_ms
         );
-        info!(
+        debug!(
             "TIMING proposal_make round={} payload_bytes={} shard_len={} remote_count={} remote_bytes={} payload_ms={} encode_ms={} merkle_ms={} sign_ms={} proof_blocking_ms={} encode_blocking_ms={}",
             round,
             p2.block.payload_len,
@@ -517,7 +517,7 @@ impl Proposer {
 
         self.send_proposals(p2.remote, round, digest).await;
 
-        info!(
+        debug!(
             "TIMING propose_done round={} local_send_ms={}",
             round, local_ms,
         );

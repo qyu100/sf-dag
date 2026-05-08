@@ -560,7 +560,7 @@ impl Core {
         while let Some(committing) = to_commit.pop() {
             // This log is required for generating benchmark outputs.
             info!("Committed {:?}", committing);
-            info!(
+            debug!(
                 "TIMELINE event=committed node={} author={} round={} digest={} payload_root={} payload_bytes={}",
                 self.name,
                 committing.author,
@@ -616,7 +616,7 @@ impl Core {
                 .values()
                 .any(|block| block.payload_root == *proof.root_hash())
         });
-        info!(
+        debug!(
             "TIMING commit_chain requested_round={} committed_to_round={} total_ms={}",
             committing_round,
             self.last_commit.round,
@@ -648,7 +648,7 @@ impl Core {
             // Will have requested in call to get_block.
             debug!("Missing block for commit-scheduled {:?} for round {}", d, r);
         }
-        info!(
+        debug!(
             "TIMING schedule_commit round={} digest={} total_ms={}",
             r,
             d,
@@ -781,7 +781,7 @@ impl Core {
             VoteType::Normal => "nv_sent",
             VoteType::Commit => "cv_sent",
         };
-        info!(
+        debug!(
             "TIMELINE event={} node={} round={} digest={} payload_root={}",
             vote_event, self.name, vote.round, vote.blk_hash, vote.payload_root
         );
@@ -792,7 +792,7 @@ impl Core {
 
         let broadcast_start = Instant::now();
         let broadcast_stats = self.broadcast_vote_ref(&vote).await;
-        info!(
+        debug!(
             "TIMING vote_send kind={} round={} bytes={} peers={} sign_ms={} local_handle_ms={} address_ms={} serialize_ms={} enqueue_ms={} broadcast_total_ms={} total_ms={}",
             t,
             r,
@@ -867,13 +867,13 @@ impl Core {
                 VoteType::Commit => {
                     let aggregate_start = Instant::now();
                     if let Some(mut qc) = self.aggregator.add_commit_vote(vote.clone())? {
-                        info!(
+                        debug!(
                             "TIMING commit_vote_qc_formed round={} digest={} aggregate_ms={}",
                             qc.round,
                             qc.blk_hash,
                             aggregate_start.elapsed().as_millis()
                         );
-                        info!(
+                        debug!(
                             "TIMELINE event=cqc_formed node={} round={} digest={} payload_root={}",
                             self.name, qc.round, qc.blk_hash, qc.payload_root
                         );
@@ -887,7 +887,7 @@ impl Core {
                     if let Some((mut qc, shards)) = self.aggregator.add_normal_vote(vote.clone())? {
                         let aggregate_ms = aggregate_start.elapsed().as_millis();
                         debug!("Assembled {:?}", qc);
-                        info!(
+                        debug!(
                             "TIMELINE event=nqc_formed node={} round={} digest={} payload_root={}",
                             self.name, qc.round, qc.blk_hash, qc.payload_root
                         );
@@ -916,7 +916,7 @@ impl Core {
         }
         let handle_ms = handle_start.elapsed().as_millis();
         if handle_ms >= 10 {
-            info!(
+            debug!(
                 "TIMING handle_vote_slow kind={} round={} digest={} total_ms={}",
                 vote.kind, vote.round, vote.blk_hash, handle_ms
             );
@@ -1099,7 +1099,7 @@ impl Core {
 
     fn log_core_dispatch(label: &str, handle_ms: u128) {
         if handle_ms >= 10 {
-            info!(
+            debug!(
                 "TIMING core_dispatch label={} handle_ms={}",
                 label, handle_ms
             );
@@ -1161,7 +1161,7 @@ impl Core {
                 rs_block_size,
                 rs_block_threads,
             ) {
-                Ok(avail) => info!(
+                Ok(avail) => debug!(
                     "TIMING nqc_availability_check payload_root={} reconstruct_ms={} merkle_ms={} total_ms={}",
                     payload_root, avail.reconstruct_ms, avail.merkle_ms, avail.total_ms
                 ),
@@ -1183,7 +1183,7 @@ impl Core {
             // Mark as verified immediately so maybe_send_commit_vote fires without delay.
             let key = Self::qc_availability_key(qc);
             if self.started_nqc_verify.insert(key.clone()) {
-                info!(
+                debug!(
                     "TIMELINE event=availability_verified node={} round={} digest={} payload_root={}",
                     self.name, qc.round, qc.blk_hash, qc.payload_root
                 );
@@ -1213,7 +1213,7 @@ impl Core {
         }
         let total_ms = start.elapsed().as_millis();
         if total_ms >= 10 {
-            info!(
+            debug!(
                 "TIMING handle_prepare_qc_slow round={} digest={} total_ms={}",
                 qc.round, qc.blk_hash, total_ms
             );
@@ -1238,7 +1238,7 @@ impl Core {
         self.propose_optimistic_children_waiting_on_commit_qc(qc.round)
             .await;
         // else: Already observed this Commit QC but still syncing ancestors. Ignore.
-        info!(
+        debug!(
             "TIMING handle_commit_qc round={} digest={} total_ms={}",
             qc.round,
             qc.blk_hash,
@@ -1356,7 +1356,7 @@ impl Core {
 
     async fn process_normal_proposal(&mut self, p: NormalProposal) -> ConsensusResult<()> {
         debug!("Received Normal Proposal {:?}", p);
-        info!(
+        debug!(
             "TIMELINE event=proposal_received node={} author={} round={} digest={} payload_root={} payload_bytes={}",
             self.name,
             p.block.author,
@@ -1385,7 +1385,7 @@ impl Core {
         p: FallbackRecoveryProposal,
     ) -> ConsensusResult<()> {
         debug!("Received Fallback Recovery Proposal {:?}", p);
-        info!(
+        debug!(
             "TIMELINE event=fallback_proposal_received node={} author={} round={} digest={} payload_root={} payload_bytes={}",
             self.name,
             p.block.author,
@@ -1498,11 +1498,11 @@ impl Core {
                 Some(result) = self.rx_nqc_verify.recv() => {
                     if result.ok {
                         let qc = result.qc;
-                        info!(
+                        debug!(
                             "TIMING normal_vote_nqc_formed round={} digest={} aggregate_ms={}",
                             qc.round, qc.blk_hash, result.aggregate_ms
                         );
-                        info!(
+                        debug!(
                             "TIMELINE event=availability_verified node={} round={} digest={} payload_root={}",
                             self.name, qc.round, qc.blk_hash, qc.payload_root
                         );
