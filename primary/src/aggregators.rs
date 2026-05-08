@@ -5,7 +5,6 @@ use blsttc::{PublicKeyShareG2, SignatureShareG1};
 use config::{Committee, Stake};
 use crypto::{aggregate_sign, PublicKey, Signature};
 use std::collections::HashSet;
-use std::time::Duration;
 
 /// Aggregates votes for a particular header into a certificate.
 pub struct VotesAggregator {
@@ -74,6 +73,13 @@ pub struct CertificatesAggregator {
     used: HashSet<PublicKey>,
     certificate_weight: Stake,
     parent_quorum_delay_ms: u64,
+    parent_quorum_delay_started: bool,
+}
+
+pub enum CertificatesAggregatorResult {
+    None,
+    DelayStarted,
+    Ready(Vec<Certificate>),
 }
 
 impl CertificatesAggregator {
@@ -85,20 +91,40 @@ impl CertificatesAggregator {
             used: HashSet::new(),
             certificate_weight: 0,
             parent_quorum_delay_ms,
+            parent_quorum_delay_started: false,
         }
+    }
+
+    pub fn take_certificates(&mut self) -> Vec<Certificate> {
+        self.weight = 0;
+        self.parent_quorum_delay_started = false;
+        self.certificates.drain(..).collect()
+    }
+
+    fn delay_or_return_certificates(&mut self) -> CertificatesAggregatorResult {
+        if self.parent_quorum_delay_started {
+            return CertificatesAggregatorResult::None;
+        }
+
+        if self.parent_quorum_delay_ms == 0 {
+            return CertificatesAggregatorResult::Ready(self.take_certificates());
+        }
+
+        self.parent_quorum_delay_started = true;
+        CertificatesAggregatorResult::DelayStarted
     }
 
     pub fn append_certificate(
         &mut self,
         certificate: &Certificate,
         committee: &Committee,
-        propose_num: usize,
-    ) -> DagResult<Option<Vec<Certificate>>> {
+        _propose_num: usize,
+    ) -> DagResult<CertificatesAggregatorResult> {
         let origin = certificate.origin();
 
         // Ensure it is the first time this authority votes.
         if !self.used.insert(origin) {
-            return Ok(None);
+            return Ok(CertificatesAggregatorResult::None);
         }
 
         let round = certificate.round;
@@ -114,24 +140,22 @@ impl CertificatesAggregator {
         // Enter round if 1) weight >= 2f+1 - votes number
         // and 2) weight >= max (propose_num - f, 0)
         if self.weight >= committee.quorum_threshold() && self.used.contains(&leader) {
-            std::thread::sleep(Duration::from_millis(self.parent_quorum_delay_ms));
-            self.weight = 0;
-            return Ok(Some(self.certificates.drain(..).collect()));
+            return Ok(self.delay_or_return_certificates());
         }
-        Ok(None)
+        Ok(CertificatesAggregatorResult::None)
     }
 
     pub fn append_support(
         &mut self,
         support: &Support,
         committee: &Committee,
-        propose_num: usize,
-    ) -> DagResult<Option<Vec<Certificate>>> {
+        _propose_num: usize,
+    ) -> DagResult<CertificatesAggregatorResult> {
         let origin = support.author;
 
         // Ensure it is the first time this authority votes.
         if !self.used.insert(origin) {
-            return Ok(None);
+            return Ok(CertificatesAggregatorResult::None);
         }
 
         let round = support.round;
@@ -146,11 +170,9 @@ impl CertificatesAggregator {
         // Enter round if 1) weight >= 2f+1 - votes number
         // and 2) certificate_weight >= max (propose_num - f, 0)
         if self.weight >= committee.quorum_threshold() && self.used.contains(&leader) {
-            std::thread::sleep(Duration::from_millis(self.parent_quorum_delay_ms));
-            self.weight = 0;
-            return Ok(Some(self.certificates.drain(..).collect()));
+            return Ok(self.delay_or_return_certificates());
         }
-        Ok(None)
+        Ok(CertificatesAggregatorResult::None)
     }
 }
 

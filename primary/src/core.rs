@@ -1,11 +1,13 @@
 // Copyright(C) Facebook, Inc. and its affiliates.
-use crate::aggregators::{CertificatesAggregator, TimeoutAggregator, VotesAggregator};
+use crate::aggregators::{
+    CertificatesAggregator, CertificatesAggregatorResult, TimeoutAggregator, VotesAggregator,
+};
 use crate::error::{DagError, DagResult};
 use crate::messages::{
     Certificate, HeaderInfoWithCertificate, HeaderWithCertificate, Support, Timeout, TimeoutCert,
     Vote,
 };
-use crate::primary::{HeaderType, PrimaryMessage, Round};
+use crate::primary::{HeaderType, PrimaryMessage, Round, CHANNEL_CAPACITY};
 use crate::synchronizer::Synchronizer;
 use crate::{ConsensusMessage, HeaderInfo, HeaderMessage};
 use async_recursion::async_recursion;
@@ -21,7 +23,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use store::Store;
-use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::sync::mpsc::{channel, Receiver, Sender};
+use tokio::time::{sleep, Duration};
 
 // #[cfg(test)]
 // #[path = "tests/core_tests.rs"]
@@ -88,6 +91,8 @@ pub struct Core {
     header_proposers: HashMap<Round, HashSet<PublicKey>>,
     /// Delay before returning parent certificates after quorum is reached.
     parent_quorum_delay_ms: u64,
+    tx_parent_quorum_delay: Sender<Round>,
+    rx_parent_quorum_delay: Receiver<Round>,
 
     sorted_keys: Vec<PublicKeyShareG2>,
     combined_pubkey: PublicKeyShareG2,
@@ -120,6 +125,8 @@ impl Core {
         combined_pubkey: PublicKeyShareG2,
         parent_quorum_delay_ms: u64,
     ) {
+        let (tx_parent_quorum_delay, rx_parent_quorum_delay) = channel(CHANNEL_CAPACITY);
+
         tokio::spawn(async move {
             Self {
                 name,
@@ -152,6 +159,8 @@ impl Core {
                 timeouts_aggregators: HashMap::with_capacity(2 * gc_depth as usize),
                 header_proposers: HashMap::with_capacity(2 * gc_depth as usize),
                 parent_quorum_delay_ms,
+                tx_parent_quorum_delay,
+                rx_parent_quorum_delay,
                 sorted_keys,
                 combined_pubkey,
                 processing_vote_aggregators: HashMap::with_capacity(2 * gc_depth as usize),
@@ -159,6 +168,41 @@ impl Core {
             .run()
             .await;
         });
+    }
+
+    async fn handle_parent_certificates_result(
+        &self,
+        result: CertificatesAggregatorResult,
+        round: Round,
+    ) {
+        match result {
+            CertificatesAggregatorResult::None => {}
+            CertificatesAggregatorResult::Ready(parents) => {
+                self.tx_proposer
+                    .send((parents, round))
+                    .await
+                    .expect("Failed to send certificate");
+            }
+            CertificatesAggregatorResult::DelayStarted => {
+                let tx_parent_quorum_delay = self.tx_parent_quorum_delay.clone();
+                let delay = self.parent_quorum_delay_ms;
+                tokio::spawn(async move {
+                    sleep(Duration::from_millis(delay)).await;
+                    let _ = tx_parent_quorum_delay.send(round).await;
+                });
+            }
+        }
+    }
+
+    async fn process_parent_quorum_delay(&mut self, round: Round) -> DagResult<()> {
+        if let Some(aggregator) = self.certificates_aggregators.get_mut(&round) {
+            let parents = aggregator.take_certificates();
+            self.tx_proposer
+                .send((parents, round))
+                .await
+                .expect("Failed to send certificate");
+        }
+        Ok(())
     }
 
     async fn process_own_timeout(&mut self, timeout: Timeout) -> DagResult<()> {
@@ -241,7 +285,7 @@ impl Core {
                 .or_insert_with(HashSet::new)
                 .insert(certificate.origin())
             {
-                if let Some(parents) = self
+                let result = self
                     .certificates_aggregators
                     .entry(certificate.round())
                     .or_insert_with(|| {
@@ -254,14 +298,9 @@ impl Core {
                             .get(&(certificate.round - 1))
                             .map(|set| set.len())
                             .unwrap_or(0),
-                    )?
-                {
-                    // Send it to the `Proposer`.
-                    self.tx_proposer
-                        .send((parents, certificate.round()))
-                        .await
-                        .expect("Failed to send certificate");
-                }
+                    )?;
+                self.handle_parent_certificates_result(result, certificate.round())
+                    .await;
 
                 let id = certificate.header_id;
                 if let Err(e) = self
@@ -416,7 +455,7 @@ impl Core {
 
         // Check if we have enough certificates to enter a new dag round and propose a header.
         let parent_quorum_delay_ms = self.parent_quorum_delay_ms;
-        if let Some(parents) = self
+        let result = self
             .certificates_aggregators
             .entry(support.round)
             .or_insert_with(|| Box::new(CertificatesAggregator::new(parent_quorum_delay_ms)))
@@ -427,14 +466,9 @@ impl Core {
                     .get(&(support.round - 1))
                     .map(|set| set.len())
                     .unwrap_or(0),
-            )?
-        {
-            // Send it to the `Proposer`.
-            self.tx_proposer
-                .send((parents, support.round))
-                .await
-                .expect("Failed to send certificate");
-        }
+            )?;
+        self.handle_parent_certificates_result(result, support.round)
+            .await;
 
         Ok(())
     }
@@ -530,7 +564,7 @@ impl Core {
 
         // Check if we have enough certificates to enter a new dag round and propose a header.
         let parent_quorum_delay_ms = self.parent_quorum_delay_ms;
-        if let Some(parents) = self
+        let result = self
             .certificates_aggregators
             .entry(certificate.round())
             .or_insert_with(|| Box::new(CertificatesAggregator::new(parent_quorum_delay_ms)))
@@ -541,14 +575,9 @@ impl Core {
                     .get(&(certificate.round - 1))
                     .map(|set| set.len())
                     .unwrap_or(0),
-            )?
-        {
-            // Send it to the `Proposer`.
-            self.tx_proposer
-                .send((parents, certificate.round()))
-                .await
-                .expect("Failed to send certificate");
-        }
+            )?;
+        self.handle_parent_certificates_result(result, certificate.round())
+            .await;
 
         if self
             .processed_certs
@@ -754,6 +783,8 @@ impl Core {
 
                 // We also receive here our timeout created by the `Proposer`.
                 Some(timeout) = self.rx_timeout.recv() => self.process_own_timeout(timeout).await,
+
+                Some(round) = self.rx_parent_quorum_delay.recv() => self.process_parent_quorum_delay(round).await,
             };
             match result {
                 Ok(()) => (),
