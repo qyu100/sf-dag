@@ -187,12 +187,18 @@ impl Consensus {
                                     self.collect_commit_sequence(leader, &state).await;
 
                                 // Output the sequence in the right order.
-                                for certificate in sequence {
+                                for (certificate, orphan) in sequence {
                                     state.update(&certificate, self.gc_depth);
                                     #[cfg(not(feature = "benchmark"))]
                                     info!("Committed {} with header", certificate.header_id);
 
-                                    if certificate.round == leader_round {
+                                    if orphan {
+                                        info!(
+                                            "Committed {:?} Orphan age {}",
+                                            certificate.header_id,
+                                            leader_round.saturating_sub(certificate.round())
+                                        );
+                                    } else if certificate.round == leader_round {
                                         info!("Committed {:?} Leader", certificate.header_id);
                                     }else if certificate.round == leader_round-1 {
                                         info!("Committed {:?} NonLeader", certificate.header_id);
@@ -244,12 +250,18 @@ impl Consensus {
                                     self.collect_commit_sequence(leader, &state).await;
 
                                 // Output the sequence in the right order.
-                                for certificate in sequence {
+                                for (certificate, orphan) in sequence {
                                     state.update(&certificate, self.gc_depth);
                                     #[cfg(not(feature = "benchmark"))]
                                     info!("Committed {} with header", certificate.header_id);
 
-                                    if certificate.round == leader_round {
+                                    if orphan {
+                                        info!(
+                                            "Committed {:?} Orphan age {}",
+                                            certificate.header_id,
+                                            leader_round.saturating_sub(certificate.round())
+                                        );
+                                    } else if certificate.round == leader_round {
                                         info!("Committed {:?} Leader", certificate.header_id);
                                     }else if certificate.round == leader_round-1 {
                                         info!("Committed {:?} NonLeader", certificate.header_id);
@@ -302,7 +314,7 @@ impl Consensus {
         &self,
         leader: &Certificate,
         state: &State,
-    ) -> Vec<Certificate> {
+    ) -> Vec<(Certificate, bool)> {
         let mut sequence = Vec::new();
         let mut already_ordered = HashSet::new();
 
@@ -310,12 +322,12 @@ impl Consensus {
             for certificate in self.order_dag(linked_leader, state).await {
                 let digest = certificate.digest();
                 if already_ordered.insert(digest) {
-                    sequence.push(certificate);
+                    sequence.push((certificate, false));
                 }
             }
         }
 
-        let commit_horizon = leader.round().saturating_sub(1);
+        let commit_horizon = leader.round().saturating_sub(2);
         let pending_candidates = state
             .pending
             .range(..=commit_horizon)
@@ -326,17 +338,44 @@ impl Consensus {
             if already_ordered.contains(&digest) {
                 continue;
             }
+            if self.referenced_by_next_round(&certificate, state).await {
+                continue;
+            }
 
             for candidate in self.order_dag(&certificate, state).await {
                 let candidate_digest = candidate.digest();
                 if already_ordered.insert(candidate_digest) {
-                    sequence.push(candidate);
+                    let candidate_is_orphan = candidate.header_id == certificate.header_id;
+                    sequence.push((candidate, candidate_is_orphan));
                 }
             }
         }
 
-        sequence.sort_by_key(|certificate| certificate.round());
+        sequence.sort_by_key(|(certificate, _)| certificate.round());
         sequence
+    }
+
+    async fn referenced_by_next_round(&self, certificate: &Certificate, state: &State) -> bool {
+        let next_round = certificate.round().saturating_add(1);
+        let Some(next_round_certificates) = state.dag.get(&next_round) else {
+            return false;
+        };
+
+        for (_, next_round_certificate) in next_round_certificates.values() {
+            let parents = loop {
+                if let Some(parents) = state.parent_info.get(&next_round_certificate.header_id) {
+                    break parents;
+                }
+
+                sleep(Duration::from_millis(1)).await;
+            };
+
+            if parents.contains(&certificate.header_id) {
+                return true;
+            }
+        }
+
+        false
     }
 
     /// Order the past leaders that we didn't already commit.
@@ -555,9 +594,9 @@ mod tests {
 
         assert!(sequence
             .iter()
-            .any(|x| x.header_id == round_1_orphan.header_id));
+            .any(|(x, orphan)| x.header_id == round_1_orphan.header_id && *orphan));
         assert_eq!(
-            sequence.iter().map(|x| x.round()).collect::<Vec<_>>(),
+            sequence.iter().map(|(x, _)| x.round()).collect::<Vec<_>>(),
             vec![1, 1, 2, 3]
         );
     }
