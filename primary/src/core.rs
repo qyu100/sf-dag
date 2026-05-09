@@ -178,12 +178,21 @@ impl Core {
         match result {
             CertificatesAggregatorResult::None => {}
             CertificatesAggregatorResult::Ready(parents) => {
+                info!(
+                    "Parent quorum ready round {} with {} parents without delay",
+                    round,
+                    parents.len()
+                );
                 self.tx_proposer
                     .send((parents, round))
                     .await
                     .expect("Failed to send certificate");
             }
             CertificatesAggregatorResult::DelayStarted => {
+                info!(
+                    "Parent quorum delay started round {} for {} ms",
+                    round, self.parent_quorum_delay_ms
+                );
                 let tx_parent_quorum_delay = self.tx_parent_quorum_delay.clone();
                 let delay = self.parent_quorum_delay_ms;
                 tokio::spawn(async move {
@@ -197,6 +206,11 @@ impl Core {
     async fn process_parent_quorum_delay(&mut self, round: Round) -> DagResult<()> {
         if let Some(aggregator) = self.certificates_aggregators.get_mut(&round) {
             let parents = aggregator.take_certificates();
+            info!(
+                "Parent quorum delay ended round {} with {} parents",
+                round,
+                parents.len()
+            );
             self.tx_proposer
                 .send((parents, round))
                 .await

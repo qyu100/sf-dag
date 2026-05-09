@@ -3,9 +3,7 @@ use crate::messages::{Certificate, Header, HeaderWithCertificate, Support, Timeo
 use crate::primary::Round;
 use config::Committee;
 use crypto::{PublicKey, SignatureService};
-#[cfg(feature = "benchmark")]
-use log::info;
-use log::{debug, warn};
+use log::{debug, info, warn};
 use std::cmp::Ordering;
 use std::convert::TryInto;
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -181,6 +179,12 @@ impl Proposer {
         {
             info!("Created {:?}", header.id);
             info!(
+                "Header {:?} has {} parents at round {}",
+                header.id,
+                parents.len(),
+                self.round
+            );
+            info!(
                 "Header {:?} contains {} B",
                 header.id,
                 header.payload.len() * self.tx_size
@@ -293,6 +297,8 @@ impl Proposer {
 
             tokio::select! {
                 Some((parents, round)) = self.rx_core.recv() => {
+                    let received_parent_count = parents.len();
+                    let before_parent_count = self.last_parents.len();
                     // Compare the parents' round number with our current round.
                     match round.cmp(&self.round) {
                         Ordering::Greater => {
@@ -310,6 +316,14 @@ impl Proposer {
                             self.last_parents.extend(parents)
                         }
                     }
+                    info!(
+                        "Proposer received parents for round {} while at round {}: received={}, before={}, after={}",
+                        round,
+                        self.round,
+                        received_parent_count,
+                        before_parent_count,
+                        self.last_parents.len()
+                    );
 
                     // Check whether we can advance to the next round. Note that if we timeout,
                     // we ignore this check and advance anyway.
