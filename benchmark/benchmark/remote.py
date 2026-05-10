@@ -576,7 +576,8 @@ class Bench:
 
             for burst in bench_parameters.burst:
                 rate = bench_parameters.rate[0]
-                Print.heading(f'\nRunning {n} nodes (input rate: {rate:,} tx/s, burst : {burst:,})')
+                propose_rate = node_parameters.json['propose_rate']
+                Print.heading(f'\nRunning {n} nodes (input rate: {rate:,} tx/s, burst : {burst:,}, propose rate: {propose_rate})')
 
                 # Run the benchmark.
                 for i in range(bench_parameters.runs):
@@ -596,7 +597,8 @@ class Bench:
                             bench_parameters.workers,
                             bench_parameters.collocate,
                             rate,
-                            bench_parameters.tx_size
+                            bench_parameters.tx_size,
+                            propose_rate
                         ))
                 
                     except (subprocess.SubprocessError, ParseError) as e:
