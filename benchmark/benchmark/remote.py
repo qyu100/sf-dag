@@ -162,6 +162,15 @@ class Bench:
 
             failures = [ ip for ip, result in hosts_and_results if result.exit_status == STATUS_FAILURE ]
             if len(failures) > 0:
+                for host, connection in connections:
+                    if host not in failures:
+                        continue
+                    try:
+                        result = await connection.run(f'tail -n 80 /home/ubuntu/{func}.err', check=False)
+                        if result.stdout:
+                            print(f'{func} stderr on {host}:\n{result.stdout}')
+                    except Exception as e:
+                        print(f'Failed to fetch {func}.err from {host}: {e}')
                 raise Exception(f'{func} failed on: {failures}')
 
             # Wait before polling again.

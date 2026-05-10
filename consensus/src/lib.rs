@@ -300,8 +300,9 @@ impl Consensus {
 
     async fn referenced_by_next_round(&self, certificate: &Certificate, state: &State) -> bool {
         let next_round = certificate.round().saturating_add(1);
-        let Some(next_round_certificates) = state.dag.get(&next_round) else {
-            return false;
+        let next_round_certificates = match state.dag.get(&next_round) {
+            Some(certificates) => certificates,
+            None => return false,
         };
 
         for (_, next_round_certificate) in next_round_certificates.values() {
