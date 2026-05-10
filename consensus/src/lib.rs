@@ -5,8 +5,9 @@ use crypto::{Digest, PublicKey};
 use log::{debug, info, warn};
 use primary::{Certificate, ConsensusMessage, Round};
 use std::cmp::max;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::time::{sleep, Duration};
 
 // #[cfg(test)]
 // #[path = "tests/consensus_tests.rs"]
@@ -26,6 +27,8 @@ struct State {
     /// must be regularly cleaned up through the function `update`.
     dag: Dag,
     parent_info: ParentInfo,
+    /// Keeps certificates that have been delivered but not yet committed, indexed by round.
+    pending: BTreeMap<Round, HashMap<PublicKey, Certificate>>,
 }
 
 impl State {
@@ -40,6 +43,27 @@ impl State {
             last_committed: genesis.iter().map(|(x, (_, y))| (*x, y.round())).collect(),
             dag: [(0, genesis)].iter().cloned().collect(),
             parent_info: HashMap::new(),
+            pending: BTreeMap::new(),
+        }
+    }
+
+    fn insert_certificate(&mut self, certificate: Certificate) {
+        let round = certificate.round();
+        let origin = certificate.origin();
+        self.dag
+            .entry(round)
+            .or_insert_with(HashMap::new)
+            .insert(origin, (certificate.header_id, certificate.clone()));
+
+        let already_committed = self
+            .last_committed
+            .get(&origin)
+            .map_or(false, |committed_round| committed_round >= &round);
+        if !already_committed {
+            self.pending
+                .entry(round)
+                .or_insert_with(HashMap::new)
+                .insert(origin, certificate);
         }
     }
 
@@ -52,11 +76,21 @@ impl State {
 
         let last_committed_round = *self.last_committed.values().max().unwrap();
         self.last_committed_round = last_committed_round;
+        if let Some(round_pending) = self.pending.get_mut(&certificate.round()) {
+            round_pending.remove(&certificate.origin());
+            if round_pending.is_empty() {
+                self.pending.remove(&certificate.round());
+            }
+        }
 
         // TODO: This cleanup is dangerous: we need to ensure consensus can receive idempotent replies
         // from the primary. Here we risk cleaning up a certificate and receiving it again later.
         for (name, round) in &self.last_committed {
             self.dag.retain(|r, authorities| {
+                authorities.retain(|n, _| n != name || r >= round);
+                !authorities.is_empty() && r + gc_depth >= last_committed_round
+            });
+            self.pending.retain(|r, authorities| {
                 authorities.retain(|n, _| n != name || r >= round);
                 !authorities.is_empty() && r + gc_depth >= last_committed_round
             });
@@ -123,17 +157,12 @@ impl Consensus {
 
                     match header_msg {
                         ConsensusMessage::Certificate(certificate) => {
-                            let round = certificate.round();
-                            state
-                                .dag
-                                .entry(round)
-                                .or_insert_with(HashMap::new)
-                                .insert(certificate.origin(), (certificate.header_id.clone(), certificate.clone()));
+                            state.insert_certificate(certificate);
                             continue;
                         }
 
                         ConsensusMessage::HeaderInfo(header_info) => {
-                            debug!("Processing header info {:?}", header_info);
+                            debug!("Processing header info {:?} at round {}", header_info.id, header_info.round);
 
                             state.parent_info.insert(header_info.id, header_info.parents.clone());
                             // Try to order the dag to commit. Start from the previous round.
@@ -159,26 +188,23 @@ impl Consensus {
 
                             // Commit if we have QT
                             if current_stake_value >= self.committee.quorum_threshold() {
-                                // Get an ordered list of past leaders that are linked to the current leader.
                                 debug!("Leader {:?} has enough support with header at round {}", leader, leader_round);
-                                let mut sequence = Vec::new();
-                                for leader in self.order_leaders(leader, &state).iter().rev() {
-                                    // Starting from the oldest leader, flatten the sub-dag referenced by the leader.
-                                    for x in self.order_dag(leader, &state) {
-                                        // Update and clean up internal state.
-                                        state.update(&x, self.gc_depth);
-
-                                        // Add the certificate to the sequence.
-                                        sequence.push(x);
-                                    }
-                                }
+                                let sequence =
+                                    self.collect_commit_sequence(leader, &state).await;
 
                                 // Output the sequence in the right order.
-                                for certificate in sequence {
-                                    // #[cfg(not(feature = "benchmark"))]
-                                    // info!("Committed {} with header", certificate.header_id);
+                                for (certificate, orphan) in sequence {
+                                    state.update(&certificate, self.gc_depth);
+                                    #[cfg(not(feature = "benchmark"))]
+                                    info!("Committed {} with header", certificate.header_id);
 
-                                    if certificate.round == leader_round {
+                                    if orphan {
+                                        info!(
+                                            "Committed {:?} Orphan age {}",
+                                            certificate.header_id,
+                                            leader_round.saturating_sub(certificate.round())
+                                        );
+                                    } else if certificate.round == leader_round {
                                         info!("Committed {:?} Leader", certificate.header_id);
                                     }else if certificate.round == leader_round-1 {
                                         info!("Committed {:?} NonLeader", certificate.header_id);
@@ -203,16 +229,7 @@ impl Consensus {
                 // Listen to incoming certificates.
                 Some(certificate) = self.rx_primary.recv() => {
                     debug!("Processing {:?}", certificate);
-                    let round = certificate.round();
-
-                    // Add the new certificate to the local storage.
-                    state
-                        .dag
-                        .entry(round)
-                        .or_insert_with(HashMap::new)
-                        .insert(certificate.origin(), (certificate.header_id.clone(), certificate.clone()));
-
-
+                    state.insert_certificate(certificate);
                 }
             }
         }
@@ -236,8 +253,76 @@ impl Consensus {
         dag.get(&round).map(|x| x.get(&leader)).flatten()
     }
 
+    async fn collect_commit_sequence(
+        &self,
+        leader: &Certificate,
+        state: &State,
+    ) -> Vec<(Certificate, bool)> {
+        let mut sequence = Vec::new();
+        let mut already_ordered = HashSet::new();
+
+        for linked_leader in self.order_leaders(leader, state).await.iter().rev() {
+            for certificate in self.order_dag(linked_leader, state).await {
+                let digest = certificate.digest();
+                if already_ordered.insert(digest) {
+                    sequence.push((certificate, false));
+                }
+            }
+        }
+
+        let commit_horizon = leader.round().saturating_sub(2);
+        let pending_candidates = state
+            .pending
+            .range(..=commit_horizon)
+            .flat_map(|(_, certificates)| certificates.values().cloned())
+            .collect::<Vec<_>>();
+        for certificate in pending_candidates {
+            let digest = certificate.digest();
+            if already_ordered.contains(&digest) {
+                continue;
+            }
+            if self.referenced_by_next_round(&certificate, state).await {
+                continue;
+            }
+
+            for candidate in self.order_dag(&certificate, state).await {
+                let candidate_digest = candidate.digest();
+                if already_ordered.insert(candidate_digest) {
+                    let candidate_is_orphan = candidate.header_id == certificate.header_id;
+                    sequence.push((candidate, candidate_is_orphan));
+                }
+            }
+        }
+
+        sequence.sort_by_key(|(certificate, _)| certificate.round());
+        sequence
+    }
+
+    async fn referenced_by_next_round(&self, certificate: &Certificate, state: &State) -> bool {
+        let next_round = certificate.round().saturating_add(1);
+        let Some(next_round_certificates) = state.dag.get(&next_round) else {
+            return false;
+        };
+
+        for (_, next_round_certificate) in next_round_certificates.values() {
+            let parents = loop {
+                if let Some(parents) = state.parent_info.get(&next_round_certificate.header_id) {
+                    break parents;
+                }
+
+                sleep(Duration::from_millis(1)).await;
+            };
+
+            if parents.contains(&certificate.header_id) {
+                return true;
+            }
+        }
+
+        false
+    }
+
     /// Order the past leaders that we didn't already commit.
-    fn order_leaders(&self, leader: &Certificate, state: &State) -> Vec<Certificate> {
+    async fn order_leaders(&self, leader: &Certificate, state: &State) -> Vec<Certificate> {
         let mut to_commit = vec![leader.clone()];
         let mut leader = leader;
         for r in (state.last_committed_round + 1..=leader.round() - 1).rev() {
@@ -248,7 +333,7 @@ impl Consensus {
             };
 
             // Check whether there is a path between the last two leaders.
-            if self.linked(leader, prev_leader, &state) {
+            if self.linked(leader, prev_leader, &state).await {
                 to_commit.push(prev_leader.clone());
                 leader = prev_leader;
             }
@@ -257,29 +342,41 @@ impl Consensus {
     }
 
     /// Checks if there is a path between two leaders.
-    fn linked(&self, leader: &Certificate, prev_leader: &Certificate, state: &State) -> bool {
+    async fn linked(&self, leader: &Certificate, prev_leader: &Certificate, state: &State) -> bool {
         let mut parents = vec![leader];
         for r in (prev_leader.round()..leader.round()).rev() {
-            parents = state
+            let round_certificates = state
                 .dag
                 .get(&(r))
-                .expect("We should have the whole history by now")
-                .values()
-                .filter(|(digest, _)| {
-                    parents.iter().any(|x| {
-                        let parents = state.parent_info.get(&x.header_id).unwrap();
-                        parents.contains(digest)
-                    })
-                })
-                .map(|(_, certificate)| certificate)
-                .collect();
+                .expect("We should have the whole history by now");
+
+            let mut new_parents = Vec::new();
+
+            for (digest, certificate) in round_certificates.values() {
+                for parent_cert in &parents {
+                    loop {
+                        if let Some(parents_set) = state.parent_info.get(&parent_cert.header_id) {
+                            if parents_set.contains(digest) {
+                                new_parents.push(certificate);
+                                break;
+                            } else {
+                                break;
+                            }
+                        } else {
+                            sleep(Duration::from_millis(1)).await;
+                        }
+                    }
+                }
+            }
+
+            parents = new_parents;
         }
         parents.contains(&prev_leader)
     }
 
     /// Flatten the dag referenced by the input certificate. This is a classic depth-first search (pre-order):
     /// https://en.wikipedia.org/wiki/Tree_traversal#Pre-order
-    fn order_dag(&self, leader: &Certificate, state: &State) -> Vec<Certificate> {
+    async fn order_dag(&self, leader: &Certificate, state: &State) -> Vec<Certificate> {
         debug!("Processing sub-dag of {:?}", leader);
         let mut ordered = Vec::new();
         let mut already_ordered = HashSet::new();
@@ -289,7 +386,14 @@ impl Consensus {
         while let Some(x) = buffer.pop() {
             debug!("Sequencing {:?}", x);
             ordered.push(x.clone());
-            let parents = state.parent_info.get(&x.header_id).unwrap();
+
+            let parents = loop {
+                if let Some(parents) = state.parent_info.get(&x.header_id) {
+                    break parents;
+                }
+
+                sleep(Duration::from_millis(1)).await;
+            };
 
             for parent in parents {
                 let (digest, certificate) = match state

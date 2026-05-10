@@ -5,7 +5,7 @@ authors = ["Alberto Sonnino <asonnino@fb.com>"]
 edition = "2018"
 
 [dependencies]
-tokio = { version = "1.5.0", features = ["sync"] }
+tokio = { version = "1.5.0", features = ["sync", "time"] }
 log = "0.4.14"
 
 crypto = { path = "../crypto" }
