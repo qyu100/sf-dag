@@ -867,10 +867,9 @@ impl Core {
                 VoteType::Commit => {
                     let aggregate_start = Instant::now();
                     if let Some(mut qc) = self.aggregator.add_commit_vote(vote.clone())? {
-                        debug!(
-                            "TIMING commit_vote_qc_formed round={} digest={} aggregate_ms={}",
+                        info!(
+                            "TIMING cqc_formed round={} aggregate_ms={}",
                             qc.round,
-                            qc.blk_hash,
                             aggregate_start.elapsed().as_millis()
                         );
                         debug!(
@@ -896,9 +895,7 @@ impl Core {
                             // Vote accumulation path: verify the aggregate BLS signature before
                             // sending a commit vote. RS check runs separately in background.
                             self.start_nqc_verification(qc.clone(), aggregate_ms);
-                            // Skip RS reconstruction in consensus_only: proofs carry no shard
-                            // data (proof_hash_only), so reconstruction would always fail.
-                            if !self.consensus_only && !shards.is_empty() {
+                            if !shards.is_empty() {
                                 self.spawn_availability_check(qc.payload_root.clone(), shards);
                             }
                         }
@@ -1498,9 +1495,9 @@ impl Core {
                 Some(result) = self.rx_nqc_verify.recv() => {
                     if result.ok {
                         let qc = result.qc;
-                        debug!(
-                            "TIMING normal_vote_nqc_formed round={} digest={} aggregate_ms={}",
-                            qc.round, qc.blk_hash, result.aggregate_ms
+                        info!(
+                            "TIMING nqc_formed round={} bls_verify_ms={}",
+                            qc.round, result.aggregate_ms
                         );
                         debug!(
                             "TIMELINE event=availability_verified node={} round={} digest={} payload_root={}",

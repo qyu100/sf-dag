@@ -397,7 +397,6 @@ impl Proposer {
         self.record_proposal(block.clone());
 
         let my_name = self.name;
-        let consensus_only = self.consensus_only;
         let mut recipients: Vec<PublicKey> = self.committee.authorities.keys().cloned().collect();
         recipients.sort_by_key(|pk| self.committee.id(pk));
         let tx = self.tx_phase2.clone();
@@ -418,18 +417,9 @@ impl Proposer {
                 .into_par_iter()
                 .enumerate()
                 .map(|(index, recipient)| {
-                    // In consensus_only mode, strip the raw shard bytes from the proof.
-                    // Proof.validate() uses value_hash (not value), so verification still passes.
-                    // This reduces NV size from ~shard_size to ~300 bytes.
-                    let proof = if consensus_only {
-                        merkle_tree
-                            .proof_hash_only(index, shard_refs[index])
-                            .expect("Failed to build proof")
-                    } else {
-                        merkle_tree
-                            .proof_with_leaf(index, shard_refs[index])
-                            .expect("Failed to build proof")
-                    };
+                    let proof = merkle_tree
+                        .proof_with_leaf(index, shard_refs[index])
+                        .expect("Failed to build proof");
                     let proposal = match trigger.clone() {
                         ProposalTrigger::QC(qc) => ProposalMessage::N(NormalProposal::new(
                             block.clone(),
@@ -493,19 +483,12 @@ impl Proposer {
             p2.remote.len(),
             p2.proof_blocking_ms
         );
-        debug!(
-            "TIMING proposal_make round={} payload_bytes={} shard_len={} remote_count={} remote_bytes={} payload_ms={} encode_ms={} merkle_ms={} sign_ms={} proof_blocking_ms={} encode_blocking_ms={}",
+        info!(
+            "TIMING proposal_make round={} shard_len={} encode_ms={} proof_blocking_ms={}",
             round,
-            p2.block.payload_len,
             p2.shard_len,
-            p2.remote.len(),
-            p2.total_bytes,
-            p2.payload_ms,
             p2.encode_ms,
-            p2.merkle_ms,
-            p2.sign_ms,
             p2.proof_blocking_ms,
-            p2.encode_blocking_ms,
         );
 
         let local_start = StdInstant::now();
