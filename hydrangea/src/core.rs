@@ -929,9 +929,9 @@ impl Core {
                             // Vote accumulation path: verify the aggregate BLS signature before
                             // sending a commit vote. RS check runs separately in background.
                             self.start_nqc_verification(qc.clone(), aggregate_ms);
-                            if !shards.is_empty() {
-                                self.spawn_availability_check(qc.payload_root.clone(), shards);
-                            }
+                            // if !shards.is_empty() {
+                            //     self.spawn_availability_check(qc.payload_root.clone(), shards);
+                            // }
                         }
                         self.attach_block_to_qc(&mut qc);
                         self.handle_qc(&qc).await?;
