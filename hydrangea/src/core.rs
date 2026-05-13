@@ -242,7 +242,8 @@ impl Core {
         match m {
             ConsensusMessage::QC(_) => self.qc_sender.broadcast(addresses, m_bytes).await,
             ConsensusMessage::Vote(vote) => {
-                self.broadcast_vote_bytes(&vote.kind, addresses, m_bytes)
+                let label = Self::vote_network_label(&vote);
+                self.broadcast_vote_bytes(&vote.kind, addresses, m_bytes, Some(label))
                     .await
             }
             ConsensusMessage::Timeout(_) => self.timeout_sender.broadcast(addresses, m_bytes).await,
@@ -263,8 +264,9 @@ impl Core {
         let serialize_ms = serialize_start.elapsed().as_millis();
         let m_bytes = Bytes::from(message);
         let bytes = m_bytes.len();
+        let label = Self::vote_network_label(vote);
         let enqueue_start = StdInstant::now();
-        self.broadcast_vote_bytes(&vote.kind, addresses, m_bytes)
+        self.broadcast_vote_bytes(&vote.kind, addresses, m_bytes, Some(label))
             .await;
         let enqueue_ms = enqueue_start.elapsed().as_millis();
 
@@ -283,10 +285,19 @@ impl Core {
         kind: &VoteType,
         addresses: Vec<SocketAddr>,
         m_bytes: Bytes,
+        label: Option<String>,
     ) {
         match kind {
-            VoteType::Normal => self.normal_vote_sender.broadcast(addresses, m_bytes).await,
-            VoteType::Commit => self.commit_vote_sender.broadcast(addresses, m_bytes).await,
+            VoteType::Normal => {
+                self.normal_vote_sender
+                    .broadcast_with_label(addresses, m_bytes, label)
+                    .await
+            }
+            VoteType::Commit => {
+                self.commit_vote_sender
+                    .broadcast_with_label(addresses, m_bytes, label)
+                    .await
+            }
         }
     }
 
@@ -307,7 +318,9 @@ impl Core {
             match m {
                 ConsensusMessage::QC(_) => self.qc_sender.send(address, m_bytes).await,
                 ConsensusMessage::Vote(vote) => {
-                    self.send_vote_bytes(&vote.kind, address, m_bytes).await
+                    let label = Self::vote_network_label(&vote);
+                    self.send_vote_bytes(&vote.kind, address, m_bytes, Some(label))
+                        .await
                 }
                 ConsensusMessage::Timeout(_) => self.timeout_sender.send(address, m_bytes).await,
                 _ => (),
@@ -315,11 +328,32 @@ impl Core {
         }
     }
 
-    async fn send_vote_bytes(&mut self, kind: &VoteType, address: SocketAddr, m_bytes: Bytes) {
+    async fn send_vote_bytes(
+        &mut self,
+        kind: &VoteType,
+        address: SocketAddr,
+        m_bytes: Bytes,
+        label: Option<String>,
+    ) {
         match kind {
-            VoteType::Normal => self.normal_vote_sender.send(address, m_bytes).await,
-            VoteType::Commit => self.commit_vote_sender.send(address, m_bytes).await,
+            VoteType::Normal => {
+                self.normal_vote_sender
+                    .send_with_label(address, m_bytes, label)
+                    .await
+            }
+            VoteType::Commit => {
+                self.commit_vote_sender
+                    .send_with_label(address, m_bytes, label)
+                    .await
+            }
         }
+    }
+
+    fn vote_network_label(vote: &Vote) -> String {
+        format!(
+            "vote,kind={},node={},round={},digest={},root={}",
+            vote.kind, vote.author, vote.round, vote.blk_hash, vote.payload_root
+        )
     }
 
     async fn get_block(&mut self, digest: Digest, round: Round) -> ConsensusResult<Option<Block>> {

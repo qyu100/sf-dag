@@ -78,16 +78,32 @@ impl ReliableSender {
         self.sent += 1;
 
         let (sender, receiver) = oneshot::channel();
+        let bytes = data.len();
+        let enqueue_start = Instant::now();
+        let enqueued_at = Instant::now();
+        let log_label = label.clone();
         self.connections
             .entry(address)
             .or_insert_with(|| Self::spawn_connection(address))
             .send(InnerMessage {
                 data,
                 label,
+                enqueued_at,
                 cancel_handler: sender,
             })
             .await
             .expect("Failed to send internal message");
+        if let Some(label) = log_label.as_deref() {
+            if bytes >= 10_000 {
+                info!(
+                    "TIMING reliable_sender_enqueue label={} address={} bytes={} enqueue_ms={}",
+                    label,
+                    address,
+                    bytes,
+                    enqueue_start.elapsed().as_millis()
+                );
+            }
+        }
         receiver
     }
 
@@ -134,6 +150,8 @@ struct InnerMessage {
     data: Bytes,
     /// Optional benchmark label for tracing a message across the network path.
     label: Option<String>,
+    /// Time when the caller enqueued this message into the per-peer connection task.
+    enqueued_at: Instant,
     /// The cancel handler allowing the caller task to cancel the transmission of this message
     /// and to be notified of its successfully transmission.
     cancel_handler: oneshot::Sender<Bytes>,
@@ -148,7 +166,7 @@ struct Connection {
     /// The initial delay to wait before re-attempting a connection (in ms).
     retry_delay: u64,
     /// Buffer keeping all messages that need to be re-transmitted.
-    buffer: VecDeque<(Bytes, Option<String>, oneshot::Sender<Bytes>)>,
+    buffer: VecDeque<(Bytes, Option<String>, Instant, oneshot::Sender<Bytes>)>,
 }
 
 impl Connection {
@@ -200,9 +218,9 @@ impl Connection {
 
                             // Drain the channel into the buffer to not saturate the channel and block the caller task.
                             // The caller is responsible to cleanup the buffer through the cancel handlers.
-                            Some(InnerMessage{data, label, cancel_handler}) = self.receiver.recv() => {
-                                self.buffer.push_back((data, label, cancel_handler));
-                                self.buffer.retain(|(_, _, handler)| !handler.is_closed());
+                            Some(InnerMessage{data, label, enqueued_at, cancel_handler}) = self.receiver.recv() => {
+                                self.buffer.push_back((data, label, enqueued_at, cancel_handler));
+                                self.buffer.retain(|(_, _, _, handler)| !handler.is_closed());
                             }
                         }
                     }
@@ -225,7 +243,7 @@ impl Connection {
         let (mut writer, mut reader) = Framed::new(stream, codec).split();
         let error = 'connection: loop {
             // Try to send all messages of the buffer.
-            while let Some((data, label, handler)) = self.buffer.pop_front() {
+            while let Some((data, label, enqueued_at, handler)) = self.buffer.pop_front() {
                 // Skip messages that have been cancelled.
                 if handler.is_closed() {
                     continue;
@@ -237,12 +255,18 @@ impl Connection {
 
                 // Try to send the message.
                 let bytes = data.len();
+                let queue_delay_ms = enqueued_at.elapsed().as_millis();
                 let write_start = Instant::now();
                 if let Some(label) = label.as_deref() {
                     if bytes >= 10_000 {
-                        debug!(
-                            "TIMELINE event=reliable_sender_write_started label={} address={} bytes={}",
-                            label, self.address, bytes
+                        info!(
+                            "TIMELINE event=reliable_sender_write_started label={} address={} bytes={} queue_delay_ms={} buffered={} pending={}",
+                            label,
+                            self.address,
+                            bytes,
+                            queue_delay_ms,
+                            self.buffer.len(),
+                            pending_replies.len()
                         );
                     }
                 }
@@ -251,16 +275,22 @@ impl Connection {
                         let write_ms = write_start.elapsed().as_millis();
                         if bytes >= 10_000 || write_ms >= 10 {
                             if let Some(label) = label.as_deref() {
-                                debug!(
-                                    "TIMING reliable_sender_write label={} address={} bytes={} write_ms={}",
-                                    label, self.address, bytes, write_ms
+                                info!(
+                                    "TIMING reliable_sender_write label={} address={} bytes={} queue_delay_ms={} write_ms={} buffered={} pending={}",
+                                    label,
+                                    self.address,
+                                    bytes,
+                                    queue_delay_ms,
+                                    write_ms,
+                                    self.buffer.len(),
+                                    pending_replies.len()
                                 );
-                                debug!(
-                                    "TIMELINE event=reliable_sender_write_finished label={} address={} bytes={} write_ms={}",
-                                    label, self.address, bytes, write_ms
+                                info!(
+                                    "TIMELINE event=reliable_sender_write_finished label={} address={} bytes={} queue_delay_ms={} write_ms={}",
+                                    label, self.address, bytes, queue_delay_ms, write_ms
                                 );
                             } else {
-                                debug!(
+                                info!(
                                     "TIMING reliable_sender_write address={} bytes={} write_ms={}",
                                     self.address, bytes, write_ms
                                 );
@@ -278,7 +308,7 @@ impl Connection {
                     }
                     Err(e) => {
                         // We failed to send the message, we put it back into the buffer.
-                        self.buffer.push_front((data, label, handler));
+                        self.buffer.push_front((data, label, enqueued_at, handler));
                         break 'connection NetworkError::FailedToSendMessage(self.address, e);
                     }
                 }
@@ -286,9 +316,9 @@ impl Connection {
 
             // Check if there are any new messages to send or if we get an ACK for messages we already sent.
             tokio::select! {
-                Some(InnerMessage{data, label, cancel_handler}) = self.receiver.recv() => {
+                Some(InnerMessage{data, label, enqueued_at, cancel_handler}) = self.receiver.recv() => {
                     // Add the message to the buffer of messages to send.
-                    self.buffer.push_back((data, label, cancel_handler));
+                    self.buffer.push_back((data, label, enqueued_at, cancel_handler));
                 },
                 response = reader.next() => {
                     let (data, label, handler, sent_at) = match pending_replies.pop_front() {
@@ -298,14 +328,19 @@ impl Connection {
                     match response {
                         Some(Ok(bytes)) => {
                             let ack_wait_ms = sent_at.elapsed().as_millis();
+                            let sent_bytes = data.len();
                             if let Some(label) = label.as_deref() {
-                                debug!(
-                                    "TIMING reliable_sender_ack label={} address={} ack_wait_ms={}",
-                                    label, self.address, ack_wait_ms
+                                info!(
+                                    "TIMING reliable_sender_ack label={} address={} bytes={} ack_wait_ms={} pending={}",
+                                    label,
+                                    self.address,
+                                    sent_bytes,
+                                    ack_wait_ms,
+                                    pending_replies.len()
                                 );
-                                debug!(
-                                    "TIMELINE event=reliable_sender_ack_received label={} address={} ack_wait_ms={}",
-                                    label, self.address, ack_wait_ms
+                                info!(
+                                    "TIMELINE event=reliable_sender_ack_received label={} address={} bytes={} ack_wait_ms={}",
+                                    label, self.address, sent_bytes, ack_wait_ms
                                 );
                             }
                             // Notify the handler that the message has been successfully sent.
@@ -325,7 +360,7 @@ impl Connection {
         // If we reach this code, it means something went wrong. Put the messages for which we didn't receive an ACK
         // back into the sending buffer, we will try to send them again once we manage to establish a new connection.
         while let Some((data, label, handler, _sent_at)) = pending_replies.pop_back() {
-            self.buffer.push_front((data, label, handler));
+            self.buffer.push_front((data, label, Instant::now(), handler));
         }
         error
     }
