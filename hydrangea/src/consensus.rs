@@ -12,7 +12,7 @@ use bytes::Bytes;
 use config::{Committee, Parameters};
 use crypto::{BlsSignatureService, Digest, Hash as _, PublicKey, SignatureService};
 use futures::SinkExt as _;
-use log::info;
+use log::{debug, info};
 use network::{MessageHandler, Receiver as NetworkReceiver, Writer};
 use primary::Certificate;
 use serde::{Deserialize, Serialize};
@@ -273,7 +273,7 @@ impl MessageHandler for ConsensusReceiverHandler {
                     .await
                     .expect("Failed to send proposal message");
                 let core_send_ms = send_start.elapsed().as_millis();
-                info!(
+                debug!(
                     "TIMELINE event=proposal_core_queued node={} author={} round={} digest={} core_send_ms={}",
                     self.name,
                     author,
@@ -293,7 +293,7 @@ impl MessageHandler for ConsensusReceiverHandler {
             message => {
                 // debug!("Received message from peer: {:?}", message);
                 if let ConsensusMessage::Vote(vote) = &message {
-                    info!(
+                    debug!(
                         "TIMELINE event=vote_frame_received node={} kind={} author={} round={} digest={} payload_root={} bytes={} deserialize_ms={} ack_ms={}",
                         self.name,
                         vote.kind,

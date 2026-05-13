@@ -593,7 +593,7 @@ impl Core {
         // Send all the newly committed blocks to the node's application layer.
         while let Some(committing) = to_commit.pop() {
             // This log is required for generating benchmark outputs.
-            info!("Committed {:?}", committing);
+            debug!("Committed {:?}", committing);
             debug!(
                 "TIMELINE event=committed node={} author={} round={} digest={} payload_root={} payload_bytes={}",
                 self.name,

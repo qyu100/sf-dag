@@ -95,7 +95,7 @@ impl ReliableSender {
             .expect("Failed to send internal message");
         if let Some(label) = log_label.as_deref() {
             if bytes >= 10_000 {
-                info!(
+                debug!(
                     "TIMING reliable_sender_enqueue label={} address={} bytes={} enqueue_ms={}",
                     label,
                     address,
@@ -259,7 +259,7 @@ impl Connection {
                 let write_start = Instant::now();
                 if let Some(label) = label.as_deref() {
                     if bytes >= 10_000 {
-                        info!(
+                        debug!(
                             "TIMELINE event=reliable_sender_write_started label={} address={} bytes={} queue_delay_ms={} buffered={} pending={}",
                             label,
                             self.address,
@@ -275,7 +275,7 @@ impl Connection {
                         let write_ms = write_start.elapsed().as_millis();
                         if bytes >= 10_000 || write_ms >= 10 {
                             if let Some(label) = label.as_deref() {
-                                info!(
+                                debug!(
                                     "TIMING reliable_sender_write label={} address={} bytes={} queue_delay_ms={} write_ms={} buffered={} pending={}",
                                     label,
                                     self.address,
@@ -285,12 +285,12 @@ impl Connection {
                                     self.buffer.len(),
                                     pending_replies.len()
                                 );
-                                info!(
+                                debug!(
                                     "TIMELINE event=reliable_sender_write_finished label={} address={} bytes={} queue_delay_ms={} write_ms={}",
                                     label, self.address, bytes, queue_delay_ms, write_ms
                                 );
                             } else {
-                                info!(
+                                debug!(
                                     "TIMING reliable_sender_write address={} bytes={} write_ms={}",
                                     self.address, bytes, write_ms
                                 );
@@ -330,7 +330,7 @@ impl Connection {
                             let ack_wait_ms = sent_at.elapsed().as_millis();
                             let sent_bytes = data.len();
                             if let Some(label) = label.as_deref() {
-                                info!(
+                                debug!(
                                     "TIMING reliable_sender_ack label={} address={} bytes={} ack_wait_ms={} pending={}",
                                     label,
                                     self.address,
@@ -338,7 +338,7 @@ impl Connection {
                                     ack_wait_ms,
                                     pending_replies.len()
                                 );
-                                info!(
+                                debug!(
                                     "TIMELINE event=reliable_sender_ack_received label={} address={} bytes={} ack_wait_ms={}",
                                     label, self.address, sent_bytes, ack_wait_ms
                                 );

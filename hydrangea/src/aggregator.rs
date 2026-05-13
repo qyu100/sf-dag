@@ -201,7 +201,7 @@ impl QCMaker {
                     aggregate_verify_ms = aggregate_verify_start.elapsed().as_millis();
                 }
 
-                info!("Constructed {} QC. Votes: {} ", vote.kind, self.votes.len(),);
+                debug!("Constructed {} QC. Votes: {} ", vote.kind, self.votes.len(),);
                 debug!(
                     "TIMING qc_construct kind={} round={} digest={} votes={} proof_ms={} aggregate_verify_ms={} total_ms={}",
                     vote.kind,

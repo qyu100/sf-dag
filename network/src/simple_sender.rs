@@ -85,7 +85,7 @@ impl SimpleSender {
             if tx.send(message.clone()).await.is_ok() {
                 if let Some(label) = log_label.as_deref() {
                     if bytes >= 10_000 {
-                        info!(
+                        debug!(
                             "TIMING simple_sender_enqueue label={} address={} bytes={} enqueue_ms={}",
                             label,
                             address,
@@ -104,7 +104,7 @@ impl SimpleSender {
             self.connections.insert(address, tx);
             if let Some(label) = log_label.as_deref() {
                 if bytes >= 10_000 {
-                    info!(
+                    debug!(
                         "TIMING simple_sender_enqueue label={} address={} bytes={} enqueue_ms={}",
                         label,
                         address,
@@ -212,7 +212,7 @@ impl Connection {
                     let write_start = Instant::now();
                     if let Some(label) = label.as_deref() {
                         if bytes >= 10_000 {
-                            info!(
+                            debug!(
                                 "TIMELINE event=simple_sender_write_started label={} address={} bytes={} queue_delay_ms={} pending={}",
                                 label,
                                 self.address,
@@ -229,7 +229,7 @@ impl Connection {
                     let write_ms = write_start.elapsed().as_millis();
                     if bytes >= 10_000 || write_ms >= 10 {
                         if let Some(label) = label.as_deref() {
-                            info!(
+                            debug!(
                                 "TIMING simple_sender_write label={} address={} bytes={} queue_delay_ms={} write_ms={} pending={}",
                                 label,
                                 self.address,
@@ -238,7 +238,7 @@ impl Connection {
                                 write_ms,
                                 pending_replies.len()
                             );
-                            info!(
+                            debug!(
                                 "TIMELINE event=simple_sender_write_finished label={} address={} bytes={} queue_delay_ms={} write_ms={}",
                                 label,
                                 self.address,
@@ -247,7 +247,7 @@ impl Connection {
                                 write_ms
                             );
                         } else {
-                            info!(
+                            debug!(
                                 "TIMING simple_sender_write address={} bytes={} write_ms={}",
                                 self.address,
                                 bytes,
@@ -264,7 +264,7 @@ impl Connection {
                                 let ack_wait_ms = sent_at.elapsed().as_millis();
                                 if let Some(label) = label.as_deref() {
                                     if bytes >= 10_000 || ack_wait_ms >= 10 {
-                                        info!(
+                                        debug!(
                                             "TIMING simple_sender_ack label={} address={} bytes={} ack_wait_ms={} pending={}",
                                             label,
                                             self.address,
@@ -272,7 +272,7 @@ impl Connection {
                                             ack_wait_ms,
                                             pending_replies.len()
                                         );
-                                        info!(
+                                        debug!(
                                             "TIMELINE event=simple_sender_ack_received label={} address={} bytes={} ack_wait_ms={}",
                                             label,
                                             self.address,
