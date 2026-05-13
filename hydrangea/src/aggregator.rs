@@ -88,6 +88,7 @@ struct QCMaker {
     pk_bit_vec: Vec<u128>,
     availability_shards: Vec<Option<Box<[u8]>>>,
     is_qc_formed: bool,
+    first_nv_ts: Option<Instant>,
 }
 
 impl QCMaker {
@@ -100,6 +101,7 @@ impl QCMaker {
             pk_bit_vec: vec![u128::MAX; (total_nodes + 127) / 128],
             availability_shards: vec![None; total_nodes],
             is_qc_formed: false,
+            first_nv_ts: None,
         }
     }
 
@@ -158,6 +160,22 @@ impl QCMaker {
             }
 
             self.weight += committee.stake(&author);
+
+            if vote.kind == VoteType::Normal {
+                let count = self.votes.len();
+                let now = Instant::now();
+                let first_ts = *self.first_nv_ts.get_or_insert(now);
+                let ms_since_first = (now - first_ts).as_millis();
+                let validity_threshold = committee.f + 1;
+                let ready_threshold_val = committee.n - committee.f;
+                if count == 1 || count == validity_threshold as usize || count == ready_threshold_val as usize {
+                    info!(
+                        "TIMING nv_milestone round={} count={} proof_ms={} ms_since_first_nv={}",
+                        vote.round, count, proof_ms, ms_since_first
+                    );
+                }
+            }
+
             let ready_threshold = committee.n - committee.f;
             if vote.kind == VoteType::Normal && self.weight >= ready_threshold
                 || vote.kind == VoteType::Commit && self.weight >= ready_threshold

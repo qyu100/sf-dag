@@ -216,7 +216,7 @@ impl Proposer {
                 .network
                 .send_with_label(address, message, Some(label.clone()))
                 .await;
-            debug!(
+            info!(
                 "TIMELINE event=proposal_remote_enqueued label={} recipient={} address={} bytes={} enqueue_ms={}",
                 label,
                 recipient,
@@ -226,7 +226,7 @@ impl Proposer {
             );
             handles.push(handle);
         }
-        debug!(
+        info!(
             "TIMING proposal_send round={} remotes={} enqueue_ms={}",
             round,
             handles.len(),
@@ -239,7 +239,7 @@ impl Proposer {
         info!("Created {:?}", b);
         info!("Created {}", b.digest());
         info!("Header {} contains {} B", b.digest(), b.payload_len);
-        debug!(
+        info!(
             "TIMELINE event=block_created node={} author={} round={} digest={} payload_bytes={}",
             self.name,
             b.author,

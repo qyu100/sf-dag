@@ -12,7 +12,7 @@ use bytes::Bytes;
 use config::{Committee, Parameters};
 use crypto::{BlsSignatureService, Digest, Hash as _, PublicKey, SignatureService};
 use futures::SinkExt as _;
-use log::{debug, info};
+use log::info;
 use network::{MessageHandler, Receiver as NetworkReceiver, Writer};
 use primary::Certificate;
 use serde::{Deserialize, Serialize};
@@ -256,7 +256,7 @@ impl MessageHandler for ConsensusReceiverHandler {
                 // Keep proposals off the shared consensus queue so large vote bursts do not
                 // delay the proposal-to-vote path.
                 let (author, round, digest, payload_bytes) = Self::proposal_metadata(&proposal);
-                debug!(
+                info!(
                     "TIMELINE event=proposal_frame_received node={} author={} round={} digest={} bytes={} payload_bytes={} deserialize_ms={} ack_ms={}",
                     self.name,
                     author,
@@ -273,7 +273,7 @@ impl MessageHandler for ConsensusReceiverHandler {
                     .await
                     .expect("Failed to send proposal message");
                 let core_send_ms = send_start.elapsed().as_millis();
-                debug!(
+                info!(
                     "TIMELINE event=proposal_core_queued node={} author={} round={} digest={} core_send_ms={}",
                     self.name,
                     author,
@@ -292,6 +292,20 @@ impl MessageHandler for ConsensusReceiverHandler {
             }
             message => {
                 // debug!("Received message from peer: {:?}", message);
+                if let ConsensusMessage::Vote(vote) = &message {
+                    info!(
+                        "TIMELINE event=vote_frame_received node={} kind={} author={} round={} digest={} payload_root={} bytes={} deserialize_ms={} ack_ms={}",
+                        self.name,
+                        vote.kind,
+                        vote.author,
+                        vote.round,
+                        vote.blk_hash,
+                        vote.payload_root,
+                        bytes,
+                        deserialize_ms,
+                        ack_ms
+                    );
+                }
                 let send_start = Instant::now();
                 self.tx_consensus
                     .send(message)
@@ -338,7 +352,7 @@ impl ConsensusReceiverHandler {
         total_ms: u128,
     ) {
         if total_ms >= 10 || deserialize_ms >= 10 || core_send_ms >= 10 {
-            debug!(
+            info!(
                 "TIMING consensus_receive label={} bytes={} deserialize_ms={} ack_ms={} core_send_ms={} total_ms={}",
                 label, bytes, deserialize_ms, ack_ms, core_send_ms, total_ms
             );

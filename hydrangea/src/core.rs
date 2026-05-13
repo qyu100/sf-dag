@@ -781,7 +781,7 @@ impl Core {
             VoteType::Normal => "nv_sent",
             VoteType::Commit => "cv_sent",
         };
-        debug!(
+        info!(
             "TIMELINE event={} node={} round={} digest={} payload_root={}",
             vote_event, self.name, vote.round, vote.blk_hash, vote.payload_root
         );
@@ -792,7 +792,7 @@ impl Core {
 
         let broadcast_start = Instant::now();
         let broadcast_stats = self.broadcast_vote_ref(&vote).await;
-        debug!(
+        info!(
             "TIMING vote_send kind={} round={} bytes={} peers={} sign_ms={} local_handle_ms={} address_ms={} serialize_ms={} enqueue_ms={} broadcast_total_ms={} total_ms={}",
             t,
             r,
@@ -872,7 +872,7 @@ impl Core {
                             qc.round,
                             aggregate_start.elapsed().as_millis()
                         );
-                        debug!(
+                        info!(
                             "TIMELINE event=cqc_formed node={} round={} digest={} payload_root={}",
                             self.name, qc.round, qc.blk_hash, qc.payload_root
                         );
@@ -886,7 +886,7 @@ impl Core {
                     if let Some((mut qc, shards)) = self.aggregator.add_normal_vote(vote.clone())? {
                         let aggregate_ms = aggregate_start.elapsed().as_millis();
                         debug!("Assembled {:?}", qc);
-                        debug!(
+                        info!(
                             "TIMELINE event=nqc_formed node={} round={} digest={} payload_root={}",
                             self.name, qc.round, qc.blk_hash, qc.payload_root
                         );
@@ -1353,7 +1353,7 @@ impl Core {
 
     async fn process_normal_proposal(&mut self, p: NormalProposal) -> ConsensusResult<()> {
         debug!("Received Normal Proposal {:?}", p);
-        debug!(
+        info!(
             "TIMELINE event=proposal_received node={} author={} round={} digest={} payload_root={} payload_bytes={}",
             self.name,
             p.block.author,
