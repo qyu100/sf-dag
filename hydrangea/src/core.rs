@@ -18,7 +18,7 @@ use config::Committee;
 use crypto::{BlsSignatureService, Digest, Hash as _};
 use crypto::{PublicKey, SignatureService};
 use log::{debug, error, info, warn};
-use network::SimpleSender;
+use network::ReliableSender;
 use primary::Certificate;
 use std::cmp::max;
 use std::collections::{HashMap, HashSet};
@@ -58,7 +58,8 @@ pub struct Core {
     // and up to two Optimistic Proposals.
     pending_proposals: HashMap<Round, Digest>,
     pending_proofs: HashMap<Digest, Proof>,
-    qc_sender: SimpleSender,
+    network: ReliableSender,
+    rx_proposal_net: Receiver<Vec<(SocketAddr, Bytes, String)>>,
     qc_syncs: HashMap<PublicKey, Instant>,
     round: Round,
     rs_block_size: usize,
@@ -87,9 +88,6 @@ pub struct Core {
     uncommitted_qcs: HashMap<Round, QC>,
     verified_normal_qcs: HashSet<(Round, Digest, Digest)>,
     started_nqc_verify: HashSet<(Round, Digest, Digest)>,
-    commit_vote_sender: SimpleSender,
-    normal_vote_sender: SimpleSender,
-    timeout_sender: SimpleSender,
     tx_nqc_verify: Sender<NqcVerifyResult>,
     rx_nqc_verify: Receiver<NqcVerifyResult>,
 }
@@ -163,6 +161,7 @@ impl Core {
         tx_proposer: Sender<ProposerMessage>,
         tx_commit: Sender<Vec<Certificate>>,
         tx_output: Sender<Block>,
+        rx_proposal_net: Receiver<Vec<(SocketAddr, Bytes, String)>>,
     ) {
         tokio::spawn(async move {
             let mut uncommitted_blocks = HashMap::new();
@@ -191,7 +190,8 @@ impl Core {
                 locked: QC::genesis(),
                 mempool_driver,
                 name,
-                qc_sender: SimpleSender::new(),
+                network: ReliableSender::new(),
+                rx_proposal_net,
                 qc_syncs: HashMap::new(),
                 round: 1,
                 rs_block_size,
@@ -220,9 +220,6 @@ impl Core {
                 uncommitted_qcs,
                 verified_normal_qcs: HashSet::new(),
                 started_nqc_verify: HashSet::new(),
-                commit_vote_sender: SimpleSender::new(),
-                normal_vote_sender: SimpleSender::new(),
-                timeout_sender: SimpleSender::new(),
                 tx_nqc_verify,
                 rx_nqc_verify,
             }
@@ -240,13 +237,17 @@ impl Core {
         let m_bytes = Bytes::from(message);
 
         match m {
-            ConsensusMessage::QC(_) => self.qc_sender.broadcast(addresses, m_bytes).await,
+            ConsensusMessage::QC(_) => {
+                let _ = self.network.broadcast(addresses, m_bytes).await;
+            }
             ConsensusMessage::Vote(vote) => {
                 let label = Self::vote_network_label(&vote);
                 self.broadcast_vote_bytes(&vote.kind, addresses, m_bytes, Some(label))
                     .await
             }
-            ConsensusMessage::Timeout(_) => self.timeout_sender.broadcast(addresses, m_bytes).await,
+            ConsensusMessage::Timeout(_) => {
+                let _ = self.network.broadcast(addresses, m_bytes).await;
+            }
             _ => (),
         }
     }
@@ -282,23 +283,15 @@ impl Core {
 
     async fn broadcast_vote_bytes(
         &mut self,
-        kind: &VoteType,
+        _kind: &VoteType,
         addresses: Vec<SocketAddr>,
         m_bytes: Bytes,
         label: Option<String>,
     ) {
-        match kind {
-            VoteType::Normal => {
-                self.normal_vote_sender
-                    .broadcast_with_label(addresses, m_bytes, label)
-                    .await
-            }
-            VoteType::Commit => {
-                self.commit_vote_sender
-                    .broadcast_with_label(addresses, m_bytes, label)
-                    .await
-            }
-        }
+        let _ = self
+            .network
+            .broadcast_with_label(addresses, m_bytes, label)
+            .await;
     }
 
     // Unicasts the given ConsensusMessage to the given recipient if recipient is not self.
@@ -316,13 +309,17 @@ impl Core {
             let m_bytes = Bytes::from(message);
 
             match m {
-                ConsensusMessage::QC(_) => self.qc_sender.send(address, m_bytes).await,
+                ConsensusMessage::QC(_) => {
+                    let _ = self.network.send(address, m_bytes).await;
+                }
                 ConsensusMessage::Vote(vote) => {
                     let label = Self::vote_network_label(&vote);
                     self.send_vote_bytes(&vote.kind, address, m_bytes, Some(label))
                         .await
                 }
-                ConsensusMessage::Timeout(_) => self.timeout_sender.send(address, m_bytes).await,
+                ConsensusMessage::Timeout(_) => {
+                    let _ = self.network.send(address, m_bytes).await;
+                }
                 _ => (),
             }
         }
@@ -330,23 +327,15 @@ impl Core {
 
     async fn send_vote_bytes(
         &mut self,
-        kind: &VoteType,
+        _kind: &VoteType,
         address: SocketAddr,
         m_bytes: Bytes,
         label: Option<String>,
     ) {
-        match kind {
-            VoteType::Normal => {
-                self.normal_vote_sender
-                    .send_with_label(address, m_bytes, label)
-                    .await
-            }
-            VoteType::Commit => {
-                self.commit_vote_sender
-                    .send_with_label(address, m_bytes, label)
-                    .await
-            }
-        }
+        let _ = self
+            .network
+            .send_with_label(address, m_bytes, label)
+            .await;
     }
 
     fn vote_network_label(vote: &Vote) -> String {
@@ -484,7 +473,7 @@ impl Core {
             let message = bincode::serialize(&m)
                 .expect(format!("Failed to serialize message {:?}", m).as_str());
             let m_bytes = Bytes::from(message);
-            self.qc_sender.send(address, m_bytes).await;
+            let _ = self.network.send(address, m_bytes).await;
             // Note the time that we served this peer so that we can rate-limit it.
             self.qc_syncs.insert(recipient.clone(), Instant::now());
         }
@@ -1526,6 +1515,12 @@ impl Core {
         loop {
             let result = tokio::select! {
                 biased;
+                Some(sends) = self.rx_proposal_net.recv() => {
+                    for (addr, bytes, label) in sends {
+                        let _ = self.network.send_with_label(addr, bytes, Some(label)).await;
+                    }
+                    Ok(())
+                },
                 Some(result) = self.rx_nqc_verify.recv() => {
                     if result.ok {
                         let qc = result.qc;

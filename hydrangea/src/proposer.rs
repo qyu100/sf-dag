@@ -8,10 +8,10 @@ use bytes::Bytes;
 use config::Committee;
 use crypto::{Digest, Hash as _, PublicKey, SignatureService};
 use log::{debug, info};
-use network::{CancelHandler, ReliableSender};
 use primary::Certificate;
 use rayon::prelude::*;
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::time::Instant as StdInstant;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::time::{sleep, Duration, Instant};
@@ -83,7 +83,7 @@ pub struct Proposer {
     name: PublicKey,
     consensus_only: bool,
     committee: Committee,
-    in_progress: HashMap<Round, Vec<CancelHandler>>,
+    in_progress: HashMap<Round, ()>,
     last_proposed: Block,
     max_block_delay: u64,
     header_size: usize,
@@ -95,7 +95,7 @@ pub struct Proposer {
     rx_message: Receiver<ProposerMessage>,
     signature_service: SignatureService,
     tx_proposer_core: Sender<ProposalMessage>,
-    network: ReliableSender,
+    tx_proposal_net: Sender<Vec<(SocketAddr, Bytes, String)>>,
     proposal_request: Option<ProposalTrigger>,
     buffer: Vec<Transaction>,
     tx_phase1: Sender<Phase1Result>,
@@ -127,6 +127,7 @@ impl Proposer {
         rx_mempool: Receiver<Certificate>,
         rx_message: Receiver<ProposerMessage>,
         tx_proposer_core: Sender<ProposalMessage>,
+        tx_proposal_net: Sender<Vec<(SocketAddr, Bytes, String)>>,
     ) {
         tokio::spawn(async move {
             let (tx_phase1, rx_phase1) = channel(8);
@@ -148,7 +149,7 @@ impl Proposer {
                 rx_mempool,
                 rx_message,
                 tx_proposer_core,
-                network: ReliableSender::new(),
+                tx_proposal_net,
                 proposal_request: None,
                 buffer: Vec::new(),
                 tx_phase1,
@@ -193,7 +194,7 @@ impl Proposer {
             .map(|(name, x)| (name, x.consensus_to_consensus))
             .collect();
 
-        let mut handles = Vec::new();
+        let mut sends = Vec::new();
         for (recipient, message) in proposals {
             if recipient == self.name {
                 continue;
@@ -201,38 +202,20 @@ impl Proposer {
             let Some(address) = peers.get(&recipient).cloned() else {
                 continue;
             };
-            debug!(
-                "Proposing to {}. Proposal size is {}B",
-                recipient,
-                message.len()
-            );
-            let bytes = message.len();
             let label = format!(
                 "proposal,node={},round={},digest={}",
                 self.name, round, digest
             );
-            let enqueue_start = Instant::now();
-            let handle = self
-                .network
-                .send_with_label(address, message, Some(label.clone()))
-                .await;
-            debug!(
-                "TIMELINE event=proposal_remote_enqueued label={} recipient={} address={} bytes={} enqueue_ms={}",
-                label,
-                recipient,
-                address,
-                bytes,
-                enqueue_start.elapsed().as_millis()
-            );
-            handles.push(handle);
+            sends.push((address, message, label));
         }
         info!(
             "TIMING proposal_send round={} remotes={} enqueue_ms={}",
             round,
-            handles.len(),
+            sends.len(),
             send_start.elapsed().as_millis()
         );
-        self.in_progress.insert(round, handles);
+        self.in_progress.insert(round, ());
+        let _ = self.tx_proposal_net.send(sends).await;
     }
 
     fn record_proposal(&mut self, b: Block) {

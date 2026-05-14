@@ -114,9 +114,19 @@ impl ReliableSender {
         addresses: Vec<SocketAddr>,
         data: Bytes,
     ) -> Vec<CancelHandler> {
+        self.broadcast_with_label(addresses, data, None).await
+    }
+
+    /// Broadcast with an optional label for timing logs.
+    pub async fn broadcast_with_label(
+        &mut self,
+        addresses: Vec<SocketAddr>,
+        data: Bytes,
+        label: Option<String>,
+    ) -> Vec<CancelHandler> {
         let mut handlers = Vec::new();
         for address in addresses {
-            let handler = self.send(address, data.clone()).await;
+            let handler = self.send_with_label(address, data.clone(), label.clone()).await;
             handlers.push(handler);
         }
 
@@ -244,11 +254,6 @@ impl Connection {
         let error = 'connection: loop {
             // Try to send all messages of the buffer.
             while let Some((data, label, enqueued_at, handler)) = self.buffer.pop_front() {
-                // Skip messages that have been cancelled.
-                if handler.is_closed() {
-                    continue;
-                }
-
                 // TODO: REMOVE. Benchmarking only.
                 // sleep(Duration::from_millis(1)).await;
                 // debug!("Sending Proposal to {:?}. Size is {}", peer_addr, data.len());

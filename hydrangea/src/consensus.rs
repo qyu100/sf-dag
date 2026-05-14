@@ -80,6 +80,7 @@ impl Consensus {
         // NOTE: This log entry is used to compute performance.
         parameters.log(&committee);
 
+        let (tx_proposal_net, rx_proposal_net) = channel(CHANNEL_CAPACITY);
         let (tx_consensus, rx_consensus) = channel(CHANNEL_CAPACITY);
         let (tx_proposer_core, rx_proposer_core) = channel(CHANNEL_CAPACITY);
         let (tx_sync_core, rx_sync_core) = channel(CHANNEL_CAPACITY);
@@ -145,6 +146,7 @@ impl Consensus {
             tx_core_proposer,
             tx_commit,
             tx_output,
+            rx_proposal_net,
         );
 
         if !parameters.consensus_only {
@@ -166,6 +168,7 @@ impl Consensus {
             rx_mempool,
             /* rx_message */ rx_core_proposer,
             tx_proposer_core,
+            tx_proposal_net,
         );
 
         // Spawn the helper module.
