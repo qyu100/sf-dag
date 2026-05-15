@@ -88,9 +88,6 @@ pub struct Core {
     gc_round: Round,
     /// The authors of the last voted headers.
     last_voted: HashMap<Round, HashSet<PublicKey>>,
-    /// Headers waiting for optimistic echo gating: key is required certified round (r-2),
-    /// value is header ids that can be echoed once that certificate exists.
-    pending_echo_headers: HashMap<Round, HashSet<Digest>>,
     /// For storing info of header infos in processing
     processing_header_infos: HashMap<Digest, HeaderInfo>,
     /// For storing proof of header infos in processing
@@ -184,7 +181,6 @@ impl Core {
                 tx_consensus_header_msg,
                 gc_round: 0,
                 last_voted: HashMap::with_capacity(2 * gc_depth as usize),
-                pending_echo_headers: HashMap::new(),
                 processing_header_infos: HashMap::new(),
                 processing_header_proofs: HashMap::new(),
                 processing_echo_aggregators: HashMap::new(),
@@ -268,7 +264,6 @@ impl Core {
             tx_consensus_header_msg,
             gc_round: 0,
             last_voted: HashMap::with_capacity(2 * gc_depth as usize),
-            pending_echo_headers: HashMap::new(),
             processing_header_infos: HashMap::new(),
             processing_header_proofs: HashMap::new(),
             processing_echo_aggregators: HashMap::new(),
@@ -749,8 +744,7 @@ impl Core {
             .await
             .expect("Failed to send parent candidate to proposer");
 
-        // Optimistic echo is gated by certificate(r-2) to avoid cascading optimistic failures.
-        self.maybe_echo_or_defer(header_info_with_proof).await?;
+        self.send_echo(header_info_with_proof).await?;
 
         let hid = header_info_with_proof.id;
         let bytes = bincode::serialize(header_info_with_proof).expect("Failed to serialize header");
@@ -815,8 +809,7 @@ impl Core {
             .await
             .expect("Failed to send parent candidate to proposer");
 
-        // Optimistic echo is gated by certificate(r-2) to avoid cascading optimistic failures.
-        self.maybe_echo_or_defer(header_info_with_proof).await?;
+        self.send_echo(header_info_with_proof).await?;
 
         let hid = header_info_with_proof.id;
         let bytes = bincode::serialize(header_info_with_proof).expect("Failed to serialize header");
@@ -840,27 +833,8 @@ impl Core {
         Ok(())
     }
 
-    /// Send optimistic echo immediately if gating is satisfied, otherwise defer until
-    /// certificate(round-2) is formed.
-    async fn maybe_echo_or_defer(&mut self, header_info_with_proof: &HeaderInfoWithProof) -> DagResult<()> {
+    async fn send_echo(&mut self, header_info_with_proof: &HeaderInfoWithProof) -> DagResult<()> {
         let round = header_info_with_proof.round;
-
-        if round > 2 {
-            let required_cert_round = round - 2;
-            if !self.certificates.contains_key(&required_cert_round) {
-                self.pending_echo_headers
-                    .entry(required_cert_round)
-                    .or_insert_with(HashSet::new)
-                    .insert(header_info_with_proof.id);
-                debug!(
-                    "Deferring echo for header {:?} at round {}: waiting for certificate round {}",
-                    header_info_with_proof.id,
-                    round,
-                    required_cert_round
-                );
-                return Ok(());
-            }
-        }
 
         if self
             .last_voted
@@ -887,22 +861,6 @@ impl Core {
             self.process_echo_optimized(echo)
                 .await
                 .expect("Failed to process our own echo");
-        }
-
-        Ok(())
-    }
-
-    /// If some headers were waiting for `certified_round == r-2`, release their deferred echoes now.
-    async fn release_deferred_echoes(&mut self, certified_round: Round) -> DagResult<()> {
-        let Some(ids) = self.pending_echo_headers.remove(&certified_round) else {
-            return Ok(());
-        };
-
-        for id in ids {
-            let Some(header_info_with_proof) = self.processing_header_proofs.get(&id).cloned() else {
-                continue;
-            };
-            self.maybe_echo_or_defer(&header_info_with_proof).await?;
         }
 
         Ok(())
@@ -1151,6 +1109,7 @@ impl Core {
             return Err(DagError::ProofConstructionFailed);
         }
 
+        let t_finalize = Instant::now();
         let (header_id, round, origin) = match self.processing_header_proofs.get(&result.id) {
             Some(h) => (h.id, h.round, h.author),
             None => {
@@ -1160,7 +1119,6 @@ impl Core {
             }
         };
 
-        let t_finalize = Instant::now();
         self.finalize_reconstruction_optimized(header_id, round, origin).await?;
         println!("    [handle_reconstruction_result] finalize={:?}", t_finalize.elapsed());
         Ok(())
@@ -1182,10 +1140,6 @@ impl Core {
         }
         // debug!("deliver_certificate time: {:?}", t_deliver.elapsed());
 
-        if self.pending_commit_rounds.contains(&certificate.round) {
-            self.commit(certificate.round).await?;
-        }
-        
         // Store the certificate.
         // let t_store = Instant::now();
         // let bytes = bincode::serialize(&certificate).expect("Failed to serialize certificate");
@@ -1194,7 +1148,7 @@ impl Core {
         // debug!("store certificate time: {:?}", t_store.elapsed());
 
         self.certificates.entry(certificate.round).or_insert(certificate.clone());
-        self.release_deferred_echoes(certificate.round).await?;
+        self.retry_pending_commits().await?;
 
         let decide = Decide::new(certificate.header_id, certificate.round, &certificate.origin, &self.name).await;
 
@@ -1234,10 +1188,6 @@ impl Core {
             return Ok(());
         }
 
-        if self.pending_commit_rounds.contains(&certificate.round) {
-            self.commit(certificate.round).await?;
-        }
-
         // Extract small Copy/Clone-cheap fields before moving the certificate.
         let header_id = certificate.header_id;
         let round = certificate.round;
@@ -1245,7 +1195,7 @@ impl Core {
 
         // Store in local map — move certificate in (no extra clone).
         self.certificates.entry(round).or_insert(certificate);
-        self.release_deferred_echoes(round).await?;
+        self.retry_pending_commits().await?;
 
         // 4a: Build decide from the extracted small fields.
         let decide = Decide::new(header_id, round, &origin, &self.name).await;
@@ -1289,12 +1239,31 @@ impl Core {
         Ok(())
     }
 
+    async fn retry_pending_commits(&mut self) -> DagResult<()> {
+        let mut rounds: Vec<Round> = self.pending_commit_rounds.iter().copied().collect();
+        rounds.sort_unstable();
+
+        for round in rounds {
+            self.pending_commit_rounds.remove(&round);
+            self.commit(round).await?;
+        }
+
+        Ok(())
+    }
+
     async fn commit(&mut self, round: Round) -> DagResult<()> {
         if self.last_committed_round >= round{
             return Ok(());
         }
 
-        // Parent has been put in self.certificates.
+        for r in self.last_committed_round + 1..=round {
+            if !self.certificates.contains_key(&r) {
+                self.pending_commit_rounds.insert(round);
+                return Ok(());
+            }
+        }
+
+        // All previous certificates are available locally.
         let certificate = match self.certificates.get(&round) {
             Some(c) => c.clone(),
             None => {
@@ -1443,7 +1412,6 @@ impl Core {
                     .retain(|_, h| &h.round >= &gc_round);
                 self.processing_header_proofs
                     .retain(|_, h| &h.round >= &gc_round);
-                self.pending_echo_headers.retain(|k, _| k >= &gc_round);
                 self.cancel_handlers.retain(|k, _| k >= &gc_round);
                 // let _ = self.synchronizer.garbage_collect(gc_round).await;
                 self.gc_round = gc_round;
@@ -1459,7 +1427,7 @@ mod core_bench {
     use crate::coding::Coding;
     use crate::header_waiter::WaiterMessage;
     use crate::merkle::MerkleTree;
-    use crate::messages::{Certificate, Echo, Header, HeaderInfo, HeaderInfoWithProof, Timeout};
+    use crate::messages::{Certificate, Echo, Header, HeaderInfo, HeaderInfoWithProof, ProposerParent, Timeout};
     use crate::primary::{PrimaryMessage, Round};
     use crate::synchronizer::Synchronizer;
     use config::{Authority, Committee, PrimaryAddresses};
@@ -1508,7 +1476,7 @@ mod core_bench {
     #[allow(dead_code)]
     struct CoreSinks {
         rx_consensus: tokio::sync::mpsc::Receiver<Certificate>,
-        rx_proposer_out: tokio::sync::mpsc::Receiver<Certificate>,
+        rx_proposer_out: tokio::sync::mpsc::Receiver<ProposerParent>,
         rx_timeout_cert: tokio::sync::mpsc::Receiver<(TimeoutCert, Round)>,
         rx_consensus_header_msg: tokio::sync::mpsc::Receiver<ConsensusMessage>,
     }

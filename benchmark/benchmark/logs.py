@@ -314,8 +314,8 @@ class LogParser:
                 f' Consensus BLPS: {round(blps_first):,} Block/s\n'
                 f' Consensus TPS: {round(consensus_tps):,} tx/s\n'
                 f' Consensus latency: {round(consensus_latency):,} ms\n'
-                f' Consensus leader latency: {round(leader_consensus_latency):,} ms\n'
-                f' Consensus non leader latency: {round(non_leader_consensus_latency):,} ms\n'
+                # f' Consensus leader latency: {round(leader_consensus_latency):,} ms\n'
+                # f' Consensus non leader latency: {round(non_leader_consensus_latency):,} ms\n'
                 '-----------------------------------------\n'
             )
         else:
