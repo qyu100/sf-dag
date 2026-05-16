@@ -180,6 +180,16 @@ impl Proposer {
             );
             sends.push((address, message, label));
         }
+        let total_wire_bytes: usize = sends.iter().map(|(_, message, _)| message.len()).sum();
+        info!(
+            "BENCH event=proposal_send protocol=hydrangea node={} round={} digest={} remotes={} total_wire_bytes={} enqueue_ms={}",
+            self.name,
+            round,
+            digest,
+            sends.len(),
+            total_wire_bytes,
+            send_start.elapsed().as_millis()
+        );
         debug!(
             "TIMING proposal_send round={} remotes={} enqueue_ms={}",
             round,
@@ -194,12 +204,14 @@ impl Proposer {
         debug!("Created {:?}", b);
         info!("Created {}", b.digest());
         info!("Header {} contains {} B", b.digest(), b.payload_len);
-        debug!(
-            "TIMELINE event=block_created node={} author={} round={} digest={} payload_bytes={}",
+        info!(
+            "BENCH event=created protocol=hydrangea node={} author={} round={} digest={} parent={} payload_root={} payload_bytes={}",
             self.name,
             b.author,
             b.round,
             b.digest(),
+            b.parent,
+            b.payload_root,
             b.payload_len
         );
         self.last_proposed = b;
@@ -229,15 +241,16 @@ impl Proposer {
             let encode_blocking_start = StdInstant::now();
 
             let payload_start = StdInstant::now();
+            let logical_payload_len: usize = payload.iter().map(|tx| tx.len()).sum();
             let payload_bytes =
                 bincode::serialize(&payload).expect("Failed to serialize payload");
-            let payload_len = payload_bytes.len();
+            let serialized_payload_len = payload_bytes.len();
             let payload_ms = payload_start.elapsed().as_millis();
 
             let encode_start = StdInstant::now();
             let coding = Coding::new(data_shards, parity_shards);
             assert_eq!(coding.total_shard_count(), total_shards);
-            let mut shard_len = (payload_len + data_shards - 1) / data_shards;
+            let mut shard_len = (serialized_payload_len + data_shards - 1) / data_shards;
             if shard_len == 0 {
                 shard_len = 1;
             }
@@ -266,7 +279,7 @@ impl Proposer {
                 trigger,
                 encoded,
                 shard_len,
-                payload_len,
+                payload_len: logical_payload_len,
                 merkle_tree,
                 payload_ms,
                 encode_ms,
@@ -369,8 +382,8 @@ impl Proposer {
     async fn handle_phase2_result(&mut self, p2: Phase2Result) {
         let round = p2.round;
         let digest = p2.block.digest();
-        debug!(
-            "TIMELINE event=proposal_messages_ready node={} author={} round={} digest={} remotes={} proof_blocking_ms={}",
+        info!(
+            "BENCH event=proposal_ready protocol=hydrangea node={} author={} round={} digest={} remotes={} proof_blocking_ms={}",
             self.name,
             p2.block.author,
             round,

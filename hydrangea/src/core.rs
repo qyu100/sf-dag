@@ -585,14 +585,16 @@ impl Core {
         while let Some(committing) = to_commit.pop() {
             // This log is required for generating benchmark outputs.
             debug!("Committed {:?}", committing);
-            debug!(
-                "TIMELINE event=committed node={} author={} round={} digest={} payload_root={} payload_bytes={}",
+            info!(
+                "BENCH event=committed protocol=hydrangea node={} author={} round={} digest={} parent={} payload_root={} payload_bytes={} role={}",
                 self.name,
                 committing.author,
                 committing.round,
                 committing.digest(),
+                committing.parent,
                 committing.payload_root,
-                committing.payload_len
+                committing.payload_len,
+                if committing.author == self.name { "leader" } else { "non_leader" }
             );
             if committing.author == self.name {
                 info!("Committed {} Leader", committing.digest());
@@ -897,9 +899,9 @@ impl Core {
                             qc.round,
                             aggregate_start.elapsed().as_millis()
                         );
-                        debug!(
-                            "TIMELINE event=cqc_formed node={} round={} digest={} payload_root={}",
-                            self.name, qc.round, qc.blk_hash, qc.payload_root
+                        info!(
+                            "BENCH event=cqc_formed protocol=hydrangea node={} round={} digest={} payload_root={} aggregate_ms={}",
+                            self.name, qc.round, qc.blk_hash, qc.payload_root, aggregate_start.elapsed().as_millis()
                         );
                         debug!("Assembled {:?}", qc);
                         self.attach_block_to_qc(&mut qc);
@@ -911,9 +913,9 @@ impl Core {
                     if let Some((mut qc, shards)) = self.aggregator.add_normal_vote(vote.clone())? {
                         let aggregate_ms = aggregate_start.elapsed().as_millis();
                         debug!("Assembled {:?}", qc);
-                        debug!(
-                            "TIMELINE event=nqc_formed node={} round={} digest={} payload_root={}",
-                            self.name, qc.round, qc.blk_hash, qc.payload_root
+                        info!(
+                            "BENCH event=nqc_formed protocol=hydrangea node={} round={} digest={} payload_root={} aggregate_ms={}",
+                            self.name, qc.round, qc.blk_hash, qc.payload_root, aggregate_ms
                         );
                         let key = Self::qc_availability_key(&qc);
                         if self.started_nqc_verify.insert(key) {
@@ -1234,8 +1236,8 @@ impl Core {
             // Mark as verified immediately so maybe_send_commit_vote fires without delay.
             let key = Self::qc_availability_key(qc);
             if self.started_nqc_verify.insert(key.clone()) {
-                debug!(
-                    "TIMELINE event=availability_verified node={} round={} digest={} payload_root={}",
+                info!(
+                    "BENCH event=availability_verified protocol=hydrangea node={} round={} digest={} payload_root={} aggregate_ms=0 bls_verify_ms=0 reconstruct_ms=0 source=qc_sync",
                     self.name, qc.round, qc.blk_hash, qc.payload_root
                 );
                 self.verified_normal_qcs.insert(key);
@@ -1407,12 +1409,13 @@ impl Core {
 
     async fn process_normal_proposal(&mut self, p: NormalProposal) -> ConsensusResult<()> {
         debug!("Received Normal Proposal {:?}", p);
-        debug!(
-            "TIMELINE event=proposal_received node={} author={} round={} digest={} payload_root={} payload_bytes={}",
+        info!(
+            "BENCH event=proposal_received protocol=hydrangea node={} author={} round={} digest={} parent={} payload_root={} payload_bytes={}",
             self.name,
             p.block.author,
             p.block.round,
             p.block.digest(),
+            p.block.parent,
             p.block.payload_root,
             p.block.payload_len
         );
@@ -1559,9 +1562,9 @@ impl Core {
                             "TIMING nqc_verified round={} aggregate_ms={} bls_verify_ms={} reconstruct_ms={}",
                             qc.round, result.aggregate_ms, result.bls_verify_ms, result.reconstruct_ms
                         );
-                        debug!(
-                            "TIMELINE event=availability_verified node={} round={} digest={} payload_root={}",
-                            self.name, qc.round, qc.blk_hash, qc.payload_root
+                        info!(
+                            "BENCH event=availability_verified protocol=hydrangea node={} round={} digest={} payload_root={} aggregate_ms={} bls_verify_ms={} reconstruct_ms={} source=local_nqc",
+                            self.name, qc.round, qc.blk_hash, qc.payload_root, result.aggregate_ms, result.bls_verify_ms, result.reconstruct_ms
                         );
                         self.verified_normal_qcs.insert(Self::qc_availability_key(&qc));
                         self.maybe_send_commit_vote(&qc).await
