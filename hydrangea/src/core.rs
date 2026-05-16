@@ -99,6 +99,8 @@ struct NqcVerifyResult {
     qc: QC,
     ok: bool,
     aggregate_ms: u128,
+    bls_verify_ms: u128,
+    reconstruct_ms: u128,
 }
 
 struct AvailabilityTiming {
@@ -804,7 +806,7 @@ impl Core {
             VoteType::Normal => "nv_sent",
             VoteType::Commit => "cv_sent",
         };
-        info!(
+        debug!(
             "TIMELINE event={} node={} round={} digest={} payload_root={}",
             vote_event, self.name, vote.round, vote.blk_hash, vote.payload_root
         );
@@ -815,7 +817,7 @@ impl Core {
 
         let broadcast_start = Instant::now();
         let broadcast_stats = self.broadcast_vote_ref(&vote).await;
-        info!(
+        debug!(
             "TIMING vote_send kind={} round={} bytes={} peers={} sign_ms={} local_handle_ms={} address_ms={} serialize_ms={} enqueue_ms={} broadcast_total_ms={} total_ms={}",
             t,
             r,
@@ -890,12 +892,12 @@ impl Core {
                 VoteType::Commit => {
                     let aggregate_start = Instant::now();
                     if let Some(mut qc) = self.aggregator.add_commit_vote(vote.clone())? {
-                        info!(
+                        debug!(
                             "TIMING cqc_formed round={} aggregate_ms={}",
                             qc.round,
                             aggregate_start.elapsed().as_millis()
                         );
-                        info!(
+                        debug!(
                             "TIMELINE event=cqc_formed node={} round={} digest={} payload_root={}",
                             self.name, qc.round, qc.blk_hash, qc.payload_root
                         );
@@ -909,18 +911,17 @@ impl Core {
                     if let Some((mut qc, shards)) = self.aggregator.add_normal_vote(vote.clone())? {
                         let aggregate_ms = aggregate_start.elapsed().as_millis();
                         debug!("Assembled {:?}", qc);
-                        info!(
+                        debug!(
                             "TIMELINE event=nqc_formed node={} round={} digest={} payload_root={}",
                             self.name, qc.round, qc.blk_hash, qc.payload_root
                         );
                         let key = Self::qc_availability_key(&qc);
                         if self.started_nqc_verify.insert(key) {
-                            // Vote accumulation path: verify the aggregate BLS signature before
-                            // sending a commit vote. RS check runs separately in background.
-                            self.start_nqc_verification(qc.clone(), aggregate_ms);
-                            // if !shards.is_empty() {
-                            //     self.spawn_availability_check(qc.payload_root.clone(), shards);
-                            // }
+                            // Vote accumulation path: verify both the aggregate BLS signature
+                            // and that the collected shards interpolate to the committed payload
+                            // root (verify_interpolation per the protocol spec) before sending a
+                            // commit vote.
+                            self.start_nqc_verification(qc.clone(), shards, aggregate_ms);
                         }
                         self.attach_block_to_qc(&mut qc);
                         self.handle_qc(&qc).await?;
@@ -1155,38 +1156,68 @@ impl Core {
         .map_err(|_| ConsensusError::ProofConstructionFailed)?
     }
 
-    // BLS aggregate verify for QCs assembled via vote accumulation.
-    // Sends result to rx_nqc_verify; commit vote is sent there once ok.
-    fn start_nqc_verification(&self, qc: QC, aggregate_ms: u128) {
+    // NQC verification: BLS aggregate verify + RS reconstruction (verify_interpolation
+    // per the protocol spec). Sends result to rx_nqc_verify; commit vote is only sent
+    // once both checks pass.
+    fn start_nqc_verification(
+        &self,
+        qc: QC,
+        shards: Vec<Option<Box<[u8]>>>,
+        aggregate_ms: u128,
+    ) {
         let tx = self.tx_nqc_verify.clone();
         let committee = self.committee.clone();
-        tokio::task::spawn_blocking(move || {
-            let ok = qc.is_well_formed(&committee).is_ok();
-            let _ = tx.blocking_send(NqcVerifyResult { qc, ok, aggregate_ms });
-        });
-    }
-
-    // RS reconstruction in a background thread for consistency logging only.
-    fn spawn_availability_check(&self, payload_root: Digest, shards: Vec<Option<Box<[u8]>>>) {
-        let data_shards = (self.committee.n - 2 * self.committee.f) as usize;
-        let parity_shards = (2 * self.committee.f) as usize;
+        let payload_root = qc.payload_root.clone();
+        let data_shards = (committee.n - 2 * committee.f) as usize;
+        let parity_shards = (2 * committee.f) as usize;
         let rs_block_size = self.rs_block_size;
         let rs_block_threads = self.rs_block_threads;
         tokio::task::spawn_blocking(move || {
-            match check_availability_sync(
-                payload_root.clone(),
-                shards,
-                data_shards,
-                parity_shards,
-                rs_block_size,
-                rs_block_threads,
-            ) {
-                Ok(avail) => debug!(
-                    "TIMING nqc_availability_check payload_root={} reconstruct_ms={} merkle_ms={} total_ms={}",
-                    payload_root, avail.reconstruct_ms, avail.merkle_ms, avail.total_ms
-                ),
-                Err(e) => warn!("NQC availability check failed payload_root={}: {}", payload_root, e),
+            let bls_start = StdInstant::now();
+            let bls_ok = qc.is_well_formed(&committee).is_ok();
+            let bls_verify_ms = bls_start.elapsed().as_millis();
+            if !bls_ok {
+                let _ = tx.blocking_send(NqcVerifyResult {
+                    qc,
+                    ok: false,
+                    aggregate_ms,
+                    bls_verify_ms,
+                    reconstruct_ms: 0,
+                });
+                return;
             }
+
+            let recon_start = StdInstant::now();
+            let rs_ok = if shards.is_empty() {
+                true
+            } else {
+                match check_availability_sync(
+                    payload_root.clone(),
+                    shards,
+                    data_shards,
+                    parity_shards,
+                    rs_block_size,
+                    rs_block_threads,
+                ) {
+                    Ok(_) => true,
+                    Err(e) => {
+                        warn!(
+                            "NQC availability check failed payload_root={}: {}",
+                            payload_root, e
+                        );
+                        false
+                    }
+                }
+            };
+            let reconstruct_ms = recon_start.elapsed().as_millis();
+
+            let _ = tx.blocking_send(NqcVerifyResult {
+                qc,
+                ok: rs_ok,
+                aggregate_ms,
+                bls_verify_ms,
+                reconstruct_ms,
+            });
         });
     }
 
@@ -1376,7 +1407,7 @@ impl Core {
 
     async fn process_normal_proposal(&mut self, p: NormalProposal) -> ConsensusResult<()> {
         debug!("Received Normal Proposal {:?}", p);
-        info!(
+        debug!(
             "TIMELINE event=proposal_received node={} author={} round={} digest={} payload_root={} payload_bytes={}",
             self.name,
             p.block.author,
@@ -1524,9 +1555,9 @@ impl Core {
                 Some(result) = self.rx_nqc_verify.recv() => {
                     if result.ok {
                         let qc = result.qc;
-                        info!(
-                            "TIMING nqc_formed round={} bls_verify_ms={}",
-                            qc.round, result.aggregate_ms
+                        debug!(
+                            "TIMING nqc_verified round={} aggregate_ms={} bls_verify_ms={} reconstruct_ms={}",
+                            qc.round, result.aggregate_ms, result.bls_verify_ms, result.reconstruct_ms
                         );
                         debug!(
                             "TIMELINE event=availability_verified node={} round={} digest={} payload_root={}",

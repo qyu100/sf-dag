@@ -193,7 +193,7 @@ impl Connection {
                 return;
             }
         };
-        info!("Outgoing connection established with {}", self.address);
+        debug!("Outgoing connection established with {}", self.address);
 
         let mut pending_replies = VecDeque::new();
 

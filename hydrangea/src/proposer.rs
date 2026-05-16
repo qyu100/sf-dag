@@ -66,19 +66,6 @@ struct Phase2Result {
     encode_blocking_ms: u128,
 }
 
-// Speculatively pre-encoded payload: trigger-independent fields of Phase1Result.
-// parent/round/trigger are not known yet; they are attached when the trigger arrives.
-struct SpeculativeEncoding {
-    encoded: Vec<u8>,
-    shard_len: usize,
-    payload_len: usize,
-    merkle_tree: MerkleTree,
-    payload_ms: u128,
-    encode_ms: u128,
-    merkle_ms: u128,
-    encode_blocking_ms: u128,
-}
-
 pub struct Proposer {
     name: PublicKey,
     consensus_only: bool,
@@ -102,15 +89,6 @@ pub struct Proposer {
     rx_phase1: Receiver<Phase1Result>,
     tx_phase2: Sender<Phase2Result>,
     rx_phase2: Receiver<Phase2Result>,
-    // Speculative pre-encoding state.
-    // start_speculative_phase1() fires RS encoding immediately after proposals are sent,
-    // overlapping with the voting period.  When the trigger for the next round arrives,
-    // the encoded payload is already ready so the proposer skips the blocking Phase 1 wait.
-    tx_speculative: Sender<SpeculativeEncoding>,
-    rx_speculative: Receiver<SpeculativeEncoding>,
-    speculative_payload: Option<SpeculativeEncoding>, // encoded but trigger not yet received
-    pending_trigger: Option<ProposalTrigger>,         // trigger arrived before encoding done
-    speculative_in_flight: bool,
 }
 
 impl Proposer {
@@ -132,7 +110,6 @@ impl Proposer {
         tokio::spawn(async move {
             let (tx_phase1, rx_phase1) = channel(8);
             let (tx_phase2, rx_phase2) = channel(8);
-            let (tx_speculative, rx_speculative) = channel(4);
             Self {
                 name,
                 consensus_only,
@@ -156,11 +133,6 @@ impl Proposer {
                 rx_phase1,
                 tx_phase2,
                 rx_phase2,
-                tx_speculative,
-                rx_speculative,
-                speculative_payload: None,
-                pending_trigger: None,
-                speculative_in_flight: false,
             }
             .run()
             .await;
@@ -208,7 +180,7 @@ impl Proposer {
             );
             sends.push((address, message, label));
         }
-        info!(
+        debug!(
             "TIMING proposal_send round={} remotes={} enqueue_ms={}",
             round,
             sends.len(),
@@ -242,21 +214,17 @@ impl Proposer {
         }
     }
 
-    // Starts RS encoding + Merkle tree construction speculatively (no trigger needed).
-    // Called immediately after proposals are sent so encoding overlaps with the voting period.
-    // When the trigger for the next round arrives, the encoded payload will already be ready.
-    fn start_speculative_phase1(&mut self) {
-        if self.speculative_in_flight || self.speculative_payload.is_some() {
-            return;
-        }
-        self.speculative_in_flight = true;
+    // Fires Phase 1 (RS encode + Merkle tree) in a background thread on trigger arrival.
+    // Encoding starts only after the trigger is known; the cost is on the critical path.
+    fn start_phase1(&mut self, trigger: ProposalTrigger) {
+        let (parent, round) = Self::trigger_parent_and_round(&trigger);
         let payload = self.get_payload();
         let data_shards = (self.committee.n - 2 * self.committee.f) as usize;
         let parity_shards = (2 * self.committee.f) as usize;
         let total_shards = self.committee.size();
         let rs_block_size = self.rs_block_size;
         let rs_block_threads = self.rs_block_threads;
-        let tx = self.tx_speculative.clone();
+        let tx = self.tx_phase1.clone();
         tokio::task::spawn_blocking(move || {
             let encode_blocking_start = StdInstant::now();
 
@@ -292,7 +260,10 @@ impl Proposer {
             );
             let merkle_ms = merkle_start.elapsed().as_millis();
 
-            let _ = tx.blocking_send(SpeculativeEncoding {
+            let _ = tx.blocking_send(Phase1Result {
+                round,
+                parent,
+                trigger,
                 encoded,
                 shard_len,
                 payload_len,
@@ -303,65 +274,6 @@ impl Proposer {
                 encode_blocking_ms: encode_blocking_start.elapsed().as_millis(),
             });
         });
-    }
-
-    // Attaches a trigger to a completed speculative encoding and sends to rx_phase1.
-    fn dispatch_phase1(&mut self, spec: SpeculativeEncoding, trigger: ProposalTrigger) {
-        let (parent, round) = Self::trigger_parent_and_round(&trigger);
-        let p1 = Phase1Result {
-            round,
-            parent,
-            trigger,
-            encoded: spec.encoded,
-            shard_len: spec.shard_len,
-            payload_len: spec.payload_len,
-            merkle_tree: spec.merkle_tree,
-            payload_ms: spec.payload_ms,
-            encode_ms: spec.encode_ms,
-            merkle_ms: spec.merkle_ms,
-            encode_blocking_ms: spec.encode_blocking_ms,
-        };
-        self.tx_phase1.try_send(p1).expect("tx_phase1 channel full");
-    }
-
-    // Fires Phase 1 (RS encode + Merkle tree) in a background thread; returns immediately.
-    // If a speculative encoding is already ready, uses it directly (zero blocking wait).
-    // If encoding is in flight, stores the trigger and pairs them in handle_speculative_result.
-    fn start_phase1(&mut self, trigger: ProposalTrigger) {
-        if let Some(spec) = self.speculative_payload.take() {
-            // Fast path: encoding already done, just attach the trigger.
-            debug!(
-                "TIMING speculative_phase1_hit round={}",
-                Self::trigger_parent_and_round(&trigger).1
-            );
-            self.dispatch_phase1(spec, trigger);
-            // Immediately start the next speculative encoding.
-            self.start_speculative_phase1();
-        } else {
-            // Encoding not ready yet: store trigger and wait for rx_speculative.
-            self.pending_trigger = Some(trigger);
-            if !self.speculative_in_flight {
-                // No speculation started (first round or after a gap): start one now.
-                self.start_speculative_phase1();
-            }
-        }
-    }
-
-    // Called when speculative encoding completes.
-    fn handle_speculative_result(&mut self, spec: SpeculativeEncoding) {
-        self.speculative_in_flight = false;
-        debug!(
-            "TIMING speculative_phase1_done encode_blocking_ms={}",
-            spec.encode_blocking_ms
-        );
-        if let Some(trigger) = self.pending_trigger.take() {
-            // Trigger was already waiting — pair immediately.
-            self.dispatch_phase1(spec, trigger);
-            self.start_speculative_phase1();
-        } else {
-            // Trigger not yet received — store for when it arrives.
-            self.speculative_payload = Some(spec);
-        }
     }
 
     // Signs the block (fast async), then fires Phase 2 (proof generation) in background.
@@ -466,7 +378,7 @@ impl Proposer {
             p2.remote.len(),
             p2.proof_blocking_ms
         );
-        info!(
+        debug!(
             "TIMING proposal_make round={} shard_len={} encode_ms={} proof_blocking_ms={}",
             round,
             p2.shard_len,
@@ -487,10 +399,6 @@ impl Proposer {
             "TIMING propose_done round={} local_send_ms={}",
             round, local_ms,
         );
-
-        // Proposals are out: start encoding the next block's payload speculatively so
-        // it is ready before the next trigger arrives.
-        self.start_speculative_phase1();
     }
 
     fn cleanup(&mut self, r: Round) {
@@ -504,7 +412,6 @@ impl Proposer {
         if self.consensus_only {
             loop {
                 tokio::select! {
-                    Some(spec) = self.rx_speculative.recv() => self.handle_speculative_result(spec),
                     Some(phase1) = self.rx_phase1.recv() => self.handle_phase1_result(phase1).await,
                     Some(phase2) = self.rx_phase2.recv() => self.handle_phase2_result(phase2).await,
                     Some(m) = self.rx_message.recv() => match m {

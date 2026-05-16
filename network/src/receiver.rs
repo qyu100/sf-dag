@@ -58,7 +58,7 @@ impl<Handler: MessageHandler> Receiver<Handler> {
                     continue;
                 }
             };
-            info!("Incoming connection established with {}", peer);
+            debug!("Incoming connection established with {}", peer);
             Self::spawn_runner(socket, peer, self.handler.clone()).await;
         }
     }

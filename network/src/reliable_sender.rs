@@ -200,7 +200,7 @@ impl Connection {
         loop {
             match TcpStream::connect(self.address).await {
                 Ok(stream) => {
-                    info!("Outgoing connection established with {}", self.address);
+                    debug!("Outgoing connection established with {}", self.address);
 
                     let _ = stream.set_nodelay(true);
                     // Reset the delay.

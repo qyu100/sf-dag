@@ -105,7 +105,7 @@ impl Consensus {
                 tx_helper,
             },
         );
-        info!(
+        debug!(
             "Node {} listening to consensus messages on {}",
             name, address
         );
@@ -259,7 +259,7 @@ impl MessageHandler for ConsensusReceiverHandler {
                 // Keep proposals off the shared consensus queue so large vote bursts do not
                 // delay the proposal-to-vote path.
                 let (author, round, digest, payload_bytes) = Self::proposal_metadata(&proposal);
-                info!(
+                debug!(
                     "TIMELINE event=proposal_frame_received node={} author={} round={} digest={} bytes={} payload_bytes={} deserialize_ms={} ack_ms={}",
                     self.name,
                     author,
@@ -355,7 +355,7 @@ impl ConsensusReceiverHandler {
         total_ms: u128,
     ) {
         if total_ms >= 10 || deserialize_ms >= 10 || core_send_ms >= 10 {
-            info!(
+            debug!(
                 "TIMING consensus_receive label={} bytes={} deserialize_ms={} ack_ms={} core_send_ms={} total_ms={}",
                 label, bytes, deserialize_ms, ack_ms, core_send_ms, total_ms
             );
