@@ -168,7 +168,10 @@ impl QCMaker {
                 let ms_since_first = (now - first_ts).as_millis();
                 let validity_threshold = committee.f + 1;
                 let ready_threshold_val = committee.n - committee.f;
-                if count == 1 || count == validity_threshold as usize || count == ready_threshold_val as usize {
+                if count == 1
+                    || count == validity_threshold as usize
+                    || count == ready_threshold_val as usize
+                {
                     debug!(
                         "TIMING nv_milestone round={} count={} proof_ms={} ms_since_first_nv={}",
                         vote.round, count, proof_ms, ms_since_first

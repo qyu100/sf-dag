@@ -38,10 +38,19 @@ impl Header {
     }
 }
 
+pub fn payload_hash(payload: &[Transaction]) -> Digest {
+    let mut hasher = Sha512::new();
+    for tx in payload {
+        hasher.update(tx);
+    }
+    Digest(hasher.finalize().as_slice()[..32].try_into().unwrap())
+}
+
 #[derive(Serialize, Deserialize, Default, Clone)]
 pub struct Block {
     pub author: PublicKey,
     pub parent: Digest,
+    pub payload_hash: Digest,
     pub payload_root: Digest,
     pub payload_len: usize,
     pub round: Round,
@@ -52,6 +61,7 @@ impl Block {
     pub async fn new(
         author: PublicKey,
         parent: Digest,
+        payload_hash: Digest,
         payload_root: Digest,
         payload_len: usize,
         round: Round,
@@ -60,6 +70,7 @@ impl Block {
         let mut b = Block {
             author,
             parent,
+            payload_hash,
             payload_root,
             payload_len,
             round,
@@ -73,6 +84,7 @@ impl Block {
         Self {
             author: PublicKey::default(),
             parent: Digest::default(),
+            payload_hash: Digest::default(),
             payload_root: Digest::default(),
             payload_len: 0,
             round: 0,
@@ -101,7 +113,7 @@ impl Hash for Block {
         let mut hasher = Sha512::new();
         hasher.update(self.author.0);
         hasher.update(self.parent.clone());
-        hasher.update(&self.payload_root);
+        hasher.update(&self.payload_hash);
         hasher.update(self.payload_len.to_le_bytes());
         hasher.update(self.round.to_le_bytes());
 
@@ -127,6 +139,29 @@ impl fmt::Display for Block {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         write!(f, "CMB{}", self.round)
     }
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub struct ShardRequest {
+    pub block: Digest,
+    pub payload_root: Digest,
+    pub index: usize,
+    pub origin: PublicKey,
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub struct ShardResponse {
+    pub block: Digest,
+    pub payload_root: Digest,
+    pub proof: Proof,
+}
+
+pub fn shard_store_key(block: &Digest, payload_root: &Digest, index: usize) -> Vec<u8> {
+    let mut key = b"hydrangea-shard-v1".to_vec();
+    key.extend_from_slice(&block.0);
+    key.extend_from_slice(&payload_root.0);
+    key.extend_from_slice(&(index as u64).to_le_bytes());
+    key
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -415,40 +450,50 @@ impl QC {
 
     pub fn is_well_formed(&self, committee: &Committee) -> ConsensusResult<()> {
         if self.round == 0 {
-            Ok(())
-        } else {
-            // // Ensure the QC has a quorum.
-            // let mut weight = 0;
-            // let mut used = HashSet::new();
-            // for (name, _) in self.votes.iter() {
-            //     ensure!(!used.contains(name), ConsensusError::AuthorityReuse(*name));
-            //     let voting_rights = committee.stake(name);
-            //     ensure!(voting_rights > 0, ConsensusError::UnknownAuthority(*name));
-            //     used.insert(*name);
-            //     weight += voting_rights;
-            // }
-            // // TODO: Change to error log instead of panic.
-            // ensure!(
-            //     weight >= committee.quorum_threshold(),
-            //     ConsensusError::QCRequiresQuorum(self.round)
-            // );
-            let mut ids = Vec::new();
-
-            for idx in 0..committee.size() {
-                let x = idx / 128;
-                let chunk = self.votes.0[x];
-                let ridx = idx - x * 128;
-                if chunk & 1 << ridx != 0 {
-                    ids.push(idx);
-                }
-            }
-
-            let agg_pk = remove_pubkeys(&committee.combined_pubkey, ids, &committee.sorted_keys);
-
-            // Check the signatures.
-            SignatureShareG1::verify_batch(&self.digest().0, &agg_pk, &self.votes.1)
-                .map_err(ConsensusError::from)
+            return Ok(());
         }
+
+        let expected_chunks = (committee.size() + 127) / 128;
+        ensure!(
+            self.votes.0.len() >= expected_chunks,
+            ConsensusError::QCRequiresQuorum(self.round)
+        );
+
+        let mut ids_to_remove = Vec::new();
+        for idx in 0..committee.size() {
+            let x = idx / 128;
+            let bit = idx % 128;
+            if self.votes.0[x] & (1u128 << bit) != 0 {
+                ids_to_remove.push(idx);
+            }
+        }
+
+        let mut weight = 0;
+        for (name, authority) in &committee.authorities {
+            let signer_idx = committee
+                .sorted_keys
+                .binary_search(&authority.bls_pubkey_g2)
+                .map_err(|_| ConsensusError::UnknownAuthority(*name))?;
+            let x = signer_idx / 128;
+            let bit = signer_idx % 128;
+            if self.votes.0[x] & (1u128 << bit) == 0 {
+                weight += authority.stake;
+            }
+        }
+
+        ensure!(
+            weight >= committee.n - committee.f,
+            ConsensusError::QCRequiresQuorum(self.round)
+        );
+
+        let agg_pk = remove_pubkeys(
+            &committee.combined_pubkey,
+            ids_to_remove,
+            &committee.sorted_keys,
+        );
+
+        SignatureShareG1::verify_batch(&self.digest().0, &agg_pk, &self.votes.1)
+            .map_err(ConsensusError::from)
     }
 }
 

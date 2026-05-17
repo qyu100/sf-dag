@@ -2,7 +2,7 @@ use crate::coding::{shard_hashes, Coding};
 use crate::consensus::{ConsensusMessage, ProposalMessage, Round};
 use crate::merkle::MerkleTree;
 use crate::messages::{
-    Block, FallbackRecoveryProposal, NormalProposal, Transaction, QC, TC,
+    payload_hash, Block, FallbackRecoveryProposal, NormalProposal, Transaction, QC, TC,
 };
 use bytes::Bytes;
 use config::Committee;
@@ -37,12 +37,10 @@ enum ProposalTarget {
 
 // Result of Phase 1: RS encoding + Merkle tree construction.
 struct Phase1Result {
-    round: Round,
-    parent: Digest,
     trigger: ProposalTrigger,
+    block: Block,
     encoded: Vec<u8>,
     shard_len: usize,
-    payload_len: usize,
     merkle_tree: MerkleTree,
     payload_ms: u128,
     encode_ms: u128,
@@ -228,9 +226,23 @@ impl Proposer {
 
     // Fires Phase 1 (RS encode + Merkle tree) in a background thread on trigger arrival.
     // Encoding starts only after the trigger is known; the cost is on the critical path.
-    fn start_phase1(&mut self, trigger: ProposalTrigger) {
+    async fn start_phase1(&mut self, trigger: ProposalTrigger) {
         let (parent, round) = Self::trigger_parent_and_round(&trigger);
         let payload = self.get_payload();
+        let logical_payload_len: usize = payload.iter().map(|tx| tx.len()).sum();
+        let payload_hash = payload_hash(&payload);
+        let block = Block::new(
+            self.name,
+            parent,
+            payload_hash,
+            Digest::default(),
+            logical_payload_len,
+            round,
+            self.signature_service.clone(),
+        )
+        .await;
+        self.record_proposal(block.clone());
+
         let data_shards = (self.committee.n - 2 * self.committee.f) as usize;
         let parity_shards = (2 * self.committee.f) as usize;
         let total_shards = self.committee.size();
@@ -241,9 +253,7 @@ impl Proposer {
             let encode_blocking_start = StdInstant::now();
 
             let payload_start = StdInstant::now();
-            let logical_payload_len: usize = payload.iter().map(|tx| tx.len()).sum();
-            let payload_bytes =
-                bincode::serialize(&payload).expect("Failed to serialize payload");
+            let payload_bytes = bincode::serialize(&payload).expect("Failed to serialize payload");
             let serialized_payload_len = payload_bytes.len();
             let payload_ms = payload_start.elapsed().as_millis();
 
@@ -272,14 +282,14 @@ impl Proposer {
                 shard_hashes(&shard_options).expect("Failed to hash shards"),
             );
             let merkle_ms = merkle_start.elapsed().as_millis();
+            let mut block = block;
+            block.payload_root = merkle_tree.root_hash().clone();
 
             let _ = tx.blocking_send(Phase1Result {
-                round,
-                parent,
                 trigger,
+                block,
                 encoded,
                 shard_len,
-                payload_len: logical_payload_len,
                 merkle_tree,
                 payload_ms,
                 encode_ms,
@@ -289,21 +299,8 @@ impl Proposer {
         });
     }
 
-    // Signs the block (fast async), then fires Phase 2 (proof generation) in background.
+    // Fires Phase 2 (proof generation) once the payload root is available.
     async fn handle_phase1_result(&mut self, p1: Phase1Result) {
-        let sign_start = StdInstant::now();
-        let block = Block::new(
-            self.name,
-            p1.parent.clone(),
-            p1.merkle_tree.root_hash().clone(),
-            p1.payload_len,
-            p1.round,
-            self.signature_service.clone(),
-        )
-        .await;
-        let sign_ms = sign_start.elapsed().as_millis();
-        self.record_proposal(block.clone());
-
         let my_name = self.name;
         let mut recipients: Vec<PublicKey> = self.committee.authorities.keys().cloned().collect();
         recipients.sort_by_key(|pk| self.committee.id(pk));
@@ -312,11 +309,13 @@ impl Proposer {
         let encode_ms = p1.encode_ms;
         let merkle_ms = p1.merkle_ms;
         let encode_blocking_ms = p1.encode_blocking_ms;
-        let round = p1.round;
+        let round = p1.block.round;
         let shard_len = p1.shard_len;
         let encoded = p1.encoded;
         let merkle_tree = p1.merkle_tree;
         let trigger = p1.trigger;
+        let block = p1.block;
+        let sign_ms = 0;
 
         tokio::task::spawn_blocking(move || {
             let proof_blocking_start = StdInstant::now();
@@ -329,17 +328,15 @@ impl Proposer {
                         .proof_with_leaf(index, shard_refs[index])
                         .expect("Failed to build proof");
                     let proposal = match trigger.clone() {
-                        ProposalTrigger::QC(qc) => ProposalMessage::N(NormalProposal::new(
-                            block.clone(),
-                            qc,
-                            proof,
-                        )),
+                        ProposalTrigger::QC(qc) => {
+                            ProposalMessage::N(NormalProposal::new(block.clone(), qc, proof))
+                        }
                         ProposalTrigger::TC(tc) => ProposalMessage::F(
                             FallbackRecoveryProposal::new(block.clone(), tc, proof),
                         ),
-                        ProposalTrigger::Optimistic { qc, .. } => ProposalMessage::N(
-                            NormalProposal::new(block.clone(), qc, proof),
-                        ),
+                        ProposalTrigger::Optimistic { qc, .. } => {
+                            ProposalMessage::N(NormalProposal::new(block.clone(), qc, proof))
+                        }
                     };
                     if recipient == my_name {
                         ProposalTarget::Local(proposal)
@@ -393,10 +390,7 @@ impl Proposer {
         );
         debug!(
             "TIMING proposal_make round={} shard_len={} encode_ms={} proof_blocking_ms={}",
-            round,
-            p2.shard_len,
-            p2.encode_ms,
-            p2.proof_blocking_ms,
+            round, p2.shard_len, p2.encode_ms, p2.proof_blocking_ms,
         );
 
         let local_start = StdInstant::now();
@@ -428,7 +422,7 @@ impl Proposer {
                     Some(phase1) = self.rx_phase1.recv() => self.handle_phase1_result(phase1).await,
                     Some(phase2) = self.rx_phase2.recv() => self.handle_phase2_result(phase2).await,
                     Some(m) = self.rx_message.recv() => match m {
-                        ProposerMessage::Propose(trigger) => self.start_phase1(trigger),
+                        ProposerMessage::Propose(trigger) => self.start_phase1(trigger).await,
                         ProposerMessage::Cleanup(r) => self.cleanup(r),
                         ProposerMessage::Observed(_) => (),
                     },
@@ -446,9 +440,8 @@ impl Proposer {
                         info!("Block timer expired");
                     }
                     if let Some(trigger) = self.proposal_request.take() {
-                        self.start_phase1(trigger);
-                        let deadline =
-                            Instant::now() + Duration::from_millis(self.max_block_delay);
+                        self.start_phase1(trigger).await;
+                        let deadline = Instant::now() + Duration::from_millis(self.max_block_delay);
                         timer.as_mut().reset(deadline);
                     }
                 }

@@ -7,7 +7,8 @@ use crate::mempool::MempoolDriver;
 use crate::merkle::MerkleTree;
 use crate::merkle::Proof;
 use crate::messages::{
-    Block, FallbackRecoveryProposal, NormalProposal, Timeout, Vote, VoteType, QC, TC,
+    shard_store_key, Block, FallbackRecoveryProposal, NormalProposal, ShardRequest, ShardResponse,
+    Timeout, Vote, VoteType, QC, TC,
 };
 use crate::proposer::{ProposalTrigger, ProposerMessage};
 use crate::synchronizer::Synchronizer;
@@ -58,6 +59,10 @@ pub struct Core {
     // and up to two Optimistic Proposals.
     pending_proposals: HashMap<Round, Digest>,
     pending_proofs: HashMap<Digest, Proof>,
+    availability_proofs: HashMap<(Digest, Digest), Vec<Option<Proof>>>,
+    pending_availability_qcs: HashMap<(Round, Digest, Digest), QC>,
+    requested_shards: HashSet<(Digest, Digest, usize)>,
+    started_shard_verify: HashSet<(Round, Digest, Digest)>,
     network: ReliableSender,
     rx_proposal_net: Receiver<Vec<(SocketAddr, Bytes, String)>>,
     qc_syncs: HashMap<PublicKey, Instant>,
@@ -101,6 +106,7 @@ struct NqcVerifyResult {
     aggregate_ms: u128,
     bls_verify_ms: u128,
     reconstruct_ms: u128,
+    source: &'static str,
 }
 
 struct AvailabilityTiming {
@@ -133,7 +139,10 @@ fn check_availability_sync(
     let reconstruct_ms = reconstruct_start.elapsed().as_millis();
     let merkle_start = StdInstant::now();
     let mtree = MerkleTree::from_hashes(shard_hashes(&shards)?);
-    ensure!(mtree.root_hash() == &payload_root, ConsensusError::InvalidProof);
+    ensure!(
+        mtree.root_hash() == &payload_root,
+        ConsensusError::InvalidProof
+    );
     Ok(AvailabilityTiming {
         reconstruct_ms,
         merkle_ms: merkle_start.elapsed().as_millis(),
@@ -169,6 +178,10 @@ impl Core {
             let mut uncommitted_blocks = HashMap::new();
             let mut pending_proposals = HashMap::new();
             let pending_proofs = HashMap::new();
+            let availability_proofs = HashMap::new();
+            let pending_availability_qcs = HashMap::new();
+            let requested_shards = HashSet::new();
+            let started_shard_verify = HashSet::new();
             let mut uncommitted_qcs = HashMap::new();
             let genesis_block = Block::genesis();
             let genesis_qc = QC::genesis();
@@ -218,6 +231,10 @@ impl Core {
                 proposal_triggers_sent: HashSet::new(),
                 pending_proposals,
                 pending_proofs,
+                availability_proofs,
+                pending_availability_qcs,
+                requested_shards,
+                started_shard_verify,
                 uncommitted_blocks,
                 uncommitted_qcs,
                 verified_normal_qcs: HashSet::new(),
@@ -319,7 +336,7 @@ impl Core {
                     self.send_vote_bytes(&vote.kind, address, m_bytes, Some(label))
                         .await
                 }
-                ConsensusMessage::Timeout(_) => {
+                ConsensusMessage::Timeout(_) | ConsensusMessage::ShardRequest(_) => {
                     let _ = self.network.send(address, m_bytes).await;
                 }
                 _ => (),
@@ -334,10 +351,7 @@ impl Core {
         m_bytes: Bytes,
         label: Option<String>,
     ) {
-        let _ = self
-            .network
-            .send_with_label(address, m_bytes, label)
-            .await;
+        let _ = self.network.send_with_label(address, m_bytes, label).await;
     }
 
     fn vote_network_label(vote: &Vote) -> String {
@@ -345,6 +359,176 @@ impl Core {
             "vote,kind={},node={},round={},digest={},root={}",
             vote.kind, vote.author, vote.round, vote.blk_hash, vote.payload_root
         )
+    }
+
+    fn data_shard_count(&self) -> usize {
+        (self.committee.n - 2 * self.committee.f) as usize
+    }
+
+    fn availability_key(qc: &QC) -> (Round, Digest, Digest) {
+        (qc.round, qc.blk_hash.clone(), qc.payload_root.clone())
+    }
+
+    fn proof_key(block: &Digest, payload_root: &Digest) -> (Digest, Digest) {
+        (block.clone(), payload_root.clone())
+    }
+
+    async fn record_availability_proof(
+        &mut self,
+        block: Digest,
+        proof: Proof,
+    ) -> ConsensusResult<()> {
+        ensure!(
+            proof.index() < self.committee.size()
+                && !proof.value().is_empty()
+                && proof.validate(self.committee.size()),
+            ConsensusError::InvalidProof
+        );
+
+        let payload_root = proof.root_hash().clone();
+        let index = proof.index();
+        if index == self.committee.id(&self.name) as usize {
+            self.pending_proofs
+                .entry(block.clone())
+                .or_insert_with(|| proof.clone());
+        }
+
+        let key = Self::proof_key(&block, &payload_root);
+        let proofs = self
+            .availability_proofs
+            .entry(key)
+            .or_insert_with(|| vec![None; self.committee.size()]);
+        if proofs[index].is_none() {
+            proofs[index] = Some(proof.clone());
+        }
+
+        let store_key = shard_store_key(&block, &payload_root, index);
+        let value = bincode::serialize(&proof).expect("Failed to serialize shard proof");
+        let _ = self.store.write(store_key, value).await;
+        Ok(())
+    }
+
+    fn qc_signers(&self, qc: &QC) -> Vec<(PublicKey, usize)> {
+        let expected_chunks = (self.committee.size() + 127) / 128;
+        if qc.votes.0.len() < expected_chunks {
+            return Vec::new();
+        }
+
+        self.committee
+            .authorities
+            .iter()
+            .filter_map(|(name, authority)| {
+                let signer_idx = self
+                    .committee
+                    .sorted_keys
+                    .binary_search(&authority.bls_pubkey_g2)
+                    .ok()?;
+                let chunk = signer_idx / 128;
+                let bit = signer_idx % 128;
+                if qc.votes.0[chunk] & (1u128 << bit) == 0 {
+                    Some((*name, authority.id as usize))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    fn collected_shards(&self, block: &Digest, payload_root: &Digest) -> Vec<Option<Box<[u8]>>> {
+        let mut shards = vec![None; self.committee.size()];
+        if let Some(proofs) = self
+            .availability_proofs
+            .get(&Self::proof_key(block, payload_root))
+        {
+            for (idx, proof) in proofs.iter().enumerate() {
+                if let Some(proof) = proof {
+                    shards[idx] = Some(proof.clone().into_value());
+                }
+            }
+        }
+        shards
+    }
+
+    fn try_start_shard_recovery(&mut self, key: &(Round, Digest, Digest)) {
+        if self.started_shard_verify.contains(key) {
+            return;
+        }
+        let Some(qc) = self.pending_availability_qcs.get(key).cloned() else {
+            return;
+        };
+        let shards = self.collected_shards(&key.1, &key.2);
+        if shards.iter().filter(|shard| shard.is_some()).count() < self.data_shard_count() {
+            return;
+        }
+
+        self.started_shard_verify.insert(key.clone());
+        self.start_nqc_verification(qc, shards, 0, "shard_sync");
+    }
+
+    async fn request_availability_shards(&mut self, qc: &QC) -> ConsensusResult<()> {
+        let key = Self::availability_key(qc);
+        self.pending_availability_qcs
+            .entry(key.clone())
+            .or_insert_with(|| qc.clone());
+        self.try_start_shard_recovery(&key);
+        if self.started_shard_verify.contains(&key) {
+            return Ok(());
+        }
+
+        let proof_key = Self::proof_key(&qc.blk_hash, &qc.payload_root);
+        let signers = self.qc_signers(qc);
+        for (signer, shard_index) in signers {
+            if signer == self.name {
+                continue;
+            }
+            if self
+                .availability_proofs
+                .get(&proof_key)
+                .and_then(|proofs| proofs.get(shard_index))
+                .and_then(|proof| proof.as_ref())
+                .is_some()
+            {
+                continue;
+            }
+            if !self.requested_shards.insert((
+                qc.blk_hash.clone(),
+                qc.payload_root.clone(),
+                shard_index,
+            )) {
+                continue;
+            }
+            let request = ShardRequest {
+                block: qc.blk_hash.clone(),
+                payload_root: qc.payload_root.clone(),
+                index: shard_index,
+                origin: self.name,
+            };
+            self.send_to(ConsensusMessage::ShardRequest(request), &signer)
+                .await;
+        }
+        Ok(())
+    }
+
+    async fn handle_shard_response(&mut self, response: ShardResponse) -> ConsensusResult<()> {
+        ensure!(
+            *response.proof.root_hash() == response.payload_root,
+            ConsensusError::InvalidProof
+        );
+        self.record_availability_proof(response.block.clone(), response.proof)
+            .await?;
+
+        let keys: Vec<_> = self
+            .pending_availability_qcs
+            .keys()
+            .filter(|(_, block, payload_root)| {
+                block == &response.block && payload_root == &response.payload_root
+            })
+            .cloned()
+            .collect();
+        for key in keys {
+            self.try_start_shard_recovery(&key);
+        }
+        Ok(())
     }
 
     async fn get_block(&mut self, digest: Digest, round: Round) -> ConsensusResult<Option<Block>> {
@@ -496,10 +680,11 @@ impl Core {
         assert!(block.round > self.last_commit.round);
         // Store in-memory.
         self.update_pending_proposals(block);
+        let digest = block.digest();
         self.uncommitted_blocks
-            .insert(block.digest(), block.clone());
+            .insert(digest.clone(), block.clone());
         if let Some(proof) = proof {
-            self.pending_proofs.insert(block.digest(), proof);
+            let _ = self.record_availability_proof(digest, proof).await;
         }
 
         let _ = self.observe_payload(block).await;
@@ -583,8 +768,13 @@ impl Core {
 
         // Send all the newly committed blocks to the node's application layer.
         while let Some(committing) = to_commit.pop() {
-            // This log is required for generating benchmark outputs.
+            // These compact logs are required for the benchmark parser and match Lionfish.
             debug!("Committed {:?}", committing);
+            if committing.author == self.name {
+                info!("Committed {} Leader", committing.digest());
+            } else {
+                info!("Committed {} NonLeader", committing.digest());
+            }
             info!(
                 "BENCH event=committed protocol=hydrangea node={} author={} round={} digest={} parent={} payload_root={} payload_bytes={} role={}",
                 self.name,
@@ -596,11 +786,6 @@ impl Core {
                 committing.payload_len,
                 if committing.author == self.name { "leader" } else { "non_leader" }
             );
-            if committing.author == self.name {
-                info!("Committed {} Leader", committing.digest());
-            } else {
-                info!("Committed {} NonLeader", committing.digest());
-            }
 
             if !self.consensus_only {
                 self.tx_commit
@@ -638,6 +823,20 @@ impl Core {
             .retain(|(round, _, _)| *round > committing_round);
         self.started_nqc_verify
             .retain(|(round, _, _)| *round > committing_round);
+        self.pending_availability_qcs
+            .retain(|(round, _, _), _| *round > committing_round);
+        self.started_shard_verify
+            .retain(|(round, _, _)| *round > committing_round);
+        self.availability_proofs.retain(|(_, payload_root), _| {
+            self.uncommitted_blocks
+                .values()
+                .any(|block| block.payload_root == *payload_root)
+        });
+        self.requested_shards.retain(|(_, payload_root, _)| {
+            self.uncommitted_blocks
+                .values()
+                .any(|block| block.payload_root == *payload_root)
+        });
         self.pending_proofs.retain(|_, proof| {
             self.uncommitted_blocks
                 .values()
@@ -923,7 +1122,12 @@ impl Core {
                             // and that the collected shards interpolate to the committed payload
                             // root (verify_interpolation per the protocol spec) before sending a
                             // commit vote.
-                            self.start_nqc_verification(qc.clone(), shards, aggregate_ms);
+                            self.start_nqc_verification(
+                                qc.clone(),
+                                shards,
+                                aggregate_ms,
+                                "local_nqc",
+                            );
                         }
                         self.attach_block_to_qc(&mut qc);
                         self.handle_qc(&qc).await?;
@@ -1102,6 +1306,16 @@ impl Core {
                     block.digest()
                 )
             }
+            ConsensusMessage::ShardRequest(request) => format!(
+                "ShardRequest,digest={},root={},index={}",
+                request.block, request.payload_root, request.index
+            ),
+            ConsensusMessage::ShardResponse(response) => format!(
+                "ShardResponse,digest={},root={},index={}",
+                response.block,
+                response.payload_root,
+                response.proof.index()
+            ),
         }
     }
 
@@ -1166,6 +1380,7 @@ impl Core {
         qc: QC,
         shards: Vec<Option<Box<[u8]>>>,
         aggregate_ms: u128,
+        source: &'static str,
     ) {
         let tx = self.tx_nqc_verify.clone();
         let committee = self.committee.clone();
@@ -1185,6 +1400,7 @@ impl Core {
                     aggregate_ms,
                     bls_verify_ms,
                     reconstruct_ms: 0,
+                    source,
                 });
                 return;
             }
@@ -1219,6 +1435,7 @@ impl Core {
                 aggregate_ms,
                 bls_verify_ms,
                 reconstruct_ms,
+                source,
             });
         });
     }
@@ -1232,16 +1449,11 @@ impl Core {
             debug!("Processing new QC {:?}", qc);
             self.uncommitted_qcs.insert(qc.round, qc.clone());
 
-            // QC was already verified by sanitize_certificate before reaching here.
-            // Mark as verified immediately so maybe_send_commit_vote fires without delay.
-            let key = Self::qc_availability_key(qc);
-            if self.started_nqc_verify.insert(key.clone()) {
-                info!(
-                    "BENCH event=availability_verified protocol=hydrangea node={} round={} digest={} payload_root={} aggregate_ms=0 bls_verify_ms=0 reconstruct_ms=0 source=qc_sync",
-                    self.name, qc.round, qc.blk_hash, qc.payload_root
-                );
-                self.verified_normal_qcs.insert(key);
-            }
+            // A compact NQC proves that some quorum has voted, but to match the
+            // Lionfish timing model this node must verify local recoverability before
+            // sending its CommitVote. Nodes that learned the NQC via sync therefore
+            // fetch shards and wait for source=shard_sync availability verification.
+            self.request_availability_shards(qc).await?;
 
             if self.round < qc.round + 1 {
                 self.propose_normal(qc.clone()).await;
@@ -1254,7 +1466,8 @@ impl Core {
                 self.aggregator.cleanup_timeouts(&self.locked.round);
             }
 
-            // Always attempt to send a commit vote now that verified_normal_qcs is populated.
+            // This is a no-op for qc_sync until local_nqc or shard_sync marks
+            // the QC as availability-verified.
             if self.last_timeout < qc.round {
                 self.maybe_send_commit_vote(qc).await?;
             }
@@ -1563,8 +1776,8 @@ impl Core {
                             qc.round, result.aggregate_ms, result.bls_verify_ms, result.reconstruct_ms
                         );
                         info!(
-                            "BENCH event=availability_verified protocol=hydrangea node={} round={} digest={} payload_root={} aggregate_ms={} bls_verify_ms={} reconstruct_ms={} source=local_nqc",
-                            self.name, qc.round, qc.blk_hash, qc.payload_root, result.aggregate_ms, result.bls_verify_ms, result.reconstruct_ms
+                            "BENCH event=availability_verified protocol=hydrangea node={} round={} digest={} payload_root={} aggregate_ms={} bls_verify_ms={} reconstruct_ms={} source={}",
+                            self.name, qc.round, qc.blk_hash, qc.payload_root, result.aggregate_ms, result.bls_verify_ms, result.reconstruct_ms, result.source
                         );
                         self.verified_normal_qcs.insert(Self::qc_availability_key(&qc));
                         self.maybe_send_commit_vote(&qc).await
@@ -1598,6 +1811,7 @@ impl Core {
                             }
                         }
                         ConsensusMessage::SyncResponse(block) => self.handle_sync_response(block).await,
+                        ConsensusMessage::ShardResponse(response) => self.handle_shard_response(response).await,
                         ConsensusMessage::TC(timeout) => self.handle_tc(&timeout).await,
                         ConsensusMessage::Timeout(timeout) => self.handle_timeout(&timeout).await,
                         ConsensusMessage::Vote(vote) => self.handle_vote(&vote).await,

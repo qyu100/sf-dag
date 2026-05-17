@@ -213,15 +213,27 @@ class LogParser:
         block_proposals.update(self._map_timestamps_to_digests(
             r'\[(.*Z) .* Created ([^ ]+): CMB\(.*\)', log))
 
-        # Consensus block commit. Prefer the Lionfish-style compact line
-        # ("Committed <digest> Leader|NonLeader") but keep the old CMB line compatible.
+        # Consensus block commit. Prefer the same compact lines as Lionfish;
+        # fall back to structured BENCH lines for logs produced before those
+        # compact Hydrangea lines were restored.
         block_commits = self._map_timestamps_to_digests(
-            r'\[(.*Z) .* Committed ([^ ]+)(?: Leader| NonLeader)?\n', log)
+            r'\[(.*Z) .* Committed ([^ ]+) Leader', log)
+        block_commits.update(self._map_timestamps_to_digests(
+            r'\[(.*Z) .* Committed ([^ ]+) NonLeader', log))
         block_commits.update(self._map_timestamps_to_digests(
             r'\[(.*Z) .* Committed ([^ ]+): CMB\(.*\)', log))
+        if not block_commits:
+            block_commits = self._map_timestamps_to_digests(
+                r'\[(.*Z) .* BENCH event=committed .* digest=([^ ]+)', log)
 
-        tmp = findall(r'Header ([^ ]+) contains (\d+) B', log)
-        sizes = {d: int(s) for d, s in tmp}
+        sizes = {d: int(s) for d, s in findall(r'Header ([^ ]+) contains (\d+) B', log)}
+        if not sizes:
+            sizes = {
+                d: int(s)
+                for d, s in findall(
+                    r'BENCH event=created .* digest=([^ ]+) .* payload_bytes=(\d+)', log
+                )
+            }
 
         if not self.consensus_only:
             ip = search(r'booted on (\d+.\d+.\d+.\d+)', log).group(1)

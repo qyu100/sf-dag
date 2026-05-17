@@ -1,10 +1,13 @@
 use crate::committer::Committer;
 use crate::core::Core;
 use crate::error::ConsensusError;
-use crate::helper::Helper;
+use crate::helper::{Helper, HelperRequest};
 use crate::leader::LeaderElector;
 use crate::mempool::MempoolDriver;
-use crate::messages::{Block, FallbackRecoveryProposal, NormalProposal, Timeout, Vote, QC, TC};
+use crate::messages::{
+    Block, FallbackRecoveryProposal, NormalProposal, ShardRequest, ShardResponse, Timeout, Vote,
+    QC, TC,
+};
 use crate::proposer::Proposer;
 use crate::synchronizer::Synchronizer;
 use async_trait::async_trait;
@@ -41,6 +44,8 @@ pub enum ConsensusMessage {
     TC(TC),
     SyncRequest(Digest, PublicKey),
     SyncResponse(Block),
+    ShardRequest(ShardRequest),
+    ShardResponse(ShardResponse),
 }
 
 #[allow(dead_code)]
@@ -54,6 +59,8 @@ pub enum ConsensusMessageRef<'a> {
     TC(&'a TC),
     SyncRequest(&'a Digest, &'a PublicKey),
     SyncResponse(&'a Block),
+    ShardRequest(&'a ShardRequest),
+    ShardResponse(&'a ShardResponse),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -182,7 +189,7 @@ struct ConsensusReceiverHandler {
     name: PublicKey,
     tx_consensus: Sender<ConsensusMessage>,
     tx_proposals: Sender<ProposalMessage>,
-    tx_helper: Sender<(Digest, PublicKey)>,
+    tx_helper: Sender<HelperRequest>,
 }
 
 #[async_trait]
@@ -237,13 +244,41 @@ impl MessageHandler for ConsensusReceiverHandler {
                     block.digest()
                 )
             }
+            ConsensusMessage::ShardRequest(request) => format!(
+                "ShardRequest,digest={},root={},index={}",
+                request.block, request.payload_root, request.index
+            ),
+            ConsensusMessage::ShardResponse(response) => format!(
+                "ShardResponse,digest={},root={},index={}",
+                response.block,
+                response.payload_root,
+                response.proof.index()
+            ),
         };
 
         match message {
             ConsensusMessage::SyncRequest(missing, origin) => {
                 let send_start = Instant::now();
                 self.tx_helper
-                    .send((missing, origin))
+                    .send(HelperRequest::Block {
+                        digest: missing,
+                        origin,
+                    })
+                    .await
+                    .expect("Failed to send consensus message");
+                Self::log_dispatch_timing(
+                    &label,
+                    bytes,
+                    deserialize_ms,
+                    ack_ms,
+                    send_start.elapsed().as_millis(),
+                    total_start.elapsed().as_millis(),
+                );
+            }
+            ConsensusMessage::ShardRequest(request) => {
+                let send_start = Instant::now();
+                self.tx_helper
+                    .send(HelperRequest::Shard(request))
                     .await
                     .expect("Failed to send consensus message");
                 Self::log_dispatch_timing(
