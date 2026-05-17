@@ -1007,6 +1007,10 @@ impl Core {
             VoteType::Normal => "nv_sent",
             VoteType::Commit => "cv_sent",
         };
+        let bench_vote_event = match vote.kind {
+            VoteType::Normal => "normal_vote_sent",
+            VoteType::Commit => "commit_vote_sent",
+        };
         debug!(
             "TIMELINE event={} node={} round={} digest={} payload_root={}",
             vote_event, self.name, vote.round, vote.blk_hash, vote.payload_root
@@ -1018,6 +1022,25 @@ impl Core {
 
         let broadcast_start = Instant::now();
         let broadcast_stats = self.broadcast_vote_ref(&vote).await;
+        info!(
+            "BENCH event={} protocol=hydrangea node={} sender={} round={} digest={} payload_root={} remotes={} total_wire_bytes={} bytes={} sign_ms={} local_handle_ms={} address_ms={} serialize_ms={} enqueue_ms={} broadcast_total_ms={} total_ms={}",
+            bench_vote_event,
+            self.name,
+            vote.author,
+            vote.round,
+            vote.blk_hash,
+            vote.payload_root,
+            broadcast_stats.peers,
+            broadcast_stats.bytes * broadcast_stats.peers,
+            broadcast_stats.bytes,
+            sign_ms,
+            local_handle_ms,
+            broadcast_stats.address_ms,
+            broadcast_stats.serialize_ms,
+            broadcast_stats.enqueue_ms,
+            broadcast_stats.total_ms,
+            total_start.elapsed().as_millis()
+        );
         debug!(
             "TIMING vote_send kind={} round={} bytes={} peers={} sign_ms={} local_handle_ms={} address_ms={} serialize_ms={} enqueue_ms={} broadcast_total_ms={} total_ms={}",
             t,
