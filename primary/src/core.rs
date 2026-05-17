@@ -91,6 +91,10 @@ pub struct Core {
     processing_header_infos: HashMap<Digest, HeaderInfo>,
     /// For storing proof of header infos in processing
     processing_header_proofs: HashMap<Digest, HeaderInfoWithProof>,
+    /// Header proofs waiting for their parent to be delivered before echoing.
+    pending_echoes: HashMap<Digest, HeaderInfoWithProof>,
+    /// Parent sync requests already issued for pending echoes.
+    requested_echo_parents: HashMap<Digest, Round>,
     /// For storing info of echo aggregators in processing
     processing_echo_aggregators: HashMap<Digest, EchoAggregator>,
     /// For storing info of ready aggregators in processing
@@ -183,6 +187,8 @@ impl Core {
                 last_voted: HashMap::with_capacity(2 * gc_depth as usize),
                 processing_header_infos: HashMap::new(),
                 processing_header_proofs: HashMap::new(),
+                pending_echoes: HashMap::new(),
+                requested_echo_parents: HashMap::new(),
                 processing_echo_aggregators: HashMap::new(),
                 processing_ready_aggregators: HashMap::new(),
                 processing_decide_aggregators: HashMap::new(),
@@ -270,6 +276,8 @@ impl Core {
             last_voted: HashMap::with_capacity(2 * gc_depth as usize),
             processing_header_infos: HashMap::new(),
             processing_header_proofs: HashMap::new(),
+            pending_echoes: HashMap::new(),
+            requested_echo_parents: HashMap::new(),
             processing_echo_aggregators: HashMap::new(),
             processing_ready_aggregators: HashMap::new(),
             processing_decide_aggregators: HashMap::new(),
@@ -786,7 +794,9 @@ impl Core {
             }
         }
 
-        // Notify proposer as soon as we have this block and its parent delivered.
+        self.send_echo(header_info_with_proof).await?;
+
+        // Notify proposer after the latency-critical echo is enqueued.
         self.tx_proposer
             .send(ProposerParent {
                 header_id: header_info_with_proof.id,
@@ -858,19 +868,86 @@ impl Core {
             .entry(header_info_with_proof.id)
             .or_insert_with(|| header_info_with_proof.clone());
 
-        let t_parent = Instant::now();
-        if header_info_with_proof.round != 1 {
-            // 2b: Pass header_info_with_proof directly — no unnecessary .clone().
-            let parent = self.synchronizer.get_parent(header_info_with_proof).await?;
-            debug!("get_parent time: {:?}", t_parent.elapsed());
-            if parent.is_none() {
+        if !self.has_echoed(header_info_with_proof) {
+            self.pending_echoes
+                .entry(header_info_with_proof.id)
+                .or_insert_with(|| header_info_with_proof.clone());
+        }
+        self.try_send_pending_echoes().await?;
+        debug!(
+            "process_header_proof_optimized total time: {:?}",
+            start.elapsed()
+        );
+        Ok(())
+    }
+
+    fn has_echoed(&self, header_info_with_proof: &HeaderInfoWithProof) -> bool {
+        self.last_voted
+            .get(&header_info_with_proof.round)
+            .map_or(false, |authors| {
+                authors.contains(&header_info_with_proof.author)
+            })
+    }
+
+    async fn try_send_pending_echoes(&mut self) -> DagResult<()> {
+        let pending: Vec<_> = self.pending_echoes.values().cloned().collect();
+        for header_info_with_proof in pending {
+            if !self.pending_echoes.contains_key(&header_info_with_proof.id) {
+                continue;
+            }
+
+            let parent_ready = self.parent_ready_for_echo(&header_info_with_proof).await?;
+            if !parent_ready {
                 debug!(
-                    "Processing of {} suspended: missing parent",
+                    "Echo for {} suspended: missing parent",
                     header_info_with_proof.id
                 );
-                return Ok(());
+                continue;
             }
+
+            self.pending_echoes.remove(&header_info_with_proof.id);
+            self.process_ready_header_proof(&header_info_with_proof)
+                .await?;
         }
+        Ok(())
+    }
+
+    async fn parent_ready_for_echo(
+        &mut self,
+        header_info_with_proof: &HeaderInfoWithProof,
+    ) -> DagResult<bool> {
+        if header_info_with_proof.round == 1 {
+            return Ok(true);
+        }
+
+        let parent = header_info_with_proof.parent;
+        if self.store.read(parent.to_vec()).await?.is_some() {
+            return Ok(true);
+        }
+
+        if self.requested_echo_parents.contains_key(&parent) {
+            return Ok(false);
+        }
+        self.requested_echo_parents
+            .insert(parent, header_info_with_proof.round);
+
+        self.synchronizer
+            .get_parent(header_info_with_proof)
+            .await
+            .map(|parent| parent.is_some())
+    }
+
+    async fn process_ready_header_proof(
+        &mut self,
+        header_info_with_proof: &HeaderInfoWithProof,
+    ) -> DagResult<()> {
+        if self.has_echoed(header_info_with_proof) {
+            return Ok(());
+        }
+
+        let hid = header_info_with_proof.id;
+        let bytes = bincode::serialize(header_info_with_proof).expect("Failed to serialize header");
+        self.store.write(hid.to_vec(), bytes).await;
 
         // Notify proposer as soon as we have this block and its parent delivered.
         self.tx_proposer
@@ -882,19 +959,11 @@ impl Core {
             .await
             .expect("Failed to send parent candidate to proposer");
 
-        self.send_echo(header_info_with_proof).await?;
-
-        let hid = header_info_with_proof.id;
-        let bytes = bincode::serialize(header_info_with_proof).expect("Failed to serialize header");
-        // Store the header.
-        self.store.write(hid.to_vec(), bytes).await;
-
-        // If a reconstruction was waiting for this header's info, resume it now.
-        if let Some(_root) = self
+        if self
             .pending_reconstructions
             .remove(&header_info_with_proof.id)
+            .is_some()
         {
-            // 3b: pass only the small fields needed by finalize_reconstruction_optimized.
             if let Err(e) = self
                 .finalize_reconstruction_optimized(
                     header_info_with_proof.id,
@@ -908,16 +977,8 @@ impl Core {
                     header_info_with_proof.id, e
                 );
             }
-            debug!(
-                "process_header_proof_optimized total time: {:?}",
-                start.elapsed()
-            );
-            return Ok(());
         }
-        debug!(
-            "process_header_proof_optimized total time: {:?}",
-            start.elapsed()
-        );
+
         Ok(())
     }
 
@@ -1644,6 +1705,16 @@ impl Core {
                         //     }
                         // },
                         PrimaryMessage::Echo(echo) => {
+                            info!(
+                                "BENCH event=echo_received protocol=lionfish node={:?} sender={:?} author={:?} round={} digest={:?} payload_root={:?} payload_bytes={}",
+                                self.name,
+                                echo.author,
+                                echo.origin,
+                                echo.round,
+                                echo.id,
+                                echo.proof.root_hash(),
+                                echo.proof.value().len()
+                            );
                             match self.sanitize_echo(&echo) {
                                 Ok(()) => self.process_echo_optimized(echo).await,
                                 error => error
@@ -1703,6 +1774,8 @@ impl Core {
                     .retain(|_, h| &h.round >= &gc_round);
                 self.processing_header_proofs
                     .retain(|_, h| &h.round >= &gc_round);
+                self.pending_echoes.retain(|_, h| &h.round >= &gc_round);
+                self.requested_echo_parents.retain(|_, r| *r >= gc_round);
                 self.cancel_handlers.retain(|k, _| k >= &gc_round);
                 // let _ = self.synchronizer.garbage_collect(gc_round).await;
                 self.gc_round = gc_round;
