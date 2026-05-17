@@ -1,14 +1,12 @@
 // Copyright(C) Facebook, Inc. and its affiliates.
+use crate::aggregators::{DecideAggregator, EchoAggregator, ReadyAggregator, TimeoutAggregator};
 use crate::batch_maker::Transaction;
-use crate::merkle::{Proof, MerkleTree};
-use hex_fmt::HexList;
 use crate::coding::Coding;
-use crate::aggregators::{
-    EchoAggregator, ReadyAggregator, DecideAggregator, TimeoutAggregator
-};
 use crate::error::{DagError, DagResult};
+use crate::merkle::{MerkleTree, Proof};
 use crate::messages::{
-    Certificate, Header, Ready, Timeout, TimeoutCert, HeaderInfoWithProof, Echo, Decide, ProposerParent
+    Certificate, Decide, Echo, Header, HeaderInfoWithProof, ProposerParent, Ready, Timeout,
+    TimeoutCert,
 };
 use crate::primary::{HeaderType, PrimaryMessage, PrimaryMessageRef, Round};
 use crate::synchronizer::Synchronizer;
@@ -18,18 +16,19 @@ use bytes::Bytes;
 use config::Committee;
 use crypto::Hash as _;
 use crypto::{Digest, PublicKey, SignatureService};
+use hex_fmt::HexList;
 use log::{debug, error, info, warn};
 use network::{CancelHandler, ReliableSender};
-use std::collections::{HashMap, HashSet};
 use rayon::prelude::*; // parallel iterator for hashing reconstructed shards
+use std::collections::hash_map::DefaultHasher;
+use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use store::Store;
 use tokio::sync::mpsc::{Receiver, Sender};
-use std::collections::VecDeque;
-use std::hash::{Hash, Hasher};
-use std::collections::hash_map::DefaultHasher;
-use std::time::{Duration, Instant};
 
 // #[cfg(test)]
 // #[path = "tests/core_tests.rs"]
@@ -121,7 +120,7 @@ pub struct Core {
     /// last committed round
     last_committed_round: Round,
     // Stored parent info
-    parent_info: HashMap<Digest, (Round,Digest)>,
+    parent_info: HashMap<Digest, (Round, Digest)>,
     rs_block_size: usize,
     rs_block_threads: usize,
     /// Channel for receiving background own-header compute results.
@@ -160,7 +159,8 @@ impl Core {
             let data_shard_num = committee.data_shard_num() as usize;
             let parity_shard_num = committee.parity_shard_num() as usize;
             let (tx_own_header_result, rx_own_header_result) = tokio::sync::mpsc::channel(8);
-            let (tx_reconstruction_result, rx_reconstruction_result) = tokio::sync::mpsc::channel(8);
+            let (tx_reconstruction_result, rx_reconstruction_result) =
+                tokio::sync::mpsc::channel(8);
             Self {
                 name,
                 committee: committee.clone(),
@@ -190,11 +190,15 @@ impl Core {
                 network: ReliableSender::new(),
                 cancel_handlers: HashMap::with_capacity(2 * gc_depth as usize),
                 timeouts_aggregators: HashMap::with_capacity(2 * gc_depth as usize),
-                coding: Arc::new(Coding::new(data_shard_num, parity_shard_num)
-                .unwrap_or_else(|e| {
-                    warn!("Failed to create Reed-Solomon coding (falling back to trivial): {:?}", e);
-                    Coding::Trivial(data_shard_num)
-                })),
+                coding: Arc::new(
+                    Coding::new(data_shard_num, parity_shard_num).unwrap_or_else(|e| {
+                        warn!(
+                            "Failed to create Reed-Solomon coding (falling back to trivial): {:?}",
+                            e
+                        );
+                        Coding::Trivial(data_shard_num)
+                    }),
+                ),
                 mtrees: HashMap::new(),
                 echo_shards: HashMap::new(),
                 pending_reconstructions: HashMap::new(),
@@ -273,11 +277,15 @@ impl Core {
             network: ReliableSender::new(),
             cancel_handlers: HashMap::with_capacity(2 * gc_depth as usize),
             timeouts_aggregators: HashMap::with_capacity(2 * gc_depth as usize),
-            coding: Arc::new(Coding::new(data_shard_num, parity_shard_num)
-                .unwrap_or_else(|e| {
-                    warn!("Failed to create Reed-Solomon coding (falling back to trivial): {:?}", e);
+            coding: Arc::new(
+                Coding::new(data_shard_num, parity_shard_num).unwrap_or_else(|e| {
+                    warn!(
+                        "Failed to create Reed-Solomon coding (falling back to trivial): {:?}",
+                        e
+                    );
                     Coding::Trivial(data_shard_num)
-                })),
+                }),
+            ),
             mtrees: HashMap::new(),
             echo_shards: HashMap::new(),
             pending_reconstructions: HashMap::new(),
@@ -321,10 +329,7 @@ impl Core {
     //     self.process_timeout(timeout).await
     // }
 
-    async fn process_own_header(
-        &mut self,
-        header: Header,
-    ) -> DagResult<()> {
+    async fn process_own_header(&mut self, header: Header) -> DagResult<()> {
         debug!("Processing own header: {:?}", header);
         let start_total = Instant::now();
 
@@ -371,7 +376,11 @@ impl Core {
         }
         // Pad the last data shard with zeros. Fill the parity shards with zeros.
         payload_bytes.resize(shard_len * (data_shard_num + parity_shard_num), 0);
-        debug!("pad time: {:?} shard_len_aligned={}", t_pad.elapsed(), shard_len);
+        debug!(
+            "pad time: {:?} shard_len_aligned={}",
+            t_pad.elapsed(),
+            shard_len
+        );
         let d_pad = t_pad.elapsed();
 
         // Divide the vector into chunks/shards.
@@ -379,7 +388,9 @@ impl Core {
 
         let t_encode = Instant::now();
         // Construct the parity chunks/shards.
-        self.coding.encode(&mut shards_vec, self.rs_block_size, self.rs_block_threads).expect("wrong shard size");
+        self.coding
+            .encode(&mut shards_vec, self.rs_block_size, self.rs_block_threads)
+            .expect("wrong shard size");
         debug!("encode time: {:?}", t_encode.elapsed());
         let d_encode = t_encode.elapsed();
 
@@ -398,36 +409,41 @@ impl Core {
         let t = Instant::now();
         let sorted_keys = self.committee.sorted_keys.clone();
         for (index, pk) in sorted_keys.iter().enumerate() {
-             // Use proof_with_leaf to construct the proof from the leaf value provided here.
-             // This keeps the code explicit about which leaf value is used for the proof.
-             let leaf = shards_vec
-                 .get(index)
-                 .ok_or(DagError::ProofConstructionFailed)?;
-             let proof = mtree
-                 .proof_with_leaf(index, &**leaf)
-                 .ok_or(DagError::ProofConstructionFailed)?;
-             let header_info_with_proof = HeaderInfoWithProof::new(&header_info, &proof);
-             if pk == &self.name {
-                 self.process_header_proof(&header_info_with_proof)
-                     .await
-                     .expect("Failed to process our own proof");
-             } else {
+            // Use proof_with_leaf to construct the proof from the leaf value provided here.
+            // This keeps the code explicit about which leaf value is used for the proof.
+            let leaf = shards_vec
+                .get(index)
+                .ok_or(DagError::ProofConstructionFailed)?;
+            let proof = mtree
+                .proof_with_leaf(index, &**leaf)
+                .ok_or(DagError::ProofConstructionFailed)?;
+            let header_info_with_proof = HeaderInfoWithProof::new(&header_info, &proof);
+            if pk == &self.name {
+                self.process_header_proof(&header_info_with_proof)
+                    .await
+                    .expect("Failed to process our own proof");
+            } else {
                 let address = self
                     .committee
                     .primary(&pk)
                     .expect("unknown primary")
                     .primary_to_primary;
-                let bytes = bincode::serialize(&PrimaryMessage::HeaderInfoWithProof(header_info_with_proof.clone()))
+                let bytes = bincode::serialize(&PrimaryMessage::HeaderInfoWithProof(
+                    header_info_with_proof.clone(),
+                ))
                 .expect("Failed to serialize our own proof");
                 let handler = self.network.send(address, Bytes::from(bytes)).await;
                 self.cancel_handlers
                     .entry(header_info.round)
                     .or_insert_with(Vec::new)
                     .push(handler);
-              }
             }
+        }
         let d_proofs_send = t.elapsed();
-        debug!("process_own_header proof construction and sending time: {:?}", t.elapsed());
+        debug!(
+            "process_own_header proof construction and sending time: {:?}",
+            t.elapsed()
+        );
         println!("    [own_header_original] setup={:?} serialize={:?} pad={:?} encode={:?} merkle={:?} proofs+send={:?} total={:?}",
             d_setup, d_ser, d_pad, d_encode, d_mtree, d_proofs_send, start_total.elapsed());
         debug!("process_own_header total time: {:?}", start_total.elapsed());
@@ -437,10 +453,7 @@ impl Core {
     /// Optimized version of process_own_header with parallel proof generation
     /// and serialization via rayon, followed by sequential network sends.
     #[allow(dead_code)]
-    async fn process_own_header_optimized(
-        &mut self,
-        header: Header,
-    ) -> DagResult<()> {
+    async fn process_own_header_optimized(&mut self, header: Header) -> DagResult<()> {
         let start_total = Instant::now();
 
         let t_setup = Instant::now();
@@ -480,7 +493,9 @@ impl Core {
         let mut shards_vec: Vec<&mut [u8]> = payload_bytes.chunks_mut(shard_len).collect();
 
         let t_encode = Instant::now();
-        self.coding.encode(&mut shards_vec, self.rs_block_size, self.rs_block_threads).expect("wrong shard size");
+        self.coding
+            .encode(&mut shards_vec, self.rs_block_size, self.rs_block_threads)
+            .expect("wrong shard size");
         let d_encode = t_encode.elapsed();
 
         let t_mtree = Instant::now();
@@ -523,10 +538,8 @@ impl Core {
                 if Some(index) == self_index {
                     (Some(hiwp), None)
                 } else {
-                    let bytes = bincode::serialize(
-                        &PrimaryMessage::HeaderInfoWithProof(hiwp),
-                    )
-                    .expect("Failed to serialize proof");
+                    let bytes = bincode::serialize(&PrimaryMessage::HeaderInfoWithProof(hiwp))
+                        .expect("Failed to serialize proof");
                     (None, Some(Bytes::from(bytes)))
                 }
             })
@@ -611,7 +624,9 @@ impl Core {
             let mut shards_vec: Vec<&mut [u8]> = payload_bytes.chunks_mut(shard_len).collect();
 
             let t_encode = Instant::now();
-            coding.encode(&mut shards_vec, rs_block_size, rs_block_threads).expect("wrong shard size");
+            coding
+                .encode(&mut shards_vec, rs_block_size, rs_block_threads)
+                .expect("wrong shard size");
             let d_encode = t_encode.elapsed();
 
             let t_mtree = Instant::now();
@@ -630,7 +645,8 @@ impl Core {
 
             let shards_refs: Vec<&[u8]> = shards_vec.iter().map(|s| &**s).collect();
 
-            let messages: Vec<(Option<HeaderInfoWithProof>, Option<Bytes>)> = (0..sorted_keys.len())
+            let messages: Vec<(Option<HeaderInfoWithProof>, Option<Bytes>)> = (0..sorted_keys
+                .len())
                 .into_par_iter()
                 .map(|index| {
                     let leaf = shards_refs[index];
@@ -648,10 +664,8 @@ impl Core {
                     if Some(index) == self_index {
                         (Some(hiwp), None)
                     } else {
-                        let bytes = bincode::serialize(
-                            &PrimaryMessage::HeaderInfoWithProof(hiwp),
-                        )
-                        .expect("Failed to serialize proof");
+                        let bytes = bincode::serialize(&PrimaryMessage::HeaderInfoWithProof(hiwp))
+                            .expect("Failed to serialize proof");
                         (None, Some(Bytes::from(bytes)))
                     }
                 })
@@ -728,7 +742,10 @@ impl Core {
         Ok(())
     }
 
-    async fn process_header_proof(&mut self, header_info_with_proof: &HeaderInfoWithProof) -> DagResult<()> {
+    async fn process_header_proof(
+        &mut self,
+        header_info_with_proof: &HeaderInfoWithProof,
+    ) -> DagResult<()> {
         let start = Instant::now();
         info!(
             "BENCH event=proposal_received protocol=lionfish node={:?} author={:?} round={} digest={:?} parent={:?} payload_root={:?} payload_bytes={}",
@@ -745,12 +762,14 @@ impl Core {
             "Header info with proof payload len: {}",
             header_info_with_proof.proof.value().len()
         );
-        self.parent_info.entry(header_info_with_proof.id).or_insert((header_info_with_proof.round, header_info_with_proof.parent));
+        self.parent_info
+            .entry(header_info_with_proof.id)
+            .or_insert((header_info_with_proof.round, header_info_with_proof.parent));
 
         self.processing_header_proofs
-             .entry(header_info_with_proof.id)
-             .or_insert(header_info_with_proof.clone());
-        
+            .entry(header_info_with_proof.id)
+            .or_insert(header_info_with_proof.clone());
+
         let t_parent = Instant::now();
         if header_info_with_proof.round != 1 {
             let parent = self
@@ -785,10 +804,19 @@ impl Core {
         self.store.write(hid.to_vec(), bytes).await;
 
         // If a reconstruction was waiting for this header's info, resume it now.
-        if let Some(root) = self.pending_reconstructions.remove(&header_info_with_proof.id) {
+        if let Some(root) = self
+            .pending_reconstructions
+            .remove(&header_info_with_proof.id)
+        {
             // clone header info to pass ownership into the async helper
-            if let Err(e) = self.finalize_reconstruction(header_info_with_proof.clone()).await {
-                warn!("Failed to finalize pending reconstruction for {:?}: {}", header_info_with_proof.id, e);
+            if let Err(e) = self
+                .finalize_reconstruction(header_info_with_proof.clone())
+                .await
+            {
+                warn!(
+                    "Failed to finalize pending reconstruction for {:?}: {}",
+                    header_info_with_proof.id, e
+                );
             }
             debug!("process_header_proof total time: {:?}", start.elapsed());
             return Ok(());
@@ -801,8 +829,11 @@ impl Core {
     /// - Serializes Echo by reference before moving into process_echo (avoids clone of ~2.9MB Proof)
     /// - Passes header_info_with_proof directly to get_parent (removes unnecessary .clone())
     /// - Uses or_insert_with for lazy clone in processing_header_proofs cache
-    
-    async fn process_header_proof_optimized(&mut self, header_info_with_proof: &HeaderInfoWithProof) -> DagResult<()> {
+
+    async fn process_header_proof_optimized(
+        &mut self,
+        header_info_with_proof: &HeaderInfoWithProof,
+    ) -> DagResult<()> {
         let start = Instant::now();
         info!(
             "BENCH event=proposal_received protocol=lionfish node={:?} author={:?} round={} digest={:?} parent={:?} payload_root={:?} payload_bytes={}",
@@ -818,20 +849,19 @@ impl Core {
             "Header info with proof payload len: {}",
             header_info_with_proof.proof.value().len()
         );
-        self.parent_info.entry(header_info_with_proof.id).or_insert((header_info_with_proof.round, header_info_with_proof.parent));
+        self.parent_info
+            .entry(header_info_with_proof.id)
+            .or_insert((header_info_with_proof.round, header_info_with_proof.parent));
 
         // 2c: Use or_insert_with for lazy clone — only clones on cache miss.
         self.processing_header_proofs
-             .entry(header_info_with_proof.id)
-             .or_insert_with(|| header_info_with_proof.clone());
+            .entry(header_info_with_proof.id)
+            .or_insert_with(|| header_info_with_proof.clone());
 
         let t_parent = Instant::now();
         if header_info_with_proof.round != 1 {
             // 2b: Pass header_info_with_proof directly — no unnecessary .clone().
-            let parent = self
-                .synchronizer
-                .get_parent(header_info_with_proof)
-                .await?;
+            let parent = self.synchronizer.get_parent(header_info_with_proof).await?;
             debug!("get_parent time: {:?}", t_parent.elapsed());
             if parent.is_none() {
                 debug!(
@@ -860,19 +890,34 @@ impl Core {
         self.store.write(hid.to_vec(), bytes).await;
 
         // If a reconstruction was waiting for this header's info, resume it now.
-        if let Some(_root) = self.pending_reconstructions.remove(&header_info_with_proof.id) {
+        if let Some(_root) = self
+            .pending_reconstructions
+            .remove(&header_info_with_proof.id)
+        {
             // 3b: pass only the small fields needed by finalize_reconstruction_optimized.
-            if let Err(e) = self.finalize_reconstruction_optimized(
-                header_info_with_proof.id,
-                header_info_with_proof.round,
-                header_info_with_proof.author,
-            ).await {
-                warn!("Failed to finalize pending reconstruction for {:?}: {}", header_info_with_proof.id, e);
+            if let Err(e) = self
+                .finalize_reconstruction_optimized(
+                    header_info_with_proof.id,
+                    header_info_with_proof.round,
+                    header_info_with_proof.author,
+                )
+                .await
+            {
+                warn!(
+                    "Failed to finalize pending reconstruction for {:?}: {}",
+                    header_info_with_proof.id, e
+                );
             }
-            debug!("process_header_proof_optimized total time: {:?}", start.elapsed());
+            debug!(
+                "process_header_proof_optimized total time: {:?}",
+                start.elapsed()
+            );
             return Ok(());
         }
-        debug!("process_header_proof_optimized total time: {:?}", start.elapsed());
+        debug!(
+            "process_header_proof_optimized total time: {:?}",
+            start.elapsed()
+        );
         Ok(())
     }
 
@@ -886,7 +931,7 @@ impl Core {
             .insert(header_info_with_proof.author)
         {
             let echo = Echo::new(header_info_with_proof, &self.name).await;
-            let addresses = self
+            let addresses: Vec<_> = self
                 .committee
                 .others_primaries(&self.name)
                 .iter()
@@ -895,11 +940,25 @@ impl Core {
 
             let bytes = bincode::serialize(&PrimaryMessageRef::Echo(&echo))
                 .expect("Failed to serialize our own echo");
+            let remotes = addresses.len();
+            let total_wire_bytes = bytes.len() * remotes;
             let handlers = self.network.broadcast(addresses, Bytes::from(bytes)).await;
             self.cancel_handlers
                 .entry(round)
                 .or_insert_with(Vec::new)
                 .extend(handlers);
+            info!(
+                "BENCH event=echo_sent protocol=lionfish node={:?} author={:?} sender={:?} round={} digest={:?} payload_root={:?} payload_bytes={} remotes={} total_wire_bytes={}",
+                self.name,
+                header_info_with_proof.author,
+                self.name,
+                header_info_with_proof.round,
+                header_info_with_proof.id,
+                header_info_with_proof.proof.root_hash(),
+                header_info_with_proof.payload_len,
+                remotes,
+                total_wire_bytes
+            );
 
             self.process_echo_optimized(echo)
                 .await
@@ -917,7 +976,9 @@ impl Core {
         let id = echo.id;
         // Validate the proof
         let t_validate = Instant::now();
-        if self.committee.index_of(&author) == Some(proof.index()) && proof.validate(self.committee.total_stake() as usize) {
+        if self.committee.index_of(&author) == Some(proof.index())
+            && proof.validate(self.committee.total_stake() as usize)
+        {
             let d_validate = t_validate.elapsed();
             if !self.processing_echo_aggregators.contains_key(&id) {
                 self.processing_echo_aggregators
@@ -926,7 +987,9 @@ impl Core {
             }
             if let Some(echo_aggregator) = self.processing_echo_aggregators.get_mut(&id) {
                 let t_agg = Instant::now();
-                if let Some((root, mut leaf_values)) = echo_aggregator.append(author, proof, &self.committee)? {
+                if let Some((root, mut leaf_values)) =
+                    echo_aggregator.append(author, proof, &self.committee)?
+                {
                     let d_agg = t_agg.elapsed();
                     // Store the collected leaf values for this root so we can reconstruct later
                     // key by (round, root_hash)
@@ -940,7 +1003,11 @@ impl Core {
                     let rs_block_size = self.rs_block_size;
                     let rs_block_threads = self.rs_block_threads;
                     let leaf_values = tokio::task::spawn_blocking(move || {
-                        coding.reconstruct_shards(&mut leaf_values[..], rs_block_size, rs_block_threads)?;
+                        coding.reconstruct_shards(
+                            &mut leaf_values[..],
+                            rs_block_size,
+                            rs_block_threads,
+                        )?;
                         Ok::<_, DagError>(leaf_values)
                     })
                     .await
@@ -952,7 +1019,10 @@ impl Core {
                     let t_convert = Instant::now();
                     let shards: Vec<Vec<u8>> = leaf_values
                         .into_iter()
-                        .map(|opt| opt.expect("reconstruct_shards produced all shards").into_vec())
+                        .map(|opt| {
+                            opt.expect("reconstruct_shards produced all shards")
+                                .into_vec()
+                        })
                         .collect();
                     let d_convert = t_convert.elapsed();
 
@@ -1007,7 +1077,6 @@ impl Core {
         Ok(())
     }
 
-
     // Helper to finalize reconstruction: rebuild payload bytes from shards, deserialize,
     // store reconstructed payload and create/process the Certificate.
     async fn finalize_reconstruction(
@@ -1018,7 +1087,6 @@ impl Core {
     ) -> DagResult<()> {
         let start = Instant::now();
         // let payload_len = header_info_with_proof.payload_len;
-
 
         // let data_count = self.coding.data_shard_count() as usize;
         // let t_concat = Instant::now();
@@ -1059,7 +1127,8 @@ impl Core {
         let id = echo.id;
 
         let t_validate = Instant::now();
-        let valid = self.committee.index_of(&author) == Some(proof.index()) && proof.validate(self.committee.total_stake() as usize);
+        let valid = self.committee.index_of(&author) == Some(proof.index())
+            && proof.validate(self.committee.total_stake() as usize);
         let d_validate = t_validate.elapsed();
 
         if valid {
@@ -1101,9 +1170,17 @@ impl Core {
                         let t_total = Instant::now();
 
                         let t_reconstruct = Instant::now();
-                        if let Err(e) = coding.reconstruct_shards(&mut leaf_values[..], rs_block_size, rs_block_threads) {
+                        if let Err(e) = coding.reconstruct_shards(
+                            &mut leaf_values[..],
+                            rs_block_size,
+                            rs_block_threads,
+                        ) {
                             warn!("Reconstruction failed: {:?}", e);
-                            let _ = tx.blocking_send(ReconstructionResult { id: recon_id, root, success: false });
+                            let _ = tx.blocking_send(ReconstructionResult {
+                                id: recon_id,
+                                root,
+                                success: false,
+                            });
                             return;
                         }
                         let d_reconstruct = t_reconstruct.elapsed();
@@ -1112,7 +1189,9 @@ impl Core {
                         let hashes: Vec<Digest> = leaf_values
                             .par_iter()
                             .map(|opt| {
-                                let shard = opt.as_ref().expect("reconstruct_shards produced all shards");
+                                let shard = opt
+                                    .as_ref()
+                                    .expect("reconstruct_shards produced all shards");
                                 MerkleTree::digest(&**shard)
                             })
                             .collect();
@@ -1139,12 +1218,21 @@ impl Core {
                         println!("    [reconstruction bg] reconstruct={:?} hash={:?} tree={:?} success={} total={:?}",
                             d_reconstruct, d_hash, d_tree, success, t_total.elapsed());
 
-                        let _ = tx.blocking_send(ReconstructionResult { id: recon_id, root, success });
+                        let _ = tx.blocking_send(ReconstructionResult {
+                            id: recon_id,
+                            root,
+                            success,
+                        });
                     });
 
                     debug!("echo_optimized: dispatched reconstruction for {:?}", id);
                 } else {
-                    debug!("echo_optimized: validate={:?} agg={:?} total={:?}", d_validate, d_agg, t_total.elapsed());
+                    debug!(
+                        "echo_optimized: validate={:?} agg={:?} total={:?}",
+                        d_validate,
+                        d_agg,
+                        t_total.elapsed()
+                    );
                 }
             }
         }
@@ -1176,12 +1264,18 @@ impl Core {
         );
 
         self.process_certificate_optimized(certificate).await?;
-        debug!("finalize_reconstruction_optimized total time: {:?}", start.elapsed());
+        debug!(
+            "finalize_reconstruction_optimized total time: {:?}",
+            start.elapsed()
+        );
         Ok(())
     }
 
     /// Handle the result of a background echo reconstruction.
-    async fn handle_reconstruction_result(&mut self, result: ReconstructionResult) -> DagResult<()> {
+    async fn handle_reconstruction_result(
+        &mut self,
+        result: ReconstructionResult,
+    ) -> DagResult<()> {
         if !result.success {
             warn!("Reconstruction verification failed for {:?}", result.id);
             return Err(DagError::ProofConstructionFailed);
@@ -1191,14 +1285,21 @@ impl Core {
         let (header_id, round, origin) = match self.processing_header_proofs.get(&result.id) {
             Some(h) => (h.id, h.round, h.author),
             None => {
-                debug!("Missing HeaderInfoWithProof for reconstruction result {:?}, storing pending", result.id);
+                debug!(
+                    "Missing HeaderInfoWithProof for reconstruction result {:?}, storing pending",
+                    result.id
+                );
                 self.pending_reconstructions.insert(result.id, result.root);
                 return Ok(());
             }
         };
 
-        self.finalize_reconstruction_optimized(header_id, round, origin).await?;
-        println!("    [handle_reconstruction_result] finalize={:?}", t_finalize.elapsed());
+        self.finalize_reconstruction_optimized(header_id, round, origin)
+            .await?;
+        println!(
+            "    [handle_reconstruction_result] finalize={:?}",
+            t_finalize.elapsed()
+        );
         Ok(())
     }
 
@@ -1210,10 +1311,7 @@ impl Core {
         // let t_deliver = Instant::now();
         if !self.synchronizer.deliver_certificate(&certificate).await? {
             // debug!("deliver_certificate time: {:?}", t_deliver.elapsed());
-            debug!(
-                "Processing of {:?} suspended: missing parent",
-                certificate
-            );
+            debug!("Processing of {:?} suspended: missing parent", certificate);
             return Ok(());
         }
         // debug!("deliver_certificate time: {:?}", t_deliver.elapsed());
@@ -1225,10 +1323,19 @@ impl Core {
         // debug!("certificate length: {}", bytes.len());
         // debug!("store certificate time: {:?}", t_store.elapsed());
 
-        self.certificates.entry(certificate.round).or_insert(certificate.clone());
+        self.certificates
+            .entry(certificate.round)
+            .or_insert(certificate.clone());
         self.retry_pending_commits().await?;
 
-        let decide = Decide::new(certificate.header_id, certificate.round, &certificate.origin, &self.name).await;
+        let decide = Decide::new(
+            certificate.header_id,
+            certificate.round,
+            &certificate.origin,
+            &self.name,
+        )
+        .await;
+        self.process_decide(&decide).await?;
 
         let addresses: Vec<_> = self
             .committee
@@ -1238,11 +1345,23 @@ impl Core {
             .collect();
         let bytes = bincode::serialize(&PrimaryMessage::Decide(decide.clone()))
             .expect("Failed to serialize our own decide");
+        let recipients = addresses.len();
+        let wire_bytes = bytes.len() * recipients;
         let handlers = self.network.broadcast(addresses, Bytes::from(bytes)).await;
         self.cancel_handlers
             .entry(certificate.round)
             .or_insert_with(Vec::new)
             .extend(handlers);
+        info!(
+            "BENCH event=decide_sent protocol=lionfish node={:?} author={:?} sender={:?} round={} digest={:?} remotes={} total_wire_bytes={}",
+            self.name,
+            certificate.origin,
+            self.name,
+            certificate.round,
+            certificate.header_id,
+            recipients,
+            wire_bytes
+        );
 
         Ok(())
     }
@@ -1257,12 +1376,16 @@ impl Core {
         debug!("Processing cert (optimized) {:?}", certificate);
 
         // Look up parent from in-memory map to avoid store read+deserialize.
-        let parent = self.parent_info.get(&certificate.header_id).map(|(_, p)| *p);
-        if !self.synchronizer.deliver_certificate_optimized(&certificate, parent).await? {
-            debug!(
-                "Processing of {:?} suspended: missing parent",
-                certificate
-            );
+        let parent = self
+            .parent_info
+            .get(&certificate.header_id)
+            .map(|(_, p)| *p);
+        if !self
+            .synchronizer
+            .deliver_certificate_optimized(&certificate, parent)
+            .await?
+        {
+            debug!("Processing of {:?} suspended: missing parent", certificate);
             return Ok(());
         }
 
@@ -1277,6 +1400,7 @@ impl Core {
 
         // 4a: Build decide from the extracted small fields.
         let decide = Decide::new(header_id, round, &origin, &self.name).await;
+        self.process_decide(&decide).await?;
 
         let addresses: Vec<_> = self
             .committee
@@ -1295,9 +1419,10 @@ impl Core {
             .or_insert_with(Vec::new)
             .extend(handlers);
         info!(
-            "BENCH event=decide_sent protocol=lionfish node={:?} author={:?} round={} digest={:?} remotes={} total_wire_bytes={}",
+            "BENCH event=decide_sent protocol=lionfish node={:?} author={:?} sender={:?} round={} digest={:?} remotes={} total_wire_bytes={}",
             self.name,
             origin,
+            self.name,
             round,
             header_id,
             recipients,
@@ -1319,7 +1444,7 @@ impl Core {
         if let Some(decide_aggregator) = self.processing_decide_aggregators.get_mut(&decide.id) {
             // Call append() while holding a mutable borrow, capture the result and drop the borrow
             let decide_quorum = decide_aggregator.append(&decide, &self.committee)?;
-            
+
             if decide_quorum.is_some() {
                 info!(
                     "BENCH event=decide_quorum_formed protocol=lionfish node={:?} author={:?} round={} digest={:?}",
@@ -1348,7 +1473,7 @@ impl Core {
     }
 
     async fn commit(&mut self, round: Round) -> DagResult<()> {
-        if self.last_committed_round >= round{
+        if self.last_committed_round >= round {
             return Ok(());
         }
 
@@ -1373,7 +1498,6 @@ impl Core {
         let mut cur = certificate.header_id;
         to_commit.push_front(cur.clone());
         for r in (self.last_committed_round + 1..=round - 1).rev() {
-            
             let cur_info = match self.parent_info.get(&cur).cloned() {
                 Some(info) => info,
                 None => break, // To do.
@@ -1431,7 +1555,6 @@ impl Core {
         Ok(())
     }
 
-
     // fn sanitize_timeout(&mut self, timeout: &Timeout) -> DagResult<()> {
     //     ensure!(
     //         self.gc_round <= timeout.round,
@@ -1440,7 +1563,10 @@ impl Core {
     //     Ok(())
     // }
 
-    fn sanitize_header_proof(&mut self, header_info_with_proof: &HeaderInfoWithProof) -> DagResult<()> {
+    fn sanitize_header_proof(
+        &mut self,
+        header_info_with_proof: &HeaderInfoWithProof,
+    ) -> DagResult<()> {
         ensure!(
             self.gc_round <= header_info_with_proof.round,
             DagError::TooOld(header_info_with_proof.id, header_info_with_proof.round)
@@ -1468,7 +1594,6 @@ impl Core {
 
     // Main loop listening to incoming messages.
     pub async fn run(&mut self) {
-
         loop {
             let result = tokio::select! {
                 // We receive here messages from other primaries.
@@ -1555,12 +1680,14 @@ mod core_bench {
     use crate::coding::Coding;
     use crate::header_waiter::WaiterMessage;
     use crate::merkle::MerkleTree;
-    use crate::messages::{Certificate, Echo, Header, HeaderInfo, HeaderInfoWithProof, ProposerParent, Timeout};
+    use crate::messages::{
+        Certificate, Echo, Header, HeaderInfo, HeaderInfoWithProof, ProposerParent, Timeout,
+    };
     use crate::primary::{PrimaryMessage, Round};
     use crate::synchronizer::Synchronizer;
+    use blsttc::PublicKeyShareG2;
     use config::{Authority, Committee, PrimaryAddresses};
     use crypto::{generate_production_keypair, Digest, PublicKey, SignatureService};
-    use blsttc::PublicKeyShareG2;
     use rand::RngCore;
     use std::collections::{BTreeMap, HashMap};
     use std::sync::atomic::AtomicU64;
@@ -1699,7 +1826,10 @@ mod core_bench {
         let iterations = 10;
 
         println!("======================================");
-        println!("bench_process_own_header ({} MB, {} iterations)", payload_mb, iterations);
+        println!(
+            "bench_process_own_header ({} MB, {} iterations)",
+            payload_mb, iterations
+        );
         println!("N={}, f={}", n, f_num);
         println!("======================================");
 
@@ -1715,20 +1845,44 @@ mod core_bench {
             let mut opt_times = Vec::with_capacity(iterations);
 
             for i in 0..iterations {
-                let store_path1 = format!("/tmp/claude/bench_own_header_orig_{}_{}_{}", threads, i, std::process::id());
+                let store_path1 = format!(
+                    "/tmp/claude/bench_own_header_orig_{}_{}_{}",
+                    threads,
+                    i,
+                    std::process::id()
+                );
                 let (mut core1, _sinks1) = make_core(
-                    my_pk, committee.clone(), &store_path1, rs_block_size, threads,
+                    my_pk,
+                    committee.clone(),
+                    &store_path1,
+                    rs_block_size,
+                    threads,
                 );
                 let t1 = Instant::now();
-                core1.process_own_header(header.clone()).await.expect("original failed");
+                core1
+                    .process_own_header(header.clone())
+                    .await
+                    .expect("original failed");
                 orig_times.push(t1.elapsed());
 
-                let store_path2 = format!("/tmp/claude/bench_own_header_opt_{}_{}_{}", threads, i, std::process::id());
+                let store_path2 = format!(
+                    "/tmp/claude/bench_own_header_opt_{}_{}_{}",
+                    threads,
+                    i,
+                    std::process::id()
+                );
                 let (mut core2, _sinks2) = make_core(
-                    my_pk, committee.clone(), &store_path2, rs_block_size, threads,
+                    my_pk,
+                    committee.clone(),
+                    &store_path2,
+                    rs_block_size,
+                    threads,
                 );
                 let t2 = Instant::now();
-                core2.process_own_header_optimized(header.clone()).await.expect("optimized failed");
+                core2
+                    .process_own_header_optimized(header.clone())
+                    .await
+                    .expect("optimized failed");
                 opt_times.push(t2.elapsed());
 
                 let _ = std::fs::remove_dir_all(&store_path1);
@@ -1743,11 +1897,19 @@ mod core_bench {
             let max_opt = *opt_times.iter().max().unwrap();
 
             println!("[threads={}] ({} iters)", threads, iterations);
-            println!("  Original:  avg={:?}  min={:?}  max={:?}", avg_orig, min_orig, max_orig);
-            println!("  Optimized: avg={:?}  min={:?}  max={:?}", avg_opt, min_opt, max_opt);
-            println!("  Speedup:   avg={:.2}x  best={:.2}x",
+            println!(
+                "  Original:  avg={:?}  min={:?}  max={:?}",
+                avg_orig, min_orig, max_orig
+            );
+            println!(
+                "  Optimized: avg={:?}  min={:?}  max={:?}",
+                avg_opt, min_opt, max_opt
+            );
+            println!(
+                "  Speedup:   avg={:.2}x  best={:.2}x",
                 avg_orig.as_secs_f64() / avg_opt.as_secs_f64(),
-                min_orig.as_secs_f64() / min_opt.as_secs_f64());
+                min_orig.as_secs_f64() / min_opt.as_secs_f64()
+            );
         }
         println!("======================================");
     }
@@ -1792,11 +1954,17 @@ mod core_bench {
         let payload_len = payload_bytes_raw.len();
         let mut payload_bytes = payload_bytes_raw;
         let mut shard_len = (payload_len + data_shard_num - 1) / data_shard_num;
-        if shard_len == 0 { shard_len = 1; }
-        if shard_len % 64 != 0 { shard_len += 64 - (shard_len % 64); }
+        if shard_len == 0 {
+            shard_len = 1;
+        }
+        if shard_len % 64 != 0 {
+            shard_len += 64 - (shard_len % 64);
+        }
         payload_bytes.resize(shard_len * total_shards, 0);
         let mut shards_vec: Vec<&mut [u8]> = payload_bytes.chunks_mut(shard_len).collect();
-        coding.encode(&mut shards_vec, rs_block_size, 4).expect("encode failed");
+        coding
+            .encode(&mut shards_vec, rs_block_size, 4)
+            .expect("encode failed");
 
         let hashes: Vec<Digest> = shards_vec
             .par_iter()
@@ -1806,7 +1974,9 @@ mod core_bench {
 
         let receiver_index = committee.index_of(&receiver_pk).unwrap();
         let receiver_leaf = &*shards_vec[receiver_index];
-        let receiver_proof = mtree.proof_with_leaf(receiver_index, receiver_leaf).unwrap();
+        let receiver_proof = mtree
+            .proof_with_leaf(receiver_index, receiver_leaf)
+            .unwrap();
         let hiwp = HeaderInfoWithProof {
             author: header_info.author,
             round: header_info.round,
@@ -1820,9 +1990,13 @@ mod core_bench {
         let optimistic_count = committee.optimistic_threshold() as usize;
         let mut echo_sources: Vec<usize> = Vec::new();
         for idx in 0..sorted_keys.len() {
-            if idx == receiver_index { continue; }
+            if idx == receiver_index {
+                continue;
+            }
             echo_sources.push(idx);
-            if echo_sources.len() >= (optimistic_count - 1) { break; }
+            if echo_sources.len() >= (optimistic_count - 1) {
+                break;
+            }
         }
 
         let echoes: Vec<Echo> = echo_sources
@@ -1841,7 +2015,12 @@ mod core_bench {
             })
             .collect();
         let iterations = 10;
-        println!("Setup time: {:?} (echoes={}, iterations={})", t_setup.elapsed(), echoes.len(), iterations);
+        println!(
+            "Setup time: {:?} (echoes={}, iterations={})",
+            t_setup.elapsed(),
+            echoes.len(),
+            iterations
+        );
 
         for &threads in &thread_counts {
             let mut orig_totals = Vec::with_capacity(iterations);
@@ -1851,12 +2030,24 @@ mod core_bench {
                 // --- Original ---
                 let hiwp_clone1 = hiwp.clone();
                 let echoes_clone1: Vec<Echo> = echoes.iter().cloned().collect();
-                let store_path1 = format!("/tmp/claude/bench_recv_orig_{}_{}_{}", threads, i, std::process::id());
+                let store_path1 = format!(
+                    "/tmp/claude/bench_recv_orig_{}_{}_{}",
+                    threads,
+                    i,
+                    std::process::id()
+                );
                 let (mut core1, _sinks1) = make_core(
-                    receiver_pk, committee.clone(), &store_path1, rs_block_size, threads,
+                    receiver_pk,
+                    committee.clone(),
+                    &store_path1,
+                    rs_block_size,
+                    threads,
                 );
                 let t1 = Instant::now();
-                core1.process_header_proof(&hiwp_clone1).await.expect("process_header_proof failed");
+                core1
+                    .process_header_proof(&hiwp_clone1)
+                    .await
+                    .expect("process_header_proof failed");
                 for echo in echoes_clone1 {
                     core1.process_echo(echo).await.expect("process_echo failed");
                 }
@@ -1865,14 +2056,29 @@ mod core_bench {
                 // --- Optimized ---
                 let hiwp_clone2 = hiwp.clone();
                 let echoes_clone2: Vec<Echo> = echoes.iter().cloned().collect();
-                let store_path2 = format!("/tmp/claude/bench_recv_opt_{}_{}_{}", threads, i, std::process::id());
+                let store_path2 = format!(
+                    "/tmp/claude/bench_recv_opt_{}_{}_{}",
+                    threads,
+                    i,
+                    std::process::id()
+                );
                 let (mut core2, _sinks2) = make_core(
-                    receiver_pk, committee.clone(), &store_path2, rs_block_size, threads,
+                    receiver_pk,
+                    committee.clone(),
+                    &store_path2,
+                    rs_block_size,
+                    threads,
                 );
                 let t2 = Instant::now();
-                core2.process_header_proof_optimized(&hiwp_clone2).await.expect("process_header_proof_optimized failed");
+                core2
+                    .process_header_proof_optimized(&hiwp_clone2)
+                    .await
+                    .expect("process_header_proof_optimized failed");
                 for echo in echoes_clone2 {
-                    core2.process_echo_optimized(echo).await.expect("process_echo_optimized failed");
+                    core2
+                        .process_echo_optimized(echo)
+                        .await
+                        .expect("process_echo_optimized failed");
                 }
                 opt_totals.push(t2.elapsed());
 
@@ -1888,11 +2094,19 @@ mod core_bench {
             let max_opt = *opt_totals.iter().max().unwrap();
 
             println!("[threads={}] ({} iters)", threads, iterations);
-            println!("  Original:  avg={:?}  min={:?}  max={:?}", avg_orig, min_orig, max_orig);
-            println!("  Optimized: avg={:?}  min={:?}  max={:?}", avg_opt, min_opt, max_opt);
-            println!("  Speedup:   avg={:.2}x  best={:.2}x",
+            println!(
+                "  Original:  avg={:?}  min={:?}  max={:?}",
+                avg_orig, min_orig, max_orig
+            );
+            println!(
+                "  Optimized: avg={:?}  min={:?}  max={:?}",
+                avg_opt, min_opt, max_opt
+            );
+            println!(
+                "  Speedup:   avg={:.2}x  best={:.2}x",
                 avg_orig.as_secs_f64() / avg_opt.as_secs_f64(),
-                min_orig.as_secs_f64() / min_opt.as_secs_f64());
+                min_orig.as_secs_f64() / min_opt.as_secs_f64()
+            );
         }
         println!("======================================");
     }
@@ -1910,8 +2124,8 @@ mod core_bench {
     /// wire-compatible with the owning enum.
     #[tokio::test]
     async fn test_primary_message_ref_echo_wire_compat() {
-        use crate::primary::{PrimaryMessage, PrimaryMessageRef};
         use crate::merkle::MerkleTree;
+        use crate::primary::{PrimaryMessage, PrimaryMessageRef};
 
         let n = 50usize;
         let f_num = 16u32;
@@ -1920,10 +2134,13 @@ mod core_bench {
 
         // Build a small HeaderInfoWithProof to create a realistic Echo.
         let payload: Vec<Vec<u8>> = vec![vec![1u8; 64]; 10];
-        let coding = Arc::new(Coding::new(
-            committee.data_shard_num() as usize,
-            committee.parity_shard_num() as usize,
-        ).unwrap());
+        let coding = Arc::new(
+            Coding::new(
+                committee.data_shard_num() as usize,
+                committee.parity_shard_num() as usize,
+            )
+            .unwrap(),
+        );
         let payload_bytes_raw = bincode::serialize(&payload).unwrap();
         let mut payload_bytes = payload_bytes_raw;
         let payload_len = payload_bytes.len();
@@ -1931,12 +2148,21 @@ mod core_bench {
         let parity_shard_num = coding.parity_shard_count();
         let total_shards = data_shard_num + parity_shard_num;
         let mut shard_len = (payload_len + data_shard_num - 1) / data_shard_num;
-        if shard_len == 0 { shard_len = 1; }
-        if shard_len % 64 != 0 { shard_len += 64 - (shard_len % 64); }
+        if shard_len == 0 {
+            shard_len = 1;
+        }
+        if shard_len % 64 != 0 {
+            shard_len += 64 - (shard_len % 64);
+        }
         payload_bytes.resize(shard_len * total_shards, 0);
         let mut shards_vec: Vec<&mut [u8]> = payload_bytes.chunks_mut(shard_len).collect();
-        coding.encode(&mut shards_vec, 16 * 1024, 4).expect("encode failed");
-        let hashes: Vec<Digest> = shards_vec.par_iter().map(|s| MerkleTree::digest(&**s)).collect();
+        coding
+            .encode(&mut shards_vec, 16 * 1024, 4)
+            .expect("encode failed");
+        let hashes: Vec<Digest> = shards_vec
+            .par_iter()
+            .map(|s| MerkleTree::digest(&**s))
+            .collect();
         let mtree = MerkleTree::from_hashes(hashes);
 
         let proof = mtree.proof_with_leaf(0, &*shards_vec[0]).unwrap();
@@ -1952,14 +2178,17 @@ mod core_bench {
         let bytes_owned = bincode::serialize(&PrimaryMessage::Echo(echo.clone()))
             .expect("owned serialize failed");
         // Serialize with borrowing enum.
-        let bytes_ref = bincode::serialize(&PrimaryMessageRef::Echo(&echo))
-            .expect("ref serialize failed");
+        let bytes_ref =
+            bincode::serialize(&PrimaryMessageRef::Echo(&echo)).expect("ref serialize failed");
 
         assert_eq!(
             bytes_owned, bytes_ref,
             "PrimaryMessageRef::Echo wire format does not match PrimaryMessage::Echo"
         );
-        println!("PrimaryMessageRef wire-compat test passed ({} bytes)", bytes_owned.len());
+        println!(
+            "PrimaryMessageRef wire-compat test passed ({} bytes)",
+            bytes_owned.len()
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1970,8 +2199,8 @@ mod core_bench {
     /// PrimaryMessage::HeaderInfoWithProof(hiwp).
     #[tokio::test]
     async fn test_helper_zero_copy_wire_compat() {
-        use crate::primary::PrimaryMessage;
         use crate::merkle::MerkleTree;
+        use crate::primary::PrimaryMessage;
 
         let n = 50usize;
         let f_num = 16u32;
@@ -1979,10 +2208,13 @@ mod core_bench {
         let committee = Arc::new(committee);
 
         let payload: Vec<Vec<u8>> = vec![vec![1u8; 64]; 10];
-        let coding = Arc::new(Coding::new(
-            committee.data_shard_num() as usize,
-            committee.parity_shard_num() as usize,
-        ).unwrap());
+        let coding = Arc::new(
+            Coding::new(
+                committee.data_shard_num() as usize,
+                committee.parity_shard_num() as usize,
+            )
+            .unwrap(),
+        );
         let payload_bytes_raw = bincode::serialize(&payload).unwrap();
         let mut payload_bytes = payload_bytes_raw;
         let payload_len = payload_bytes.len();
@@ -1990,12 +2222,21 @@ mod core_bench {
         let parity_shard_num = coding.parity_shard_count();
         let total_shards = data_shard_num + parity_shard_num;
         let mut shard_len = (payload_len + data_shard_num - 1) / data_shard_num;
-        if shard_len == 0 { shard_len = 1; }
-        if shard_len % 64 != 0 { shard_len += 64 - (shard_len % 64); }
+        if shard_len == 0 {
+            shard_len = 1;
+        }
+        if shard_len % 64 != 0 {
+            shard_len += 64 - (shard_len % 64);
+        }
         payload_bytes.resize(shard_len * total_shards, 0);
         let mut shards_vec: Vec<&mut [u8]> = payload_bytes.chunks_mut(shard_len).collect();
-        coding.encode(&mut shards_vec, 16 * 1024, 4).expect("encode failed");
-        let hashes: Vec<Digest> = shards_vec.par_iter().map(|s| MerkleTree::digest(&**s)).collect();
+        coding
+            .encode(&mut shards_vec, 16 * 1024, 4)
+            .expect("encode failed");
+        let hashes: Vec<Digest> = shards_vec
+            .par_iter()
+            .map(|s| MerkleTree::digest(&**s))
+            .collect();
         let mtree = MerkleTree::from_hashes(hashes);
 
         let proof = mtree.proof_with_leaf(0, &*shards_vec[0]).unwrap();
@@ -2023,6 +2264,9 @@ mod core_bench {
             canonical, zero_copy,
             "Helper zero-copy wire format does not match PrimaryMessage::HeaderInfoWithProof"
         );
-        println!("Helper zero-copy wire-compat test passed ({} bytes)", canonical.len());
+        println!(
+            "Helper zero-copy wire-compat test passed ({} bytes)",
+            canonical.len()
+        );
     }
 }

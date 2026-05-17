@@ -1,14 +1,14 @@
 // Copyright(C) Facebook, Inc. and its affiliates.
 use crate::error::{DagError, DagResult};
 use crate::merkle::Proof;
-use crate::messages::{Certificate, Ready, Timeout, TimeoutCert, Decide};
+use crate::messages::{Certificate, Decide, Ready, Timeout, TimeoutCert};
 use config::{Committee, Stake};
-use crypto::{PublicKey, Digest};
 use crypto::Signature;
+use crypto::{Digest, PublicKey};
 use log::debug;
-use std::time::Instant;
-use std::collections::{HashSet, HashMap};
+use std::collections::{HashMap, HashSet};
 use std::mem;
+use std::time::Instant;
 
 pub struct EchoAggregator {
     weight: Stake,
@@ -29,7 +29,12 @@ impl EchoAggregator {
         }
     }
 
-    pub fn append(&mut self, author: PublicKey, proof: Proof, committee: &Committee) -> DagResult<Option<(Digest, Vec<Option<Box<[u8]>>>)>> {
+    pub fn append(
+        &mut self,
+        author: PublicKey,
+        proof: Proof,
+        committee: &Committee,
+    ) -> DagResult<Option<(Digest, Vec<Option<Box<[u8]>>>)>> {
         // Ensure it is the first time this authority votes.
         ensure!(self.used.insert(author), DagError::AuthorityReuse(author));
 
@@ -75,11 +80,7 @@ impl ReadyAggregator {
     }
 
     // Return the root hash when 2f+1 Ready messages are collected for it.
-    pub fn append(
-        &mut self,
-        ready: &Ready,
-        committee: &Committee,
-    ) -> DagResult<Option<Digest>> {
+    pub fn append(&mut self, ready: &Ready, committee: &Committee) -> DagResult<Option<Digest>> {
         let author = ready.author;
         // Ensure it is the first time this authority votes.
         ensure!(self.used.insert(author), DagError::AuthorityReuse(author));
@@ -110,11 +111,7 @@ impl DecideAggregator {
         }
     }
 
-    pub fn append(
-        &mut self,
-        decide: &Decide,
-        committee: &Committee,
-    ) -> DagResult<Option<bool>> {
+    pub fn append(&mut self, decide: &Decide, committee: &Committee) -> DagResult<Option<bool>> {
         let author = decide.author;
         ensure!(self.used.insert(author), DagError::AuthorityReuse(author));
         self.weight += committee.stake(&author);

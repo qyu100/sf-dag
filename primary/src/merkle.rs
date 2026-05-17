@@ -1,14 +1,14 @@
-use std::time::Instant;
+use crate::batch_maker::Transaction;
 use bincode::de;
-use serde::{Deserialize, Serialize};
-use log::debug;
-use rayon::prelude::*;
 use blake3;
 use crypto::Digest;
-use crate::batch_maker::Transaction;
+use log::debug;
+use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
+use std::time::Instant;
 
 // Use rs_merkle types internally but expose the original API to the rest of the codebase.
-use rs_merkle::{MerkleTree as RsMerkleTree, MerkleProof as RsMerkleProof, Hasher as RsHasher};
+use rs_merkle::{Hasher as RsHasher, MerkleProof as RsMerkleProof, MerkleTree as RsMerkleTree};
 
 // A small wrapper hasher implementing rs_merkle::Hasher using blake3.
 #[derive(Clone, Copy, Default)]
@@ -38,28 +38,36 @@ impl MerkleTree {
     /// Build from owned values. We hash leaves in parallel for performance, then construct an rs_merkle tree.
     pub fn from_vec(values: Vec<Transaction>) -> Self {
         let t_start = Instant::now();
-        
+
         let leaf_hashes: Vec<[u8; 32]> = values
             .par_iter()
-            .map(|v| *blake3::hash(v.as_ref()).as_bytes()) 
+            .map(|v| *blake3::hash(v.as_ref()).as_bytes())
             .collect();
 
-        debug!("merkle.from_vec: hashed {} leaves in {:?}", leaf_hashes.len(), t_start.elapsed());
+        debug!(
+            "merkle.from_vec: hashed {} leaves in {:?}",
+            leaf_hashes.len(),
+            t_start.elapsed()
+        );
 
         let inner = RsMerkleTree::<Blake3Hasher>::from_leaves(&leaf_hashes);
-        debug!("merkle.from_vec: built rs_merkle tree in {:?}", t_start.elapsed());
+        debug!(
+            "merkle.from_vec: built rs_merkle tree in {:?}",
+            t_start.elapsed()
+        );
 
-        let root_hash = inner.root()
-            .map(|r| Digest(r))
-            .expect("merkle has a root");
+        let root_hash = inner.root().map(|r| Digest(r)).expect("merkle has a root");
 
-        debug!("merkle.from_vec: obtained root hash in {:?}", t_start.elapsed());
+        debug!(
+            "merkle.from_vec: obtained root hash in {:?}",
+            t_start.elapsed()
+        );
 
-        MerkleTree { 
-            inner, 
-            values, 
-            root_hash, 
-            leaf_count: leaf_hashes.len() 
+        MerkleTree {
+            inner,
+            values,
+            root_hash,
+            leaf_count: leaf_hashes.len(),
         }
     }
 
@@ -72,7 +80,12 @@ impl MerkleTree {
         let mut root_arr = [0u8; 32];
         root_arr.copy_from_slice(root_ref.as_ref());
         let root_hash = Digest(root_arr);
-        MerkleTree { inner, values: Vec::new(), root_hash, leaf_count: leaf_hashes.len() }
+        MerkleTree {
+            inner,
+            values: Vec::new(),
+            root_hash,
+            leaf_count: leaf_hashes.len(),
+        }
     }
 
     pub fn leaf_count(&self) -> usize {
@@ -98,7 +111,13 @@ impl MerkleTree {
         let vec = self.values.get(index).cloned()?;
         let value_hash = MerkleTree::digest(vec.as_slice());
         let value_box = vec.into_boxed_slice();
-        Some(Proof { value: value_box, index, digests, root_hash: self.root_hash, value_hash })
+        Some(Proof {
+            value: value_box,
+            index,
+            digests,
+            root_hash: self.root_hash,
+            value_hash,
+        })
     }
 
     pub fn proof_with_leaf(&self, index: usize, leaf: &[u8]) -> Option<Proof> {
@@ -132,7 +151,13 @@ impl MerkleTree {
         let value_box = leaf.to_vec().into_boxed_slice();
         let t_after_box = Instant::now();
 
-        Some(Proof { value: value_box, index, digests, root_hash: self.root_hash, value_hash })
+        Some(Proof {
+            value: value_box,
+            index,
+            digests,
+            root_hash: self.root_hash,
+            value_hash,
+        })
     }
 
     pub fn root_hash(&self) -> &Digest {
@@ -172,10 +197,18 @@ impl Proof {
         proof.verify(self.root_hash.0, &[self.index], &[self.value_hash.0], n)
     }
 
-    pub fn index(&self) -> usize { self.index }
-    pub fn root_hash(&self) -> &Digest { &self.root_hash }
-    pub fn value(&self) -> &Box<[u8]> { &self.value }
-    pub fn into_value(self) -> Box<[u8]> { self.value }
+    pub fn index(&self) -> usize {
+        self.index
+    }
+    pub fn root_hash(&self) -> &Digest {
+        &self.root_hash
+    }
+    pub fn value(&self) -> &Box<[u8]> {
+        &self.value
+    }
+    pub fn into_value(self) -> Box<[u8]> {
+        self.value
+    }
 }
 
 fn hash_pair(a: &Digest, b: &Digest) -> Digest {

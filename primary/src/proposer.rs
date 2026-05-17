@@ -1,7 +1,5 @@
 use crate::batch_maker::Transaction;
-use crate::messages::{
-    Header, HeaderWithCertificate, ProposerParent, Timeout, TimeoutCert,
-};
+use crate::messages::{Header, HeaderWithCertificate, ProposerParent, Timeout, TimeoutCert};
 use crate::primary::Round;
 use config::Committee;
 use crypto::{PublicKey, SignatureService};
@@ -9,9 +7,9 @@ use crypto::{PublicKey, SignatureService};
 use log::info;
 use log::{debug, warn};
 use std::cmp::Ordering;
+use std::convert::TryInto;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::time::{sleep, Duration, Instant};
-use std::convert::TryInto;
 
 // #[cfg(test)]
 // #[path = "tests/proposer_tests.rs"]
@@ -132,23 +130,13 @@ impl Proposer {
 
         let parent = self.last_parent.pop().expect("no parent available");
 
-        let header = Header::new(
-            self.name,
-            self.round,
-            payload,
-            parent.header_id,
-        )
-        .await;
+        let header = Header::new(self.name, self.round, payload, parent.header_id).await;
 
         #[cfg(feature = "benchmark")]
         {
             let payload_bytes: usize = header.payload.iter().map(|tx| tx.len()).sum();
             info!("Created {:?}", header.id);
-            info!(
-                "Header {:?} contains {} B",
-                header.id,
-                payload_bytes
-            );
+            info!("Header {:?} contains {} B", header.id, payload_bytes);
             info!(
                 "BENCH event=created protocol=lionfish node={:?} author={:?} round={} digest={:?} parent={:?} payload_root=unknown payload_bytes={}",
                 self.name,
@@ -174,7 +162,7 @@ impl Proposer {
                 }
             }
             // NOTE: This log entry is used to compute performance.
-        } 
+        }
         // let header_with_parents = HeaderWithCertificate { header, parents };
 
         // Send the new header to the `Core` that will broadcast and process it.
@@ -210,9 +198,7 @@ impl Proposer {
                 self.make_timeout_msg().await;
                 timeout_sent = true;
             }
-            if (((enough_digests || self.consensus_only) && advance))
-                && enough_parents
-            {
+            if ((enough_digests || self.consensus_only) && advance) && enough_parents {
                 // Advance to the next round.
                 self.round += 1;
                 debug!("Protocol moved to round {}", self.round);
