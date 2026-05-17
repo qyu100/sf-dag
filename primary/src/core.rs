@@ -987,9 +987,30 @@ impl Core {
             }
             if let Some(echo_aggregator) = self.processing_echo_aggregators.get_mut(&id) {
                 let t_agg = Instant::now();
-                if let Some((root, mut leaf_values)) =
-                    echo_aggregator.append(author, proof, &self.committee)?
+                let (root, echo_count, echo_weight, agg_result) =
+                    echo_aggregator.append(author, proof, &self.committee)?;
+                let (round, origin, payload_bytes) = self
+                    .processing_header_proofs
+                    .get(&id)
+                    .map(|header| (header.round, header.author, header.payload_len))
+                    .unwrap_or((0, author, 0));
+                if echo_count == self.committee.quorum_threshold() as usize
+                    || echo_weight == self.committee.optimistic_threshold()
                 {
+                    info!(
+                        "BENCH event=echo_milestone protocol=lionfish node={:?} author={:?} round={} digest={:?} payload_root={:?} payload_bytes={} count={} weight={} threshold_optimistic={}",
+                        self.name,
+                        origin,
+                        round,
+                        id,
+                        root,
+                        payload_bytes,
+                        echo_count,
+                        echo_weight,
+                        self.committee.optimistic_threshold()
+                    );
+                }
+                if let Some(mut leaf_values) = agg_result {
                     let d_agg = t_agg.elapsed();
                     // Store the collected leaf values for this root so we can reconstruct later
                     // key by (round, root_hash)
@@ -1139,15 +1160,32 @@ impl Core {
             }
             if let Some(echo_aggregator) = self.processing_echo_aggregators.get_mut(&id) {
                 let t_agg = Instant::now();
-                let agg_result = echo_aggregator.append(author, proof, &self.committee)?;
+                let (root, echo_count, echo_weight, agg_result) =
+                    echo_aggregator.append(author, proof, &self.committee)?;
                 let d_agg = t_agg.elapsed();
 
-                if let Some((root, mut leaf_values)) = agg_result {
-                    let (round, origin, payload_bytes) = self
-                        .processing_header_proofs
-                        .get(&id)
-                        .map(|header| (header.round, header.author, header.payload_len))
-                        .unwrap_or((0, author, 0));
+                let (round, origin, payload_bytes) = self
+                    .processing_header_proofs
+                    .get(&id)
+                    .map(|header| (header.round, header.author, header.payload_len))
+                    .unwrap_or((0, author, 0));
+                if echo_count == self.committee.quorum_threshold() as usize
+                    || echo_weight == self.committee.optimistic_threshold()
+                {
+                    info!(
+                        "BENCH event=echo_milestone protocol=lionfish node={:?} author={:?} round={} digest={:?} payload_root={:?} payload_bytes={} count={} weight={} threshold_optimistic={}",
+                        self.name,
+                        origin,
+                        round,
+                        id,
+                        root,
+                        payload_bytes,
+                        echo_count,
+                        echo_weight,
+                        self.committee.optimistic_threshold()
+                    );
+                }
+                if let Some(mut leaf_values) = agg_result {
                     info!(
                         "BENCH event=echo_quorum_formed protocol=lionfish node={:?} author={:?} round={} digest={:?} payload_root={:?} payload_bytes={} aggregate_ms={}",
                         self.name,
