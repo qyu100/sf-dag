@@ -949,7 +949,9 @@ impl Core {
         let bytes = bincode::serialize(header_info_with_proof).expect("Failed to serialize header");
         self.store.write(hid.to_vec(), bytes).await;
 
-        // Notify proposer as soon as we have this block and its parent delivered.
+        self.send_echo(header_info_with_proof).await?;
+
+        // Notify proposer after the latency-critical echo is enqueued.
         self.tx_proposer
             .send(ProposerParent {
                 header_id: header_info_with_proof.id,
