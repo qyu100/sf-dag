@@ -760,9 +760,8 @@ impl Core {
             }
         }
 
-        self.send_echo(header_info_with_proof).await?;
-
-        // Notify proposer after the latency-critical echo is enqueued.
+        // Notify proposer as soon as we have this block and its parent
+        // delivered; do not block the proposal pipeline on echo broadcast.
         self.tx_proposer
             .send(ProposerParent {
                 header_id: header_info_with_proof.id,
@@ -938,9 +937,9 @@ impl Core {
         let bytes = bincode::serialize(header_info_with_proof).expect("Failed to serialize header");
         self.store.write(hid.to_vec(), bytes).await;
 
-        self.send_echo(header_info_with_proof).await?;
-
-        // Notify proposer after the latency-critical echo is enqueued.
+        // Keep the proposal pipeline ahead of the large echo path. Once the
+        // parent is locally delivered, the proposer can build the optimistic
+        // child without waiting for this block's echo broadcast.
         self.tx_proposer
             .send(ProposerParent {
                 header_id: header_info_with_proof.id,
@@ -949,6 +948,8 @@ impl Core {
             })
             .await
             .expect("Failed to send parent candidate to proposer");
+
+        self.send_echo(header_info_with_proof).await?;
 
         if self
             .pending_reconstructions
