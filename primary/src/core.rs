@@ -95,6 +95,8 @@ pub struct Core {
     pending_echoes: HashMap<Digest, HeaderInfoWithProof>,
     /// Parent sync requests already issued for pending echoes.
     requested_echo_parents: HashMap<Digest, Round>,
+    /// Echoes received before the corresponding header proof is available.
+    pending_echo_messages: HashMap<Digest, Vec<Echo>>,
     /// For storing info of echo aggregators in processing
     processing_echo_aggregators: HashMap<Digest, EchoAggregator>,
     /// For storing info of ready aggregators in processing
@@ -189,6 +191,7 @@ impl Core {
                 processing_header_proofs: HashMap::new(),
                 pending_echoes: HashMap::new(),
                 requested_echo_parents: HashMap::new(),
+                pending_echo_messages: HashMap::new(),
                 processing_echo_aggregators: HashMap::new(),
                 processing_ready_aggregators: HashMap::new(),
                 processing_decide_aggregators: HashMap::new(),
@@ -278,6 +281,7 @@ impl Core {
             processing_header_proofs: HashMap::new(),
             pending_echoes: HashMap::new(),
             requested_echo_parents: HashMap::new(),
+            pending_echo_messages: HashMap::new(),
             processing_echo_aggregators: HashMap::new(),
             processing_ready_aggregators: HashMap::new(),
             processing_decide_aggregators: HashMap::new(),
@@ -452,8 +456,6 @@ impl Core {
             "process_own_header proof construction and sending time: {:?}",
             t.elapsed()
         );
-        println!("    [own_header_original] setup={:?} serialize={:?} pad={:?} encode={:?} merkle={:?} proofs+send={:?} total={:?}",
-            d_setup, d_ser, d_pad, d_encode, d_mtree, d_proofs_send, start_total.elapsed());
         debug!("process_own_header total time: {:?}", start_total.elapsed());
         Ok(())
     }
@@ -681,9 +683,6 @@ impl Core {
             let d_proofs = t_proofs.elapsed();
 
             let round = header_info.round;
-            println!("    [dispatch_own_header bg] setup={:?} serialize={:?} pad={:?} encode={:?} merkle={:?} proofs={:?} total={:?}",
-                d_setup, d_ser, d_pad, d_encode, d_mtree, d_proofs, start_total.elapsed());
-
             let _ = tx.blocking_send(OwnHeaderComputeResult {
                 header_info,
                 messages,
@@ -696,19 +695,6 @@ impl Core {
     /// Handle the result of a background own-header computation.
     /// Performs network sends and state updates inline.
     async fn handle_own_header_result(&mut self, result: OwnHeaderComputeResult) -> DagResult<()> {
-        let start = Instant::now();
-        let remote_messages = result
-            .messages
-            .iter()
-            .filter_map(|(_, bytes)| bytes.as_ref())
-            .count();
-        let total_wire_bytes: usize = result
-            .messages
-            .iter()
-            .filter_map(|(_, bytes)| bytes.as_ref())
-            .map(|bytes| bytes.len())
-            .sum();
-
         // Store header_info in processing map
         self.processing_header_infos
             .entry(result.header_info.id)
@@ -737,16 +723,6 @@ impl Core {
                 _ => unreachable!(),
             }
         }
-        info!(
-            "BENCH event=proposal_send protocol=lionfish node={:?} round={} digest={:?} remotes={} total_wire_bytes={} send_ms={}",
-            self.name,
-            result.round,
-            result.header_info.id,
-            remote_messages,
-            total_wire_bytes,
-            start.elapsed().as_millis()
-        );
-        println!("    [handle_own_header_result] send={:?}", start.elapsed());
         Ok(())
     }
 
@@ -755,16 +731,6 @@ impl Core {
         header_info_with_proof: &HeaderInfoWithProof,
     ) -> DagResult<()> {
         let start = Instant::now();
-        info!(
-            "BENCH event=proposal_received protocol=lionfish node={:?} author={:?} round={} digest={:?} parent={:?} payload_root={:?} payload_bytes={}",
-            self.name,
-            header_info_with_proof.author,
-            header_info_with_proof.round,
-            header_info_with_proof.id,
-            header_info_with_proof.parent,
-            header_info_with_proof.proof.root_hash(),
-            header_info_with_proof.payload_len
-        );
         // debug!("Processing proof: {:?}", header_info_with_proof);
         debug!(
             "Header info with proof payload len: {}",
@@ -845,16 +811,6 @@ impl Core {
         header_info_with_proof: &HeaderInfoWithProof,
     ) -> DagResult<()> {
         let start = Instant::now();
-        info!(
-            "BENCH event=proposal_received protocol=lionfish node={:?} author={:?} round={} digest={:?} parent={:?} payload_root={:?} payload_bytes={}",
-            self.name,
-            header_info_with_proof.author,
-            header_info_with_proof.round,
-            header_info_with_proof.id,
-            header_info_with_proof.parent,
-            header_info_with_proof.proof.root_hash(),
-            header_info_with_proof.payload_len
-        );
         debug!(
             "Header info with proof payload len: {}",
             header_info_with_proof.proof.value().len()
@@ -874,11 +830,44 @@ impl Core {
                 .or_insert_with(|| header_info_with_proof.clone());
         }
         self.try_send_pending_echoes().await?;
+        self.replay_pending_echo_messages(header_info_with_proof.id)
+            .await?;
         debug!(
             "process_header_proof_optimized total time: {:?}",
             start.elapsed()
         );
         Ok(())
+    }
+
+    async fn handle_echo_message(&mut self, echo: Echo) -> DagResult<()> {
+        let id = echo.id;
+        if !self.processing_header_proofs.contains_key(&id) {
+            self.pending_echo_messages
+                .entry(id)
+                .or_insert_with(Vec::new)
+                .push(echo);
+            return Ok(());
+        }
+
+        self.process_echo_with_header(echo).await
+    }
+
+    async fn replay_pending_echo_messages(&mut self, id: Digest) -> DagResult<()> {
+        let Some(echoes) = self.pending_echo_messages.remove(&id) else {
+            return Ok(());
+        };
+
+        for echo in echoes {
+            if let Err(e) = self.process_echo_with_header(echo).await {
+                warn!("Dropping pending echo after header arrived: {}", e);
+            }
+        }
+        Ok(())
+    }
+
+    async fn process_echo_with_header(&mut self, echo: Echo) -> DagResult<()> {
+        self.sanitize_echo(&echo)?;
+        self.process_echo_optimized(echo).await
     }
 
     fn has_echoed(&self, header_info_with_proof: &HeaderInfoWithProof) -> bool {
@@ -1003,26 +992,11 @@ impl Core {
 
             let bytes = bincode::serialize(&PrimaryMessageRef::Echo(&echo))
                 .expect("Failed to serialize our own echo");
-            let remotes = addresses.len();
-            let total_wire_bytes = bytes.len() * remotes;
             let handlers = self.network.broadcast(addresses, Bytes::from(bytes)).await;
             self.cancel_handlers
                 .entry(round)
                 .or_insert_with(Vec::new)
                 .extend(handlers);
-            info!(
-                "BENCH event=echo_sent protocol=lionfish node={:?} author={:?} sender={:?} round={} digest={:?} payload_root={:?} payload_bytes={} remotes={} total_wire_bytes={}",
-                self.name,
-                header_info_with_proof.author,
-                self.name,
-                header_info_with_proof.round,
-                header_info_with_proof.id,
-                header_info_with_proof.proof.root_hash(),
-                header_info_with_proof.payload_len,
-                remotes,
-                total_wire_bytes
-            );
-
             self.process_echo_optimized(echo)
                 .await
                 .expect("Failed to process our own echo");
@@ -1057,22 +1031,6 @@ impl Core {
                     .get(&id)
                     .map(|header| (header.round, header.author, header.payload_len))
                     .unwrap_or((0, author, 0));
-                if echo_count == self.committee.quorum_threshold() as usize
-                    || echo_weight == self.committee.optimistic_threshold()
-                {
-                    info!(
-                        "BENCH event=echo_milestone protocol=lionfish node={:?} author={:?} round={} digest={:?} payload_root={:?} payload_bytes={} count={} weight={} threshold_optimistic={}",
-                        self.name,
-                        origin,
-                        round,
-                        id,
-                        root,
-                        payload_bytes,
-                        echo_count,
-                        echo_weight,
-                        self.committee.optimistic_threshold()
-                    );
-                }
                 if let Some(mut leaf_values) = agg_result {
                     let d_agg = t_agg.elapsed();
                     // Store the collected leaf values for this root so we can reconstruct later
@@ -1152,9 +1110,6 @@ impl Core {
                     self.finalize_reconstruction(header_clone).await?;
                     let d_finalize = t_finalize.elapsed();
                     debug!("finalize_reconstruction time: {:?}", t_finalize.elapsed());
-
-                    println!("    [original final echo] validate={:?} agg={:?} reconstruct={:?} convert={:?} hash={:?} tree={:?} finalize={:?} total={:?}",
-                        d_validate, d_agg, d_reconstruct, d_convert, d_hash, d_tree, d_finalize, t_total.elapsed());
                 }
             }
         }
@@ -1223,53 +1178,18 @@ impl Core {
             }
             if let Some(echo_aggregator) = self.processing_echo_aggregators.get_mut(&id) {
                 let t_agg = Instant::now();
-                let (root, echo_count, echo_weight, agg_result) =
+                let (root, _echo_count, _echo_weight, agg_result) =
                     echo_aggregator.append(author, proof, &self.committee)?;
                 let d_agg = t_agg.elapsed();
 
-                let (round, origin, payload_bytes) = self
-                    .processing_header_proofs
-                    .get(&id)
-                    .map(|header| (header.round, header.author, header.payload_len))
-                    .unwrap_or((0, author, 0));
-                if echo_count == self.committee.quorum_threshold() as usize
-                    || echo_weight == self.committee.optimistic_threshold()
-                {
-                    info!(
-                        "BENCH event=echo_milestone protocol=lionfish node={:?} author={:?} round={} digest={:?} payload_root={:?} payload_bytes={} count={} weight={} threshold_optimistic={}",
-                        self.name,
-                        origin,
-                        round,
-                        id,
-                        root,
-                        payload_bytes,
-                        echo_count,
-                        echo_weight,
-                        self.committee.optimistic_threshold()
-                    );
-                }
                 if let Some(mut leaf_values) = agg_result {
-                    info!(
-                        "BENCH event=echo_quorum_formed protocol=lionfish node={:?} author={:?} round={} digest={:?} payload_root={:?} payload_bytes={} aggregate_ms={}",
-                        self.name,
-                        origin,
-                        round,
-                        id,
-                        root,
-                        payload_bytes,
-                        d_agg.as_millis()
-                    );
                     // Dispatch reconstruction to background so the event loop stays responsive.
                     let coding = Arc::clone(&self.coding);
                     let rs_block_size = self.rs_block_size;
                     let rs_block_threads = self.rs_block_threads;
                     let tx = self.tx_reconstruction_result.clone();
                     let recon_id = id;
-                    let node = self.name;
-
                     tokio::task::spawn_blocking(move || {
-                        let t_total = Instant::now();
-
                         let t_reconstruct = Instant::now();
                         if let Err(e) = coding.reconstruct_shards(
                             &mut leaf_values[..],
@@ -1303,22 +1223,6 @@ impl Core {
                         let d_tree = t_tree.elapsed();
 
                         let success = *mtree.root_hash() == root;
-                        info!(
-                            "BENCH event=reconstruction_done protocol=lionfish node={:?} round={} digest={:?} payload_root={:?} success={} reconstruct_ms={} hash_ms={} tree_ms={} total_ms={}",
-                            node,
-                            round,
-                            recon_id,
-                            root,
-                            success,
-                            d_reconstruct.as_millis(),
-                            d_hash.as_millis(),
-                            d_tree.as_millis(),
-                            t_total.elapsed().as_millis()
-                        );
-
-                        println!("    [reconstruction bg] reconstruct={:?} hash={:?} tree={:?} success={} total={:?}",
-                            d_reconstruct, d_hash, d_tree, success, t_total.elapsed());
-
                         let _ = tx.blocking_send(ReconstructionResult {
                             id: recon_id,
                             root,
@@ -1356,13 +1260,6 @@ impl Core {
             round,
             origin: author,
         };
-        info!(
-            "BENCH event=certificate_formed protocol=lionfish node={:?} author={:?} round={} digest={:?}",
-            self.name,
-            author,
-            round,
-            header_id
-        );
 
         self.process_certificate_optimized(certificate).await?;
         debug!(
@@ -1397,10 +1294,6 @@ impl Core {
 
         self.finalize_reconstruction_optimized(header_id, round, origin)
             .await?;
-        println!(
-            "    [handle_reconstruction_result] finalize={:?}",
-            t_finalize.elapsed()
-        );
         Ok(())
     }
 
@@ -1446,23 +1339,11 @@ impl Core {
             .collect();
         let bytes = bincode::serialize(&PrimaryMessage::Decide(decide.clone()))
             .expect("Failed to serialize our own decide");
-        let recipients = addresses.len();
-        let wire_bytes = bytes.len() * recipients;
         let handlers = self.network.broadcast(addresses, Bytes::from(bytes)).await;
         self.cancel_handlers
             .entry(certificate.round)
             .or_insert_with(Vec::new)
             .extend(handlers);
-        info!(
-            "BENCH event=decide_sent protocol=lionfish node={:?} author={:?} sender={:?} round={} digest={:?} remotes={} total_wire_bytes={}",
-            self.name,
-            certificate.origin,
-            self.name,
-            certificate.round,
-            certificate.header_id,
-            recipients,
-            wire_bytes
-        );
 
         Ok(())
     }
@@ -1512,23 +1393,11 @@ impl Core {
         // 4a: Move decide into serialization (no clone needed).
         let bytes = bincode::serialize(&PrimaryMessage::Decide(decide))
             .expect("Failed to serialize our own decide");
-        let recipients = addresses.len();
-        let wire_bytes = bytes.len() * recipients;
         let handlers = self.network.broadcast(addresses, Bytes::from(bytes)).await;
         self.cancel_handlers
             .entry(round)
             .or_insert_with(Vec::new)
             .extend(handlers);
-        info!(
-            "BENCH event=decide_sent protocol=lionfish node={:?} author={:?} sender={:?} round={} digest={:?} remotes={} total_wire_bytes={}",
-            self.name,
-            origin,
-            self.name,
-            round,
-            header_id,
-            recipients,
-            wire_bytes
-        );
 
         Ok(())
     }
@@ -1547,13 +1416,6 @@ impl Core {
             let decide_quorum = decide_aggregator.append(&decide, &self.committee)?;
 
             if decide_quorum.is_some() {
-                info!(
-                    "BENCH event=decide_quorum_formed protocol=lionfish node={:?} author={:?} round={} digest={:?}",
-                    self.name,
-                    decide.origin,
-                    decide.round,
-                    decide.id
-                );
                 self.commit(decide.round).await?;
             }
         }
@@ -1618,38 +1480,6 @@ impl Core {
         self.last_committed_round = round;
         // If parent is missing, to do.
         while let Some(header_id) = to_commit.pop_front() {
-            let (committed_round, parent) = self
-                .parent_info
-                .get(&header_id)
-                .cloned()
-                .unwrap_or((round, Digest::default()));
-            let (author, payload_root, payload_bytes, role) = self
-                .processing_header_proofs
-                .get(&header_id)
-                .map(|header| {
-                    (
-                        format!("{:?}", header.author),
-                        format!("{:?}", header.proof.root_hash()),
-                        header.payload_len,
-                        if header.author == self.name {
-                            "leader"
-                        } else {
-                            "non_leader"
-                        },
-                    )
-                })
-                .unwrap_or_else(|| ("unknown".to_string(), "unknown".to_string(), 0, "unknown"));
-            info!(
-                "BENCH event=committed protocol=lionfish node={:?} author={} round={} digest={:?} parent={:?} payload_root={} payload_bytes={} role={}",
-                self.name,
-                author,
-                committed_round,
-                header_id,
-                parent,
-                payload_root,
-                payload_bytes,
-                role
-            );
             info!("Committed {:?} ", header_id);
             // debug!("round {:?} committed", round);
         }
@@ -1707,20 +1537,7 @@ impl Core {
                         //     }
                         // },
                         PrimaryMessage::Echo(echo) => {
-                            info!(
-                                "BENCH event=echo_received protocol=lionfish node={:?} sender={:?} author={:?} round={} digest={:?} payload_root={:?} payload_bytes={}",
-                                self.name,
-                                echo.author,
-                                echo.origin,
-                                echo.round,
-                                echo.id,
-                                echo.proof.root_hash(),
-                                echo.proof.value().len()
-                            );
-                            match self.sanitize_echo(&echo) {
-                                Ok(()) => self.process_echo_optimized(echo).await,
-                                error => error
-                            }
+                            self.handle_echo_message(echo).await
                         },
                         PrimaryMessage::Decide(decide) => {
                             self.process_decide(&decide).await
@@ -1778,6 +1595,10 @@ impl Core {
                     .retain(|_, h| &h.round >= &gc_round);
                 self.pending_echoes.retain(|_, h| &h.round >= &gc_round);
                 self.requested_echo_parents.retain(|_, r| *r >= gc_round);
+                self.pending_echo_messages.retain(|_, echoes| {
+                    echoes.retain(|echo| echo.round >= gc_round);
+                    !echoes.is_empty()
+                });
                 self.cancel_handlers.retain(|k, _| k >= &gc_round);
                 // let _ = self.synchronizer.garbage_collect(gc_round).await;
                 self.gc_round = gc_round;

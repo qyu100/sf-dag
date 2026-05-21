@@ -124,7 +124,10 @@ impl Parameters {
         info!("Transaction size set to {} B", self.tx_size);
         info!("F  set to {} B", self.f_num);
         info!("Reed-Solomon block size set to {} B", self.rs_block_size);
-        info!("Reed-Solomon block threads set to {}", self.rs_block_threads);
+        info!(
+            "Reed-Solomon block threads set to {}",
+            self.rs_block_threads
+        );
     }
 }
 

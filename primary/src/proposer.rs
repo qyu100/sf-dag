@@ -137,15 +137,6 @@ impl Proposer {
             let payload_bytes: usize = header.payload.iter().map(|tx| tx.len()).sum();
             info!("Created {:?}", header.id);
             info!("Header {:?} contains {} B", header.id, payload_bytes);
-            info!(
-                "BENCH event=created protocol=lionfish node={:?} author={:?} round={} digest={:?} parent={:?} payload_root=unknown payload_bytes={}",
-                self.name,
-                self.name,
-                header.round,
-                header.id,
-                header.parent,
-                payload_bytes
-            );
             if !self.consensus_only {
                 let tx_ids: Vec<[u8; 8]> = header
                     .payload
