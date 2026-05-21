@@ -7,8 +7,8 @@ use log::{debug, info, warn};
 use rand::prelude::SliceRandom as _;
 use rand::rngs::SmallRng;
 use rand::SeedableRng as _;
-use std::collections::VecDeque;
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::time::Instant;
 use tokio::net::TcpStream;
@@ -129,7 +129,8 @@ impl SimpleSender {
         label: Option<String>,
     ) {
         for address in addresses {
-            self.send_with_label(address, data.clone(), label.clone()).await;
+            self.send_with_label(address, data.clone(), label.clone())
+                .await;
         }
 
         // TODO: Remove

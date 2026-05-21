@@ -178,16 +178,6 @@ impl Proposer {
             );
             sends.push((address, message, label));
         }
-        let total_wire_bytes: usize = sends.iter().map(|(_, message, _)| message.len()).sum();
-        info!(
-            "BENCH event=proposal_send protocol=hydrangea node={} round={} digest={} remotes={} total_wire_bytes={} enqueue_ms={}",
-            self.name,
-            round,
-            digest,
-            sends.len(),
-            total_wire_bytes,
-            send_start.elapsed().as_millis()
-        );
         debug!(
             "TIMING proposal_send round={} remotes={} enqueue_ms={}",
             round,
@@ -202,16 +192,6 @@ impl Proposer {
         debug!("Created {:?}", b);
         info!("Created {}", b.digest());
         info!("Header {} contains {} B", b.digest(), b.payload_len);
-        info!(
-            "BENCH event=created protocol=hydrangea node={} author={} round={} digest={} parent={} payload_root={} payload_bytes={}",
-            self.name,
-            b.author,
-            b.round,
-            b.digest(),
-            b.parent,
-            b.payload_root,
-            b.payload_len
-        );
         self.last_proposed = b;
     }
 
@@ -379,15 +359,6 @@ impl Proposer {
     async fn handle_phase2_result(&mut self, p2: Phase2Result) {
         let round = p2.round;
         let digest = p2.block.digest();
-        info!(
-            "BENCH event=proposal_ready protocol=hydrangea node={} author={} round={} digest={} remotes={} proof_blocking_ms={}",
-            self.name,
-            p2.block.author,
-            round,
-            digest,
-            p2.remote.len(),
-            p2.proof_blocking_ms
-        );
         debug!(
             "TIMING proposal_make round={} shard_len={} encode_ms={} proof_blocking_ms={}",
             round, p2.shard_len, p2.encode_ms, p2.proof_blocking_ms,

@@ -126,7 +126,9 @@ impl ReliableSender {
     ) -> Vec<CancelHandler> {
         let mut handlers = Vec::new();
         for address in addresses {
-            let handler = self.send_with_label(address, data.clone(), label.clone()).await;
+            let handler = self
+                .send_with_label(address, data.clone(), label.clone())
+                .await;
             handlers.push(handler);
         }
 
@@ -365,7 +367,8 @@ impl Connection {
         // If we reach this code, it means something went wrong. Put the messages for which we didn't receive an ACK
         // back into the sending buffer, we will try to send them again once we manage to establish a new connection.
         while let Some((data, label, handler, _sent_at)) = pending_replies.pop_back() {
-            self.buffer.push_front((data, label, Instant::now(), handler));
+            self.buffer
+                .push_front((data, label, Instant::now(), handler));
         }
         error
     }
