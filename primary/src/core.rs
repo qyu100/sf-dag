@@ -1151,6 +1151,7 @@ impl Core {
         self.retry_pending_commits().await?;
 
         let decide = Decide::new(certificate.header_id, certificate.round, &certificate.origin, &self.name).await;
+        self.process_decide(&decide).await?;
 
         let addresses = self
             .committee
@@ -1199,6 +1200,7 @@ impl Core {
 
         // 4a: Build decide from the extracted small fields.
         let decide = Decide::new(header_id, round, &origin, &self.name).await;
+        self.process_decide(&decide).await?;
 
         let addresses = self
             .committee
