@@ -829,8 +829,10 @@ impl Core {
                 .or_insert_with(|| header_info_with_proof.clone());
         }
         self.try_send_pending_echoes().await?;
-        self.replay_pending_echo_messages(header_info_with_proof.id)
-            .await?;
+        if !self.pending_echoes.contains_key(&header_info_with_proof.id) {
+            self.replay_pending_echo_messages(header_info_with_proof.id)
+                .await?;
+        }
         debug!(
             "process_header_proof_optimized total time: {:?}",
             start.elapsed()
@@ -840,7 +842,8 @@ impl Core {
 
     async fn handle_echo_message(&mut self, echo: Echo) -> DagResult<()> {
         let id = echo.id;
-        if !self.processing_header_proofs.contains_key(&id) {
+        if !self.processing_header_proofs.contains_key(&id) || self.pending_echoes.contains_key(&id)
+        {
             self.pending_echo_messages
                 .entry(id)
                 .or_insert_with(Vec::new)
@@ -950,6 +953,8 @@ impl Core {
             .expect("Failed to send parent candidate to proposer");
 
         self.send_echo(header_info_with_proof).await?;
+        self.replay_pending_echo_messages(header_info_with_proof.id)
+            .await?;
 
         if self
             .pending_reconstructions
