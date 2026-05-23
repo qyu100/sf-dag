@@ -46,7 +46,8 @@ class CommandMaker:
         assert isinstance(parameters, str)
         assert isinstance(debug, bool)
         v = '-vvv' if debug else '-vv'
-        return (f'./node {v} run --edkeys {edkeys} --blskeys {blskeys} --committee {committee} '
+        log_level = 'debug' if debug else 'info'
+        return (f'RUST_LOG={log_level} ./node {v} run --edkeys {edkeys} --blskeys {blskeys} --committee {committee} '
                 f'--store {store} --parameters {parameters} primary')
 
     @staticmethod
@@ -57,7 +58,8 @@ class CommandMaker:
         assert isinstance(parameters, str)
         assert isinstance(debug, bool)
         v = '-vvv' if debug else '-vv'
-        return (f'./node {v} run --edkeys {edkeys} --blskeys {blskeys} --committee {committee} '
+        log_level = 'debug' if debug else 'info'
+        return (f'RUST_LOG={log_level} ./node {v} run --edkeys {edkeys} --blskeys {blskeys} --committee {committee} '
                 f'--store {store} --parameters {parameters} worker --id {id}')
 
     @staticmethod

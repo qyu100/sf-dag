@@ -13,12 +13,12 @@ from benchmark.remote import Bench, BenchError
 def local(ctx, debug=True, consensus_only=True, header_size=5120):
     ''' Run benchmarks on localhost '''
     bench_params = {
-        'faults': 0,
+        'faults': 1,
         'nodes': 10,
         'workers': 1,
         'rate': 100_000,
         'tx_size': 512,
-        'duration': 60,
+        'duration': 30,
         "burst" : 50
     }
     node_params = {
@@ -100,8 +100,8 @@ def install(ctx):
 def remote(ctx, burst = 50, debug=False, consensus_only=False, header_size=512):
     ''' Run benchmarks on GCP '''
     bench_params = {
-        'faults': 0,
-        'nodes': 50,
+        'faults': 1,
+        'nodes': 10,
         'workers': 1,
         'collocate': True,
         'rate': [100000],
@@ -126,7 +126,7 @@ def remote(ctx, burst = 50, debug=False, consensus_only=False, header_size=512):
         'tx_size': bench_params['tx_size'],  # bytes
         'max_batch_delay': 200,  # ms
         'leaders_per_round': 67,
-        'f_num': 16,
+        'f_num': 3,
         'rs_block_size': 4 * 1024,  # bytes
         'rs_block_threads': 4
     }

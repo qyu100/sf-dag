@@ -53,16 +53,19 @@ class InstanceManager:
         for zone, client in self.clients.items():
             # Fetching instances based on state in GCP
             res = client.list(project=self.PROJECT_ID, zone=zone)
+            instances = []
 
             for instance in res:
-                ids[zone] += [instance.id]
-
                 for interface in instance.network_interfaces:
-                        # Get the external IP address (if available)
-                        external_ip = None
-                        for access_config in interface.access_configs:
-                            external_ip = access_config.nat_i_p
-                            ips[zone] += [external_ip]
+                    # Get the external IP address (if available)
+                    external_ip = None
+                    for access_config in interface.access_configs:
+                        external_ip = access_config.nat_i_p
+                    if external_ip is not None:
+                        instances.append((instance.name, instance.id, external_ip))
+            for _, instance_id, external_ip in sorted(instances):
+                ids[zone] += [instance_id]
+                ips[zone] += [external_ip]
         # print(f'ids : {ids},ips : {ips}')
         return ids, ips
 

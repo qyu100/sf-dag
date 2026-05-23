@@ -1,10 +1,10 @@
 use crate::batch_maker::Transaction;
 // Copyright(C) Facebook, Inc. and its affiliates.
 use crate::error::{DagError, DagResult};
-use crate::primary::Round;
 use crate::merkle::Proof;
+use crate::primary::Round;
 use config::Committee;
-use crypto::{Digest, Hash, PublicKey, Signature, SignatureService};
+use crypto::{Digest, Hash, PublicKey};
 use ed25519_dalek::Digest as _;
 use ed25519_dalek::Sha512;
 use serde::{Deserialize, Serialize};
@@ -163,28 +163,6 @@ impl fmt::Debug for HeaderInfoWithProof {
     }
 }
 
-/// Hint sent from Core to Proposer as soon as a header proof is received and its parent is available.
-/// This is intentionally distinct from `Certificate` to make receive-vs-deliver semantics explicit.
-#[derive(Clone, Serialize, Deserialize, Default, PartialEq, Eq, Hash)]
-pub struct ProposerParent {
-    pub header_id: Digest,
-    pub round: Round,
-    pub origin: PublicKey,
-}
-
-impl ProposerParent {
-    pub fn genesis(committee: &Committee) -> Vec<Self> {
-        committee
-            .authorities
-            .keys()
-            .map(|_| Self { ..Self::default() })
-            .collect()
-    }
-
-    pub fn round(&self) -> Round {
-        self.round
-    }
-}
 impl fmt::Display for HeaderInfoWithProof {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         write!(f, "B{}({})", self.round, self.author)
@@ -266,25 +244,11 @@ impl fmt::Display for HeaderInfo {
 pub struct Timeout {
     pub round: Round,
     pub author: PublicKey,
-    pub signature: Signature,
 }
 
 impl Timeout {
-    pub async fn new(
-        round: Round,
-        author: PublicKey,
-        signature_service: &mut SignatureService,
-    ) -> Self {
-        let timeout = Self {
-            round,
-            author,
-            signature: Signature::default(),
-        };
-        let signature = signature_service.request_signature(timeout.digest()).await;
-        Self {
-            signature,
-            ..timeout
-        }
+    pub fn new(round: Round, author: PublicKey) -> Self {
+        Self { round, author }
     }
 
     pub fn verify(&self, committee: &Committee) -> DagResult<()> {
@@ -293,11 +257,7 @@ impl Timeout {
             committee.stake(&self.author) > 0,
             DagError::UnknownAuthority(self.author)
         );
-
-        // Check the signature.
-        self.signature
-            .verify(&self.digest(), &self.author)
-            .map_err(DagError::from)
+        Ok(())
     }
 }
 
@@ -323,12 +283,53 @@ impl fmt::Display for Timeout {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+pub struct TimeoutAccept {
+    pub round: Round,
+    pub author: PublicKey,
+}
+
+impl TimeoutAccept {
+    pub fn new(round: Round, author: PublicKey) -> Self {
+        Self { round, author }
+    }
+
+    pub fn verify(&self, committee: &Committee) -> DagResult<()> {
+        ensure!(
+            committee.stake(&self.author) > 0,
+            DagError::UnknownAuthority(self.author)
+        );
+        Ok(())
+    }
+}
+
+impl Hash for TimeoutAccept {
+    fn digest(&self) -> Digest {
+        let mut hasher = Sha512::new();
+        hasher.update(self.round.to_le_bytes());
+        hasher.update(&self.author);
+        Digest(hasher.finalize().as_slice()[..32].try_into().unwrap())
+    }
+}
+
+impl fmt::Debug for TimeoutAccept {
+    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+        write!(f, "TimeoutAccept: R{}({})", self.round, self.author,)
+    }
+}
+
+impl fmt::Display for TimeoutAccept {
+    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+        write!(f, "Round {} TimeoutAccept by {}", self.round, self.author)
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Echo {
     pub id: Digest,
     pub round: Round,
     pub origin: PublicKey,
     pub author: PublicKey,
-    pub proof: Proof
+    pub proof: Proof,
 }
 
 impl Echo {
@@ -357,10 +358,7 @@ impl fmt::Debug for Echo {
         write!(
             f,
             "{}: V{}({}, {})",
-            self.id,
-            self.round,
-            self.author,
-            self.id
+            self.id, self.round, self.author, self.id
         )
     }
 }
@@ -457,10 +455,7 @@ impl fmt::Debug for Ready {
         write!(
             f,
             "{}: R{}({}, {})",
-            self.id,
-            self.round,
-            self.author,
-            self.id
+            self.id, self.round, self.author, self.id
         )
     }
 }
@@ -504,10 +499,7 @@ impl fmt::Debug for Decide {
         write!(
             f,
             "{}: D{}({}, {})",
-            self.id,
-            self.round,
-            self.author,
-            self.id
+            self.id, self.round, self.author, self.id
         )
     }
 }
@@ -515,8 +507,7 @@ impl fmt::Debug for Decide {
 #[derive(Clone, Serialize, Deserialize, Default)]
 pub struct TimeoutCert {
     pub round: Round,
-    // Stores a list of public keys and their corresponding signatures.
-    pub timeouts: Vec<(PublicKey, Signature)>,
+    pub timeouts: Vec<PublicKey>,
 }
 
 impl TimeoutCert {
@@ -528,14 +519,14 @@ impl TimeoutCert {
     }
 
     // Adds a timeout to the certificate.
-    pub fn add_timeout(&mut self, author: PublicKey, signature: Signature) -> DagResult<()> {
+    pub fn add_timeout(&mut self, author: PublicKey) -> DagResult<()> {
         // Ensure this public key hasn't already submitted a timeout for this round
-        if self.timeouts.iter().any(|(pk, _)| *pk == author) {
+        if self.timeouts.iter().any(|pk| *pk == author) {
             return Err(DagError::AuthorityReuse(author));
         }
 
         // Add the timeout to the list
-        self.timeouts.push((author, signature));
+        self.timeouts.push(author);
 
         Ok(())
     }
@@ -545,7 +536,7 @@ impl TimeoutCert {
         let mut weight = 0;
 
         let mut used = HashSet::new();
-        for (name, _) in self.timeouts.iter() {
+        for name in self.timeouts.iter() {
             ensure!(!used.contains(name), DagError::AuthorityReuse(*name));
             let voting_rights = committee.stake(name);
             ensure!(voting_rights > 0, DagError::UnknownAuthority(*name));

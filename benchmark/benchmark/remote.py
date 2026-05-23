@@ -215,16 +215,34 @@ class Bench:
         # Collocate the primary and its workers on the same machine.
         if bench_parameters.collocate:
             nodes = max(bench_parameters.nodes)
+            faults = bench_parameters.faults
 
             # Ensure there are enough hosts.
             hosts = self.manager.hosts()
             if sum(len(x) for x in hosts.values()) < nodes:
                 return []
 
-            # Select the hosts in different data centers.
+            hosts = OrderedDict((region, list(ips)) for region, ips in hosts.items())
+            faulty_hosts = []
+            if faults:
+                fault_region, region_hosts = next(
+                    ((region, ips) for region, ips in hosts.items() if len(ips) >= faults),
+                    (None, None)
+                )
+                if fault_region is None:
+                    Print.warn(f'Cannot place {faults} faulty node(s) in one region')
+                    return []
+                faulty_hosts = region_hosts[:faults]
+                Print.info(
+                    f'Faulty node(s) pinned to region {fault_region}: {", ".join(faulty_hosts)}'
+                )
+
+            # Select the hosts across data centers, but put the faulty hosts first so
+            # node ids 0..faults-1 all belong to the same region.
             ordered = zip(*hosts.values())
             ordered = [x for y in ordered for x in y]
-            return ordered[:nodes]
+            selected = faulty_hosts + [x for x in ordered if x not in set(faulty_hosts)]
+            return selected[:nodes]
 
         # Spawn the primary and each worker on a different machine. Each
         # authority runs in a single data center.
@@ -367,17 +385,17 @@ class Bench:
         Print.info('Booting primaries...')
         tasks = []
 
-        for i, address in enumerate(committee.primary_addresses(faults)):
+        for _, (node_id, address) in enumerate(committee.primary_addresses(faults)):
             host = Committee.ip(address)
             cmd = CommandMaker.run_primary(
-                PathMaker.ed_key_file(i),
-                PathMaker.bls_key_file(i),
+                PathMaker.ed_key_file(node_id),
+                PathMaker.bls_key_file(node_id),
                 PathMaker.committee_file(),
-                PathMaker.db_path(i),
+                PathMaker.db_path(node_id),
                 PathMaker.parameters_file(),
                 debug=debug
             )
-            log_file = PathMaker.primary_log_file(i)
+            log_file = PathMaker.primary_log_file(node_id)
             connection = connections[host]
             tasks.append(self._run_on_host(host, cmd, log_file, connection))
         
@@ -493,10 +511,10 @@ class Bench:
         tasks = []
 
         print('Downloading primaries logs...')
-        for i, address in enumerate(primary_addresses):
+        for _, (node_id, address) in enumerate(primary_addresses):
             host = Committee.ip(address)
-            src = PathMaker.primary_log_file(i)
-            dest = PathMaker.primary_log_file(i)
+            src = PathMaker.primary_log_file(node_id)
+            dest = PathMaker.primary_log_file(node_id)
             connection = hosts_to_connections[host]
             tasks.append(self._download_log(host, connection, src, dest))
             
@@ -550,17 +568,19 @@ class Bench:
             traceback.print_exc()
             raise BenchError('Failed to configure nodes', e)
         
-        names = names[:len(names) - bench_parameters.faults]
         msg = f'Uploading configuration files'
         if update:
             msg += f' and changing repository {self.settings.repo_name} to branch {self.settings.branch}'
-        Print.info(msg + f' on {len(hosts)} machines...')
+        Print.info(msg + f' on {len(committee.primary_addresses())} honest machines...')
         
         tasks = []
-        for id, name in enumerate(names):
-            ip = committee.ips(name)[0] # TODO: No longer support remote workers.
+        for name, authority in committee.json['authorities'].items():
+            if not authority['is_honest']:
+                continue
+            node_id = authority['node_id']
+            ip = Committee.ip(authority['primary']['primary_to_primary'])
             connection = self.hosts_to_connections[ip]
-            tasks.append(self._configure_one(ip, id, connection, update))
+            tasks.append(self._configure_one(ip, node_id, connection, update))
 
         await self._gather_and_parse(tasks, 'Configure')
 
@@ -568,7 +588,7 @@ class Bench:
             Print.info(f'Waiting for update to complete...')
             await self._poll(hosts_and_connections, 'update')
             
-        Print.info(f'Successfully configured {len(hosts)} machines')
+        Print.info(f'Successfully configured {len(tasks)} honest machines')
 
         # Run benchmarks.
         for n in bench_parameters.nodes:

@@ -6,8 +6,8 @@ use crate::garbage_collector::GarbageCollector;
 use crate::header_waiter::HeaderWaiter;
 use crate::helper::Helper;
 use crate::messages::{
-    Certificate, Header, HeaderInfo, HeaderInfoWithCertificate, HeaderWithCertificate,
-    Ready, Timeout, Echo, HeaderInfoWithProof, Decide
+    Certificate, Decide, Echo, Header, HeaderInfo, HeaderInfoWithCertificate, HeaderInfoWithProof,
+    HeaderWithCertificate, Ready, Timeout, TimeoutAccept,
 };
 use crate::proposer::Proposer;
 use crate::synchronizer::Synchronizer;
@@ -41,6 +41,7 @@ pub enum PrimaryMessage {
     CertificatesRequest(Vec<Digest>, /* requestor */ PublicKey),
     HeaderInfoWithProof(HeaderInfoWithProof),
     Decide(Decide),
+    TimeoutAccept(TimeoutAccept),
 }
 
 /// Borrowing variant of `PrimaryMessage` for zero-copy serialization.
@@ -54,6 +55,7 @@ pub(crate) enum PrimaryMessageRef<'a> {
     CertificatesRequest(&'a Vec<Digest>, &'a PublicKey),
     HeaderInfoWithProof(&'a HeaderInfoWithProof),
     Decide(&'a Decide),
+    TimeoutAccept(&'a TimeoutAccept),
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

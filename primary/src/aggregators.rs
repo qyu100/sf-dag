@@ -1,14 +1,10 @@
 // Copyright(C) Facebook, Inc. and its affiliates.
 use crate::error::{DagError, DagResult};
 use crate::merkle::Proof;
-use crate::messages::{Certificate, Ready, Timeout, TimeoutCert, Decide};
+use crate::messages::{Certificate, Decide, Ready, Timeout, TimeoutAccept, TimeoutCert};
 use config::{Committee, Stake};
-use crypto::{PublicKey, Digest};
-use crypto::Signature;
-use log::debug;
-use std::time::Instant;
-use std::collections::{HashSet, HashMap};
-use std::mem;
+use crypto::{Digest, PublicKey};
+use std::collections::{HashMap, HashSet};
 
 pub struct EchoAggregator {
     weight: Stake,
@@ -29,7 +25,12 @@ impl EchoAggregator {
         }
     }
 
-    pub fn append(&mut self, author: PublicKey, proof: Proof, committee: &Committee) -> DagResult<Option<(Digest, Vec<Option<Box<[u8]>>>)>> {
+    pub fn append(
+        &mut self,
+        author: PublicKey,
+        proof: Proof,
+        committee: &Committee,
+    ) -> DagResult<Option<(Digest, Vec<Option<Box<[u8]>>>)>> {
         // Ensure it is the first time this authority votes.
         ensure!(self.used.insert(author), DagError::AuthorityReuse(author));
 
@@ -75,11 +76,7 @@ impl ReadyAggregator {
     }
 
     // Return the root hash when 2f+1 Ready messages are collected for it.
-    pub fn append(
-        &mut self,
-        ready: &Ready,
-        committee: &Committee,
-    ) -> DagResult<Option<Digest>> {
+    pub fn append(&mut self, ready: &Ready, committee: &Committee) -> DagResult<Option<Digest>> {
         let author = ready.author;
         // Ensure it is the first time this authority votes.
         ensure!(self.used.insert(author), DagError::AuthorityReuse(author));
@@ -110,11 +107,7 @@ impl DecideAggregator {
         }
     }
 
-    pub fn append(
-        &mut self,
-        decide: &Decide,
-        committee: &Committee,
-    ) -> DagResult<Option<bool>> {
+    pub fn append(&mut self, decide: &Decide, committee: &Committee) -> DagResult<Option<bool>> {
         let author = decide.author;
         ensure!(self.used.insert(author), DagError::AuthorityReuse(author));
         self.weight += committee.stake(&author);
@@ -173,10 +166,9 @@ impl CertificatesAggregator {
     }
 }
 
-/// Aggregates timeouts for a particular round into an action or trigger.
+/// Aggregates timeout votes for a particular round into an accept trigger.
 pub struct TimeoutAggregator {
     weight: Stake,
-    timeouts: Vec<(PublicKey, Signature)>,
     used: HashSet<PublicKey>,
 }
 
@@ -184,30 +176,61 @@ impl TimeoutAggregator {
     pub fn new() -> Self {
         Self {
             weight: 0,
-            timeouts: Vec::new(),
+            used: HashSet::new(),
+        }
+    }
+
+    pub fn append(&mut self, timeout: Timeout, committee: &Committee) -> DagResult<Option<()>> {
+        let author = timeout.author;
+
+        // Ensure it is the first time this authority sends a timeout.
+        ensure!(self.used.insert(author), DagError::AuthorityReuse(author));
+
+        self.weight += committee.stake(&author);
+        if self.weight >= committee.quorum_threshold() {
+            return Ok(Some(()));
+        }
+        Ok(None)
+    }
+}
+
+/// Aggregates timeout accepts for a particular round into a timeout certificate.
+pub struct TimeoutAcceptAggregator {
+    weight: Stake,
+    accepts: Vec<PublicKey>,
+    used: HashSet<PublicKey>,
+}
+
+impl TimeoutAcceptAggregator {
+    pub fn new() -> Self {
+        Self {
+            weight: 0,
+            accepts: Vec::new(),
             used: HashSet::new(),
         }
     }
 
     pub fn append(
         &mut self,
-        timeout: Timeout,
+        accept: TimeoutAccept,
         committee: &Committee,
-    ) -> DagResult<Option<TimeoutCert>> {
-        let author = timeout.author;
+    ) -> DagResult<(Stake, Option<TimeoutCert>)> {
+        let author = accept.author;
 
-        // Ensure it is the first time this authority sends a timeout.
+        // Ensure it is the first time this authority sends a timeout accept.
         ensure!(self.used.insert(author), DagError::AuthorityReuse(author));
 
-        self.timeouts.push((author, timeout.signature));
+        self.accepts.push(author);
         self.weight += committee.stake(&author);
         if self.weight >= committee.quorum_threshold() {
-            // Once quorum is reached, move the accumulated timeouts out (avoids cloning the vec).
-            return Ok(Some(TimeoutCert {
-                round: timeout.round,
-                timeouts: mem::take(&mut self.timeouts),
-            }));
+            return Ok((
+                self.weight,
+                Some(TimeoutCert {
+                    round: accept.round,
+                    timeouts: std::mem::take(&mut self.accepts),
+                }),
+            ));
         }
-        Ok(None)
+        Ok((self.weight, None))
     }
 }
