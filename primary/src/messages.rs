@@ -176,17 +176,9 @@ pub struct Timeout {
 }
 
 impl Timeout {
-    pub async fn new(
-        round: Round,
-        author: PublicKey,
-    ) -> Self {
-        let timeout = Self {
-            round,
-            author,
-        };
-        Self {
-            ..timeout
-        }
+    pub async fn new(round: Round, author: PublicKey) -> Self {
+        let timeout = Self { round, author };
+        Self { ..timeout }
     }
 
     pub fn verify(&self, committee: &Committee) -> DagResult<()> {
@@ -217,6 +209,47 @@ impl fmt::Debug for Timeout {
 impl fmt::Display for Timeout {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         write!(f, "Round {} Timeout by {}", self.round, self.author)
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct TimeoutAccept {
+    pub round: Round,
+    pub author: PublicKey,
+}
+
+impl TimeoutAccept {
+    pub fn new(round: Round, author: PublicKey) -> Self {
+        Self { round, author }
+    }
+
+    pub fn verify(&self, committee: &Committee) -> DagResult<()> {
+        ensure!(
+            committee.stake(&self.author) > 0,
+            DagError::UnknownAuthority(self.author)
+        );
+        Ok(())
+    }
+}
+
+impl Hash for TimeoutAccept {
+    fn digest(&self) -> Digest {
+        let mut hasher = Sha512::new();
+        hasher.update(self.round.to_le_bytes());
+        hasher.update(&self.author);
+        Digest(hasher.finalize().as_slice()[..32].try_into().unwrap())
+    }
+}
+
+impl fmt::Debug for TimeoutAccept {
+    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+        write!(f, "TimeoutAccept: R{}({})", self.round, self.author,)
+    }
+}
+
+impl fmt::Display for TimeoutAccept {
+    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+        write!(f, "Round {} TimeoutAccept by {}", self.round, self.author)
     }
 }
 
@@ -253,10 +286,7 @@ impl fmt::Debug for Vote {
         write!(
             f,
             "{}: V{}({}, {})",
-            self.id,
-            self.height,
-            self.author,
-            self.id
+            self.id, self.height, self.author, self.id
         )
     }
 }
@@ -294,10 +324,7 @@ impl fmt::Debug for Echo {
         write!(
             f,
             "{}: E{}({}, {})",
-            self.id,
-            self.round,
-            self.author,
-            self.id
+            self.id, self.round, self.author, self.id
         )
     }
 }
@@ -340,10 +367,7 @@ impl fmt::Debug for Ready {
         write!(
             f,
             "{}: R{}({}, {})",
-            self.id,
-            self.round,
-            self.author,
-            self.id
+            self.id, self.round, self.author, self.id
         )
     }
 }
@@ -387,10 +411,7 @@ impl fmt::Debug for Decide {
         write!(
             f,
             "{}: D{}({}, {})",
-            self.id,
-            self.round,
-            self.author,
-            self.id
+            self.id, self.round, self.author, self.id
         )
     }
 }
@@ -596,7 +617,12 @@ pub struct ConsensusVote {
 pub fn proposal_digest(consensus_message: &ConsensusMessage) -> Digest {
     let mut hasher = Sha512::new();
     match consensus_message {
-        ConsensusMessage::Prepare { slot, view, proposals, .. } => {
+        ConsensusMessage::Prepare {
+            slot,
+            view,
+            proposals,
+            ..
+        } => {
             hasher.update(slot.to_le_bytes());
             hasher.update(view.to_le_bytes());
             for (pk, proposal) in proposals {
@@ -604,7 +630,12 @@ pub fn proposal_digest(consensus_message: &ConsensusMessage) -> Digest {
                 hasher.update(proposal.digest());
             }
         }
-        ConsensusMessage::Confirm { slot, view, proposals, .. } => {
+        ConsensusMessage::Confirm {
+            slot,
+            view,
+            proposals,
+            ..
+        } => {
             hasher.update(slot.to_le_bytes());
             hasher.update(view.to_le_bytes());
             for (pk, proposal) in proposals {
@@ -612,7 +643,9 @@ pub fn proposal_digest(consensus_message: &ConsensusMessage) -> Digest {
                 hasher.update(proposal.digest());
             }
         }
-        ConsensusMessage::Commit { round, proposals, .. } => {
+        ConsensusMessage::Commit {
+            round, proposals, ..
+        } => {
             hasher.update(round.to_le_bytes());
             for (pk, proposal) in proposals {
                 hasher.update(pk);

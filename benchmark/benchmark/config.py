@@ -56,7 +56,7 @@ class Committee:
     def __init__(self, json):
         self.json = json
 
-    def address_list_to_json(addresses, base_port, faults, bls_pubkeys_g2=None):
+    def address_list_to_json(addresses, base_port, faults, bls_pubkeys_g2=None, faulty_ids=None):
         ''' The `addresses` field looks as follows:
             { 
                 "name": ["host", "host", ...],
@@ -73,6 +73,16 @@ class Committee:
         )
         assert len({len(x) for x in addresses.values()}) == 1
         assert isinstance(base_port, int) and base_port > 1024
+        assert isinstance(faults, int) and faults >= 0
+
+        if faulty_ids is None:
+            faulty_ids = set(range(faults))
+        else:
+            faulty_ids = set(faulty_ids)
+        if len(faulty_ids) != faults:
+            raise ConfigError('Number of faulty node ids must match faults')
+        if any(x < 0 or x >= len(addresses) for x in faulty_ids):
+            raise ConfigError('Faulty node id out of range')
 
         port = base_port
         json = {'authorities': OrderedDict()}
@@ -82,6 +92,7 @@ class Committee:
 
         for i, (name, hosts) in enumerate(addresses.items()):
             # port = base_port
+            hosts = list(hosts)
             host = hosts.pop(0)
             consensus_addr = {
                 'consensus_to_consensus': f'{host}:{port}',
@@ -104,8 +115,8 @@ class Committee:
                 port += 3
 
             json['authorities'][name] = {
-                # Corresponds to the determination of faulty nodes in primary_addresses.
-                'is_honest': i < num_authorities - faults,
+                'node_id': i,
+                'is_honest': i not in faulty_ids,
                 'stake': 1,
                 'consensus': consensus_addr,
                 'primary': primary_addr,
@@ -116,24 +127,29 @@ class Committee:
         return json
 
     @classmethod
-    def from_address_list(cls, addresses, base_port, faults, bls_pubkeys_g2=None):
-        return cls(Committee.address_list_to_json(addresses, base_port, faults,bls_pubkeys_g2))
+    def from_address_list(cls, addresses, base_port, faults, bls_pubkeys_g2=None, faulty_ids=None):
+        return cls(Committee.address_list_to_json(addresses, base_port, faults, bls_pubkeys_g2, faulty_ids))
 
-    def primary_addresses(self, faults=0):
-        ''' Returns an ordered list of primaries' addresses. '''
+    def primary_addresses_with_ids(self, faults=0):
+        ''' Returns an ordered list of honest primaries as (node_id, address). '''
         assert faults < self.size()
         addresses = []
-        good_nodes = self.size() - faults
-        for authority in list(self.json['authorities'].values())[:good_nodes]:
-            addresses += [authority['primary']['primary_to_primary']]
+        for authority in self.json['authorities'].values():
+            if authority['is_honest']:
+                addresses += [(authority['node_id'], authority['primary']['primary_to_primary'])]
         return addresses
 
+    def primary_addresses(self, faults=0):
+        ''' Returns an ordered list of honest primaries' addresses. '''
+        return [address for _, address in self.primary_addresses_with_ids(faults)]
+
     def workers_addresses(self, faults=0):
-        ''' Returns an ordered list of list of workers' addresses. '''
+        ''' Returns an ordered list of list of honest workers' addresses. '''
         assert faults < self.size()
         addresses = []
-        good_nodes = self.size() - faults
-        for authority in list(self.json['authorities'].values())[:good_nodes]:
+        for authority in self.json['authorities'].values():
+            if not authority['is_honest']:
+                continue
             authority_addresses = []
             for id, worker in authority['workers'].items():
                 authority_addresses += [(id, worker['transactions'])]
@@ -196,13 +212,13 @@ class Committee:
 
 
 class LocalCommittee(Committee):
-    def __init__(self, names, port, workers, faults, bls_pubkeys_g2=None):
+    def __init__(self, names, port, workers, faults, bls_pubkeys_g2=None, faulty_ids=None):
         assert isinstance(names, list)
         assert all(isinstance(x, str) for x in names)
         assert isinstance(port, int)
         assert isinstance(workers, int) and workers > 0
         addresses = OrderedDict((x, ['127.0.0.1']*(1+workers)) for x in names)
-        json = Committee.address_list_to_json(addresses, port, faults, bls_pubkeys_g2)
+        json = Committee.address_list_to_json(addresses, port, faults, bls_pubkeys_g2, faulty_ids)
         super().__init__(json)
 
 

@@ -1,12 +1,14 @@
 #![allow(dead_code)]
 #![allow(unused_variables)]
 // Copyright(C) Facebook, Inc. and its affiliates.
-use crate::error::{DagError, DagResult, ConsensusError};
-use crate::messages::{Certificate, Header, Vote, QC, Timeout, TC, CutVote, CutCertificate, Decide};
+use crate::error::{ConsensusError, DagError, DagResult};
+use crate::messages::{
+    Certificate, CutCertificate, CutVote, Decide, Header, Timeout, TimeoutAccept, TimeoutCert,
+    Vote, QC, TC,
+};
 use config::{Committee, Stake};
-use crypto::{PublicKey, Signature, Digest};
+use crypto::{Digest, PublicKey, Signature};
 use std::collections::HashSet;
-
 
 pub struct VoteAggregator {
     weight: Stake,
@@ -74,11 +76,7 @@ impl DecideAggregator {
         }
     }
 
-    pub fn append(
-        &mut self,
-        decide: &Decide,
-        committee: &Committee,
-    ) -> DagResult<Option<Decide>> {
+    pub fn append(&mut self, decide: &Decide, committee: &Committee) -> DagResult<Option<Decide>> {
         if let Some(round) = self.round {
             ensure!(round == decide.round, DagError::InvalidHeaderId);
         } else {
@@ -101,6 +99,71 @@ impl DecideAggregator {
         }
 
         Ok(None)
+    }
+}
+
+/// Aggregates timeout votes for a cut round into an accept trigger.
+pub struct TimeoutAggregator {
+    weight: Stake,
+    used: HashSet<PublicKey>,
+}
+
+impl TimeoutAggregator {
+    pub fn new() -> Self {
+        Self {
+            weight: 0,
+            used: HashSet::new(),
+        }
+    }
+
+    pub fn append(&mut self, timeout: Timeout, committee: &Committee) -> DagResult<Option<()>> {
+        let author = timeout.author;
+        ensure!(self.used.insert(author), DagError::AuthorityReuse(author));
+
+        self.weight += committee.stake(&author);
+        if self.weight >= committee.quorum_threshold() {
+            return Ok(Some(()));
+        }
+        Ok(None)
+    }
+}
+
+/// Aggregates timeout accepts for a cut round into a timeout certificate.
+pub struct TimeoutAcceptAggregator {
+    weight: Stake,
+    accepts: Vec<PublicKey>,
+    used: HashSet<PublicKey>,
+}
+
+impl TimeoutAcceptAggregator {
+    pub fn new() -> Self {
+        Self {
+            weight: 0,
+            accepts: Vec::new(),
+            used: HashSet::new(),
+        }
+    }
+
+    pub fn append(
+        &mut self,
+        accept: TimeoutAccept,
+        committee: &Committee,
+    ) -> DagResult<(Stake, Option<TimeoutCert>)> {
+        let author = accept.author;
+        ensure!(self.used.insert(author), DagError::AuthorityReuse(author));
+
+        self.accepts.push(author);
+        self.weight += committee.stake(&author);
+        if self.weight >= committee.quorum_threshold() {
+            return Ok((
+                self.weight,
+                Some(TimeoutCert {
+                    round: accept.round,
+                    timeouts: std::mem::take(&mut self.accepts),
+                }),
+            ));
+        }
+        Ok((self.weight, None))
     }
 }
 
@@ -134,16 +197,15 @@ impl CutVoteAggregator {
     }
 }
 
-
 /// Aggregate consensus info votes and check if we reach a quorum.
 pub struct QCMaker {
     weight: Stake,
     pub votes: Vec<(PublicKey, Signature)>,
     used: HashSet<PublicKey>,
 
-    pub try_fast: bool,  //TODO: Configure it for Fast path (if it's a Quorummaker for Prepare)
-    qc_dig: Digest, 
-    first: bool,          //Indicate when SlowQC is first ready -> I.e. only start ONE timer.
+    pub try_fast: bool, //TODO: Configure it for Fast path (if it's a Quorummaker for Prepare)
+    qc_dig: Digest,
+    first: bool, //Indicate when SlowQC is first ready -> I.e. only start ONE timer.
     completed_fast: bool, //Indicate whether or not we succeeded on Fast Path. This stops timer that loopbacks from re-submitting QC
 }
 
@@ -153,9 +215,9 @@ impl QCMaker {
             weight: 0,
             votes: Vec::new(),
             used: HashSet::new(),
-            try_fast: false, // explicitly set it. (NOT done via constructor) 
+            try_fast: false, // explicitly set it. (NOT done via constructor)
             qc_dig: Digest::default(),
-            first: true, 
+            first: true,
             completed_fast: false,
         }
     }
@@ -165,7 +227,8 @@ impl QCMaker {
         author: PublicKey,
         vote: (Digest, Signature),
         committee: &Committee,
-    ) -> DagResult<(bool, Option<QC>)> {   //bool = QC is available. Option = Some only if QC ready to be used.
+    ) -> DagResult<(bool, Option<QC>)> {
+        //bool = QC is available. Option = Some only if QC ready to be used.
         //println!("calling append");
         ensure!(self.used.insert(author), DagError::AuthorityReuse(author));
         //println!("after ensure");
@@ -180,21 +243,36 @@ impl QCMaker {
         //else Slow path:
         if self.weight >= committee.quorum_threshold() {
             // Ensure QC is only made once.
-            self.weight = 0; 
-            return Ok((true, Some(QC { id: vote.0, votes: self.votes.clone() })))
+            self.weight = 0;
+            return Ok((
+                true,
+                Some(QC {
+                    id: vote.0,
+                    votes: self.votes.clone(),
+                }),
+            ));
         }
-        
+
         Ok((false, None))
     }
 
-    pub fn check_fast_qc(&mut self, vote_dig: Digest, committee: &Committee) -> DagResult<(bool, Option<QC>)> {
+    pub fn check_fast_qc(
+        &mut self,
+        vote_dig: Digest,
+        committee: &Committee,
+    ) -> DagResult<(bool, Option<QC>)> {
         if self.weight >= committee.fast_threshold() {
             // Ensure QC is only made once.
-            self.weight = 0; 
+            self.weight = 0;
             self.completed_fast = true;
-            return Ok((true, Some(QC { id: vote_dig, votes: self.votes.clone() })))
-        }
-        else if self.weight >= committee.quorum_threshold() {
+            return Ok((
+                true,
+                Some(QC {
+                    id: vote_dig,
+                    votes: self.votes.clone(),
+                }),
+            ));
+        } else if self.weight >= committee.quorum_threshold() {
             self.qc_dig = vote_dig;
             let first = self.first;
             self.first = false;
@@ -210,10 +288,16 @@ impl QCMaker {
             return Ok((false, None)); //Already finished fast.
         }
         ensure!(
-            self.qc_dig != Digest::default(),  //I.e. SlowQC is ready!
+            self.qc_dig != Digest::default(), //I.e. SlowQC is ready!
             DagError::InvalidSlowQCRequest
         );
-        return Ok((true, Some(QC { id: self.qc_dig.clone(), votes: self.votes.clone() })));
+        return Ok((
+            true,
+            Some(QC {
+                id: self.qc_dig.clone(),
+                votes: self.votes.clone(),
+            }),
+        ));
     }
 }
 
@@ -233,25 +317,17 @@ impl TCMaker {
     }
 
     /// Try to append a signature to a (partial) quorum.
-    pub fn append(
-        &mut self,
-        timeout: Timeout,
-        committee: &Committee,
-    ) -> DagResult<Option<TC>> {
+    pub fn append(&mut self, timeout: Timeout, committee: &Committee) -> DagResult<Option<TC>> {
         let author = timeout.author;
 
         // Ensure it is the first time this authority votes.
-        ensure!(
-            self.used.insert(author),
-            DagError::AuthorityReuse(author)
-        );
+        ensure!(self.used.insert(author), DagError::AuthorityReuse(author));
 
         let slot = timeout.round;
         let view = timeout.round;
 
         // Add the timeout to the accumulator.
-        self.votes
-            .push(timeout);
+        self.votes.push(timeout);
         self.weight += committee.stake(&author);
         if self.weight >= committee.quorum_threshold() {
             self.weight = 0; // Ensures TC is only created once.

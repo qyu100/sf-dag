@@ -1,25 +1,30 @@
 #![allow(dead_code)]
 #![allow(unused_variables)]
 // Copyright(C) Facebook, Inc. and its affiliates.
-use crate::aggregators::{CutVoteAggregator, DecideAggregator, QCMaker, TCMaker, VoteAggregator};
+use crate::aggregators::{
+    CutVoteAggregator, DecideAggregator, QCMaker, TCMaker, TimeoutAcceptAggregator,
+    TimeoutAggregator, VoteAggregator,
+};
 //use crate::common::special_header;
 use crate::error::{DagError, DagResult};
 use crate::leader::LeaderElector;
 use crate::messages::{
-    Certificate, ConsensusMessage, Header, Proposal, Timeout, Vote, TC, CommitQC, ConsensusRequest, ConsensusVote, Cut, CutProposal, CutCertificate, CutVote, Decide,
+    Certificate, CommitQC, ConsensusMessage, ConsensusRequest, ConsensusVote, Cut, CutCertificate,
+    CutProposal, CutVote, Decide, Header, Proposal, Timeout, TimeoutAccept, TimeoutCert, Vote, TC,
 };
 use crate::primary::{Height, PrimaryMessage, PrimaryMessageRef, Slot, View};
 use crate::synchronizer::Synchronizer;
 use async_recursion::async_recursion;
 use bytes::Bytes;
 use config::Committee;
-use crypto::{Digest, PublicKey, SignatureService};
+use core::panic;
 use crypto::Hash as _;
+use crypto::{Digest, PublicKey, SignatureService};
 use futures::stream::FuturesUnordered;
 use futures::Future;
+use futures::StreamExt;
 use log::{debug, error, warn};
 use network::{CancelHandler, ReliableSender};
-use core::panic;
 //use tokio::time::error::Elapsed;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::pin::Pin;
@@ -29,7 +34,7 @@ use std::time::Instant;
 //use std::task::Poll;
 use store::Store;
 use tokio::sync::mpsc::{Receiver, Sender};
-//use tokio::time::{sleep, Duration, Instant};
+use tokio::time::{sleep, Duration};
 
 // fn collect_uncommitted_cut_chain(
 //     tip_cut: Digest,
@@ -75,7 +80,7 @@ pub struct Core {
     /// Sends observed/formed certificates to the committer for commit-time checks.
     tx_committer_cert: Sender<Certificate>,
 
-    /// Send a valid parent certificate to the `Proposer` 
+    /// Send a valid parent certificate to the `Proposer`
     tx_proposer: Sender<Certificate>,
     // Receive sync requests for headers required at the consensus layer
     rx_request_header_sync: Receiver<Digest>,
@@ -101,6 +106,8 @@ pub struct Core {
     current_proposal_tips: HashMap<PublicKey, Proposal>,
     current_certified_tips: HashMap<PublicKey, Proposal>,
     cut_vote_aggregators: HashMap<Digest, CutVoteAggregator>,
+    timeouts_aggregators: HashMap<u64, TimeoutAggregator>,
+    timeout_accept_aggregators: HashMap<u64, TimeoutAcceptAggregator>,
     cut_proposals: HashMap<Digest, CutProposal>,
     pending_cut_children: HashMap<Digest, Vec<CutProposal>>,
     cut_parents: HashMap<Digest, Digest>,
@@ -113,6 +120,11 @@ pub struct Core {
     proposed_cut_rounds: HashSet<u64>,
     sent_decide_rounds: HashSet<u64>,
     sent_commit_rounds: HashSet<u64>,
+    sent_timeouts: HashSet<u64>,
+    sent_timeout_accepts: HashSet<u64>,
+    certified_timed_out: HashSet<u64>,
+    scheduled_cut_timers: HashSet<u64>,
+    cut_timer_futures: FuturesUnordered<Pin<Box<dyn Future<Output = u64> + Send>>>,
     cut_round: u64,
     highest_certified_cut: Digest,
     committed_cuts: HashSet<Digest>,
@@ -138,17 +150,16 @@ pub struct Core {
     timeout_delay: u64,
     // GC the vote aggregators and current headers
     // gc_map: HashMap<Round, Digest>,
-  
     committed_slots: HashMap<Slot, CommitQC>,
-    last_committed_slot: u64, 
+    last_committed_slot: u64,
     //TODO: if we are not enforcing a ticket, then only start when we committed all instances < s-k.
     // If we just check that s-k is committed, but all it's predecessors are not, then we may still open an arbitrary number of instances in the absolute worst case
-                                                                                // E.g. s-1 has not committed, but s has, so we can open s+k 
+    // E.g. s-1 has not committed, but s has, so we can open s+k
 
     //Configuration options: //TODO: Move to Primary level -> make configurable from main.rs
-    use_fast_path: bool,           //default = false
-    use_optimistic_tips: bool,     //default = true (TODO: implement non optimistic tip option)
-    use_parallel_proposals: bool,  //default = true (TODO: implement sequential slot option)
+    use_fast_path: bool,          //default = false
+    use_optimistic_tips: bool,    //default = true (TODO: implement non optimistic tip option)
+    use_parallel_proposals: bool, //default = true (TODO: implement sequential slot option)
     k: u64, //limit k on number of open honest instances (k+f instances can be open) => if require QC, then hard limit to k.
     fast_path_timeout: u64,
 
@@ -234,6 +245,8 @@ impl Core {
                 current_proposal_tips: HashMap::with_capacity(2 * gc_depth as usize),
                 current_certified_tips: HashMap::with_capacity(2 * gc_depth as usize),
                 cut_vote_aggregators: HashMap::with_capacity(2 * gc_depth as usize),
+                timeouts_aggregators: HashMap::with_capacity(2 * gc_depth as usize),
+                timeout_accept_aggregators: HashMap::with_capacity(2 * gc_depth as usize),
                 cut_proposals: HashMap::with_capacity(2 * gc_depth as usize),
                 pending_cut_children: HashMap::with_capacity(2 * gc_depth as usize),
                 cut_parents: HashMap::with_capacity(2 * gc_depth as usize),
@@ -246,6 +259,11 @@ impl Core {
                 proposed_cut_rounds: HashSet::with_capacity(2 * gc_depth as usize),
                 sent_decide_rounds: HashSet::with_capacity(2 * gc_depth as usize),
                 sent_commit_rounds: HashSet::with_capacity(2 * gc_depth as usize),
+                sent_timeouts: HashSet::new(),
+                sent_timeout_accepts: HashSet::new(),
+                certified_timed_out: HashSet::new(),
+                scheduled_cut_timers: HashSet::new(),
+                cut_timer_futures: FuturesUnordered::new(),
                 cut_round: 1,
                 highest_certified_cut: Digest::default(),
                 committed_cuts: HashSet::with_capacity(2 * gc_depth as usize),
@@ -264,13 +282,12 @@ impl Core {
                 timeout_delay,
                 timer_futures: FuturesUnordered::new(),
                 //gc_map: HashMap::with_capacity(2 * gc_depth as usize),
-                
                 committed_slots: HashMap::with_capacity(2 * gc_depth as usize),
                 last_committed_slot: 0,
-                
-                use_fast_path,           //default = true
-                use_optimistic_tips,     //default = true (TODO: implement non optimistic tip option)
-                use_parallel_proposals,    //default = true (TODO: implement sequential slot option)
+
+                use_fast_path,          //default = true
+                use_optimistic_tips,    //default = true (TODO: implement non optimistic tip option)
+                use_parallel_proposals, //default = true (TODO: implement sequential slot option)
                 k,
                 fast_path_timeout,
                 use_ride_share,
@@ -302,7 +319,13 @@ impl Core {
 
         // Reset the votes aggregator.
         self.votes_aggregator = VoteAggregator::new();
-        self.current_proposal_tips.insert(header.origin(), Proposal {header_digest: header.digest(), height: header.height(),}); 
+        self.current_proposal_tips.insert(
+            header.origin(),
+            Proposal {
+                header_digest: header.digest(),
+                height: header.height(),
+            },
+        );
 
         // Broadcast the new header in a reliable manner.
         let addresses = self
@@ -329,15 +352,9 @@ impl Core {
         debug!("Processing the header with height {:?}", header.height);
 
         if header.height != 1 {
-            let parent = self
-                .synchronizer
-                .get_parent(&header)
-                .await?;
+            let parent = self.synchronizer.get_parent(&header).await?;
             if parent.is_none() {
-                debug!(
-                    "Processing of {} suspended: missing parent",
-                    header.id
-                );
+                debug!("Processing of {} suspended: missing parent", header.id);
                 return Ok(());
             }
         }
@@ -347,7 +364,13 @@ impl Core {
         self.store.write(header.digest().to_vec(), bytes).await;
 
         // If the header received is at a greater height then add it to our local tips and proposals
-        if header.height() > self.current_proposal_tips.get(&header.origin()).unwrap().height {
+        if header.height()
+            > self
+                .current_proposal_tips
+                .get(&header.origin())
+                .unwrap()
+                .height
+        {
             self.current_proposal_tips.insert(
                 header.origin(),
                 Proposal {
@@ -385,7 +408,6 @@ impl Core {
         Ok(())
     }
 
-    
     async fn process_vote(&mut self, vote: Vote) -> DagResult<()> {
         debug!("Processing vote: {:?}", vote);
 
@@ -427,8 +449,9 @@ impl Core {
                     .iter()
                     .map(|(_, x)| x.primary_to_primary)
                     .collect();
-                let bytes = bincode::serialize(&PrimaryMessage::CutCertificate(certificate.clone()))
-                    .expect("Failed to serialize cut certificate");
+                let bytes =
+                    bincode::serialize(&PrimaryMessage::CutCertificate(certificate.clone()))
+                        .expect("Failed to serialize cut certificate");
                 let handlers = self.network.broadcast(addresses, Bytes::from(bytes)).await;
                 self.consensus_cancel_handlers
                     .entry(vote.round)
@@ -446,12 +469,17 @@ impl Core {
         let mut queue = VecDeque::from([proposal]);
         while let Some(proposal) = queue.pop_front() {
             proposal.verify(&self.committee)?;
-            let expected_leader = self.leader_elector.get_leader(proposal.round);
-            ensure!(proposal.proposer == expected_leader, DagError::InvalidHeaderId);
+            let round = proposal.round;
+            if self.certified_timed_out.contains(&round) {
+                continue;
+            }
+            let expected_leader = self.leader_elector.get_leader(round);
+            ensure!(
+                proposal.proposer == expected_leader,
+                DagError::InvalidHeaderId
+            );
 
-            let parent_known = (proposal.parent_cut == Digest::default() && proposal.round==1)
-                || self.cut_proposals.contains_key(&proposal.parent_cut)
-                || self.committed_cuts.contains(&proposal.parent_cut);
+            let parent_known = self.safe_cut_parent(round, &proposal.parent_cut);
 
             if !parent_known {
                 self.pending_cut_children
@@ -466,7 +494,6 @@ impl Core {
                 continue;
             }
 
-            let round = proposal.round;
             let cut_id = self.record_cut_proposal(proposal);
             self.leader_cut_by_round
                 .entry(round)
@@ -504,7 +531,6 @@ impl Core {
         Ok(())
     }
 
-
     #[async_recursion]
     async fn process_certificate(&mut self, certificate: Certificate) -> DagResult<()> {
         // Ensure we have all the ancestor of this certificate yet. If we don't, the synchronizer will gather it and trigger re-processing of this certificate.
@@ -523,7 +549,7 @@ impl Core {
         if let Err(e) = self.tx_committer_cert.send(certificate.clone()).await {
             debug!("Failed to send certificate to committer cache: {}", e);
         }
-        
+
         // Store the certificate.
         // let t_store = Instant::now();
         // let bytes = bincode::serialize(&certificate).expect("Failed to serialize certificate");
@@ -567,7 +593,8 @@ impl Core {
 
     fn record_cut_proposal(&mut self, proposal: CutProposal) -> Digest {
         let cut_id = proposal.id();
-        self.cut_parents.insert(cut_id.clone(), proposal.parent_cut.clone());
+        self.cut_parents
+            .insert(cut_id.clone(), proposal.parent_cut.clone());
         self.cut_round_by_id.insert(cut_id.clone(), proposal.round);
         self.cut_proposals.insert(cut_id.clone(), proposal);
         cut_id
@@ -590,6 +617,9 @@ impl Core {
     async fn process_cut_certificate(&mut self, certificate: CutCertificate) -> DagResult<()> {
         certificate.verify(&self.committee)?;
         let round = certificate.round;
+        if self.certified_timed_out.contains(&round) {
+            return Ok(());
+        }
         let cut_id = certificate.cut_id.clone();
         self.cut_certificates.entry(round).or_insert(certificate);
         if round + 1 >= self.cut_round {
@@ -616,6 +646,7 @@ impl Core {
         }
 
         self.try_propose_cut_for_current_round().await?;
+        self.schedule_cut_timer(self.cut_round);
         Ok(())
     }
 
@@ -675,19 +706,18 @@ impl Core {
             .map(|(pk, proposal)| (*pk, proposal.clone()))
             .collect();
 
-        let commit_msg = ConsensusMessage::Commit {
-            round,
-            proposals,
-        };
+        let commit_msg = ConsensusMessage::Commit { round, proposals };
 
         if let Err(e) = self.tx_committer.send(commit_msg).await {
-            debug!("Failed to send commit to committer for round {}: {}", round, e);
+            debug!(
+                "Failed to send commit to committer for round {}: {}",
+                round, e
+            );
             return;
         }
 
         self.sent_commit_rounds.insert(round);
     }
-
 
     #[async_recursion]
     async fn try_propose_cut_for_current_round(&mut self) -> DagResult<()> {
@@ -714,8 +744,166 @@ impl Core {
             .entry(round)
             .or_default()
             .extend(handlers);
-        
+
         self.process_cut_proposal(proposal).await?;
+        Ok(())
+    }
+
+    fn schedule_cut_timer(&mut self, round: u64) {
+        if self.scheduled_cut_timers.insert(round) {
+            let delay = Duration::from_millis(self.timeout_delay);
+            self.cut_timer_futures.push(Box::pin(async move {
+                sleep(delay).await;
+                round
+            }));
+        }
+    }
+
+    fn safe_cut_parent(&self, round: u64, parent_cut: &Digest) -> bool {
+        let parent_round = if *parent_cut == Digest::default() {
+            0
+        } else if let Some(parent_round) = self.cut_round_by_id.get(parent_cut) {
+            *parent_round
+        } else {
+            return false;
+        };
+
+        if parent_round >= round {
+            return false;
+        }
+
+        ((parent_round + 1)..round).all(|r| self.certified_timed_out.contains(&r))
+    }
+
+    async fn process_cut_timer(&mut self, round: u64) -> DagResult<()> {
+        if round != self.cut_round
+            || self.voted_cut_rounds.contains(&round)
+            || self.cut_certificates.contains_key(&round)
+            || self.certified_timed_out.contains(&round)
+            || !self.sent_timeouts.insert(round)
+        {
+            return Ok(());
+        }
+
+        let timeout = Timeout::new(round, self.name).await;
+        let addresses = self
+            .committee
+            .others_primaries(&self.name)
+            .iter()
+            .map(|(_, x)| x.primary_to_primary)
+            .collect();
+        let bytes = bincode::serialize(&PrimaryMessage::Timeout(timeout.clone()))
+            .expect("Failed to serialize timeout");
+        let handlers = self.network.broadcast(addresses, Bytes::from(bytes)).await;
+        self.consensus_cancel_handlers
+            .entry(round)
+            .or_default()
+            .extend(handlers);
+        self.process_timeout(timeout).await
+    }
+
+    async fn process_timeout(&mut self, timeout: Timeout) -> DagResult<()> {
+        timeout.verify(&self.committee)?;
+        let round = timeout.round;
+        if self.certified_timed_out.contains(&round) || self.cut_certificates.contains_key(&round) {
+            return Ok(());
+        }
+
+        self.timeouts_aggregators
+            .entry(round)
+            .or_insert_with(TimeoutAggregator::new);
+
+        if let Some(aggregator) = self.timeouts_aggregators.get_mut(&round) {
+            if aggregator.append(timeout, &self.committee)?.is_some() {
+                if let Some((weight, timeout_cert)) = self.send_timeout_accept(round).await? {
+                    self.handle_timeout_accept_action(round, weight, timeout_cert)
+                        .await?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn broadcast_timeout_accept(&mut self, accept: &TimeoutAccept) -> DagResult<()> {
+        let addresses = self
+            .committee
+            .others_primaries(&self.name)
+            .iter()
+            .map(|(_, x)| x.primary_to_primary)
+            .collect();
+        let bytes = bincode::serialize(&PrimaryMessage::TimeoutAccept(accept.clone()))
+            .expect("Failed to serialize timeout accept");
+        let handlers = self.network.broadcast(addresses, Bytes::from(bytes)).await;
+        self.consensus_cancel_handlers
+            .entry(accept.round)
+            .or_default()
+            .extend(handlers);
+        Ok(())
+    }
+
+    async fn send_timeout_accept(
+        &mut self,
+        round: u64,
+    ) -> DagResult<Option<(u32, Option<TimeoutCert>)>> {
+        if !self.sent_timeout_accepts.insert(round) {
+            return Ok(None);
+        }
+
+        let accept = TimeoutAccept::new(round, self.name);
+        self.broadcast_timeout_accept(&accept).await?;
+        self.record_timeout_accept(accept).map(Some)
+    }
+
+    fn record_timeout_accept(
+        &mut self,
+        accept: TimeoutAccept,
+    ) -> DagResult<(u32, Option<TimeoutCert>)> {
+        accept.verify(&self.committee)?;
+        let round = accept.round;
+        if self.certified_timed_out.contains(&round) || self.cut_certificates.contains_key(&round) {
+            return Ok((0, None));
+        }
+
+        self.timeout_accept_aggregators
+            .entry(round)
+            .or_insert_with(TimeoutAcceptAggregator::new);
+
+        self.timeout_accept_aggregators
+            .get_mut(&round)
+            .expect("timeout accept aggregator exists")
+            .append(accept, &self.committee)
+    }
+
+    async fn process_timeout_accept(&mut self, accept: TimeoutAccept) -> DagResult<()> {
+        let round = accept.round;
+        let (weight, timeout_cert) = self.record_timeout_accept(accept)?;
+        self.handle_timeout_accept_action(round, weight, timeout_cert)
+            .await
+    }
+
+    async fn handle_timeout_accept_action(
+        &mut self,
+        round: u64,
+        weight: u32,
+        mut timeout_cert: Option<TimeoutCert>,
+    ) -> DagResult<()> {
+        if weight >= self.committee.validity_threshold() {
+            if let Some((_, own_timeout_cert)) = self.send_timeout_accept(round).await? {
+                timeout_cert = timeout_cert.or(own_timeout_cert);
+            }
+        }
+
+        if let Some(timeout_cert) = timeout_cert {
+            timeout_cert.verify(&self.committee)?;
+            if self.certified_timed_out.insert(round) {
+                debug!("Certified timeout for cut round {}", round);
+                if round + 1 >= self.cut_round {
+                    self.cut_round = round + 1;
+                }
+                self.try_propose_cut_for_current_round().await?;
+                self.schedule_cut_timer(self.cut_round);
+            }
+        }
         Ok(())
     }
 
@@ -750,11 +938,19 @@ impl Core {
         certificate.verify(&self.committee).map_err(DagError::from)
     }
 
-    async fn handle_timeout(&mut self, _timeout: &Timeout) -> DagResult<()> {
-        Ok(())
+    async fn handle_timeout(&mut self, timeout: Timeout) -> DagResult<()> {
+        self.process_timeout(timeout).await
     }
 
     async fn handle_tc(&mut self, _tc: &TC) -> DagResult<()> {
+        Ok(())
+    }
+
+    fn sanitize_timeout_accept(&mut self, accept: &TimeoutAccept) -> DagResult<()> {
+        ensure!(
+            self.gc_round <= accept.round,
+            DagError::CertificateTooOld(accept.digest(), accept.round)
+        );
         Ok(())
     }
 
@@ -807,12 +1003,16 @@ impl Core {
         debug!("genesis tips are {:?}", self.current_proposal_tips);
 
         // Initiate the proposer with a genesis parent
-        let genesis_cert = Certificate::genesis_certs(&self.committee).get(&self.name).unwrap().clone();
+        let genesis_cert = Certificate::genesis_certs(&self.committee)
+            .get(&self.name)
+            .unwrap()
+            .clone();
         self.tx_proposer
             .send(genesis_cert)
             .await
             .expect("failed to send cert to proposer");
         let _ = self.try_propose_cut_for_current_round().await;
+        self.schedule_cut_timer(self.cut_round);
 
         loop {
             let result = tokio::select! {
@@ -848,13 +1048,19 @@ impl Core {
                         PrimaryMessage::CutVote(vote) => self.process_cut_vote(vote).await,
                         PrimaryMessage::CutCertificate(certificate) => self.process_cut_certificate(certificate).await,
                         PrimaryMessage::Decide(decide) => self.process_decide(decide).await,
-                        PrimaryMessage::Timeout(timeout) => self.handle_timeout(&timeout).await,
+                        PrimaryMessage::Timeout(timeout) => self.handle_timeout(timeout).await,
+                        PrimaryMessage::TimeoutAccept(accept) => {
+                            match self.sanitize_timeout_accept(&accept) {
+                                Ok(()) => self.process_timeout_accept(accept).await,
+                                error => error
+                            }
+                        },
                         PrimaryMessage::TC(tc) => self.handle_tc(&tc).await,
 
                         // We receive a forwarded prepare or commit message from another replica
                         PrimaryMessage::ConsensusMessage(consensus_message) => self.process_forwarded_message(consensus_message).await,
-                          
-                    
+
+
                         // External Consensus implementation: Receive Consensus Requests (Prep/Confirm/Commit) or Votes (Prep-Vote/Confirm-Ack)
                         PrimaryMessage::ConsensusRequest(consensus_req) => self.process_consensus_request(consensus_req).await,
                         PrimaryMessage::ConsensusVote(consensus_vote) => self.process_consensus_vote(consensus_vote, false).await,
@@ -862,6 +1068,8 @@ impl Core {
                             panic!("Unexpected core message")}
                     }
                 },
+
+                Some(round) = self.cut_timer_futures.next() => self.process_cut_timer(round).await,
 
                 Some(certificate) = self.rx_certificate_waiter.recv() => self.process_certificate(certificate).await,
 
@@ -911,6 +1119,14 @@ impl Core {
 
                 //self.certificates_aggregators.retain(|k, _| k >= &gc_round);
                 self.cancel_handlers.retain(|k, _| k >= &gc_round);
+                self.consensus_cancel_handlers.retain(|k, _| k >= &gc_round);
+                self.timeouts_aggregators.retain(|k, _| k >= &gc_round);
+                self.timeout_accept_aggregators
+                    .retain(|k, _| k >= &gc_round);
+                self.sent_timeouts.retain(|r| r >= &gc_round);
+                self.sent_timeout_accepts.retain(|r| r >= &gc_round);
+                self.certified_timed_out.retain(|r| r >= &gc_round);
+                self.scheduled_cut_timers.retain(|r| r >= &gc_round);
                 self.gc_round = gc_round;
                 debug!("GC round moved to {}", self.gc_round);
             }

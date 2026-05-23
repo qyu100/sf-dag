@@ -10,10 +10,10 @@ from benchmark.remote import Bench, BenchError
 
 
 @task
-def local(ctx, debug=True, consensus_only=True, header_size=512_000):
+def local(ctx, debug=True, consensus_only=True, header_size=512_0):
     ''' Run benchmarks on localhost '''
     bench_params = {
-        'faults': 0,
+        'faults': 1,
         'nodes': [10],
         'workers': 1,
         'co-locate': True,
@@ -31,7 +31,7 @@ def local(ctx, debug=True, consensus_only=True, header_size=512_000):
     }
     node_params = {
         'consensus_only': consensus_only,
-        'timeout_delay': 5_000,  # ms
+        'timeout_delay': 200,  # ms
         'header_size': 512,  # bytes
         'max_header_delay': 5_000,  # ms
         'gc_depth': 50,  # rounds
@@ -118,7 +118,7 @@ def install(ctx):
 def remote(ctx, burst = 50, consensus_only=True, debug=False):
     ''' Run benchmarks on AWS '''
     bench_params = {
-        'faults': 0,
+        'faults': 1,
         'nodes': [10],
         'workers': 1,
         'co-locate': True,
@@ -155,7 +155,7 @@ def remote(ctx, burst = 50, consensus_only=True, debug=False):
         'simulate_asynchrony': False,
         'asynchrony_start': 15_000, #ms
         'asynchrony_duration': 3_000, #ms
-        'f_num': 16
+        'f_num': 3
     }
     try:
         Bench(ctx).run(bench_params, node_params, debug, consensus_only)

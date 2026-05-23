@@ -54,7 +54,7 @@ class InstanceManager:
             # Fetching instances based on state in GCP
             res = client.list(project=self.PROJECT_ID, zone=zone)
 
-            for instance in res:
+            for instance in sorted(res, key=lambda instance: instance.name):
                 ids[zone] += [instance.id]
 
                 for interface in instance.network_interfaces:

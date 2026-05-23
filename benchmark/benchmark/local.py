@@ -102,15 +102,15 @@ class LocalBench:
                         self._background_run(cmd, log_file)
 
             # Run the primaries (except the faulty ones).
-            for i, address in enumerate(committee.primary_addresses(self.faults)):
+            for node_id, address in committee.primary_addresses_with_ids(self.faults):
                 cmd = CommandMaker.run_primary(
-                    PathMaker.ed_key_file(i),
+                    PathMaker.ed_key_file(node_id),
                     PathMaker.committee_file(),
-                    PathMaker.db_path(i),
+                    PathMaker.db_path(node_id),
                     PathMaker.parameters_file(),
                     debug=debug
                 )
-                log_file = PathMaker.primary_log_file(i)
+                log_file = PathMaker.primary_log_file(node_id)
                 self._background_run(cmd, log_file)
 
             # Wait for all transactions to be processed.
