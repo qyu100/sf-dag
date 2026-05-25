@@ -18,7 +18,12 @@ class CommandMaker:
 
     @staticmethod
     def compile():
-        return 'cargo build --quiet --release --features benchmark'
+        return (
+            "cargo "
+            "--config 'source.crates-io.replace-with=\"ustc\"' "
+            "--config 'source.ustc.registry=\"sparse+https://mirrors.ustc.edu.cn/crates.io-index/\"' "
+            "build --quiet --release --features benchmark"
+        )
 
     @staticmethod
     def generate_key(filename):
