@@ -352,11 +352,20 @@ impl Core {
         debug!("Processing the header with height {:?}", header.height);
 
         if header.height != 1 {
-            let parent = self.synchronizer.get_parent(&header).await?;
-            if parent.is_none() {
+            if self.synchronizer.get_parent(&header).await?.is_none() {
                 debug!("Processing of {} suspended: missing parent", header.id);
                 return Ok(());
             }
+
+            let Some(parent) = self.synchronizer.get_parent_header(&header).await? else {
+                debug!("Processing of {} suspended: missing parent", header.id);
+                return Ok(());
+            };
+
+            ensure!(
+                parent.height() + 1 == header.height() && parent.origin() == header.origin(),
+                DagError::MalformedHeader(header.id.clone())
+            );
         }
 
         // Store the header since we have the parents (recursively).
@@ -626,6 +635,7 @@ impl Core {
             self.highest_certified_cut = cut_id.clone();
         }
         self.cut_round = self.cut_round.max(round + 1);
+        self.advance_timed_out_cut_rounds();
 
         if self.sent_decide_rounds.insert(round) {
             let decide = Decide::new(cut_id, round, &self.name, &self.name).await;
@@ -725,6 +735,13 @@ impl Core {
         if self.name != self.leader_elector.get_leader(round) {
             return Ok(());
         }
+        if !self.safe_cut_parent(round, &self.highest_certified_cut) {
+            debug!(
+                "Deferring cut proposal for round {} until the parent cut chain is safe",
+                round
+            );
+            return Ok(());
+        }
         if !self.proposed_cut_rounds.insert(round) {
             return Ok(());
         }
@@ -773,6 +790,16 @@ impl Core {
         }
 
         ((parent_round + 1)..round).all(|r| self.certified_timed_out.contains(&r))
+    }
+
+    fn advance_timed_out_cut_rounds(&mut self) -> bool {
+        let old_cut_round = self.cut_round;
+        while self.certified_timed_out.contains(&self.cut_round)
+            && self.safe_cut_parent(self.cut_round + 1, &self.highest_certified_cut)
+        {
+            self.cut_round += 1;
+        }
+        self.cut_round != old_cut_round
     }
 
     async fn process_cut_timer(&mut self, round: u64) -> DagResult<()> {
@@ -897,11 +924,10 @@ impl Core {
             timeout_cert.verify(&self.committee)?;
             if self.certified_timed_out.insert(round) {
                 debug!("Certified timeout for cut round {}", round);
-                if round + 1 >= self.cut_round {
-                    self.cut_round = round + 1;
+                if self.advance_timed_out_cut_rounds() {
+                    self.try_propose_cut_for_current_round().await?;
+                    self.schedule_cut_timer(self.cut_round);
                 }
-                self.try_propose_cut_for_current_round().await?;
-                self.schedule_cut_timer(self.cut_round);
             }
         }
         Ok(())

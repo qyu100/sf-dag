@@ -164,12 +164,12 @@ impl Proposer {
                         continue;
                     }
 
-                    // Advance to the next height.
-                    self.height += 1;
+                    // Advance to the child height of this parent certificate.
+                    self.height = parent.height + 1;
                     debug!("Chain moved to height {}", self.height);
 
-                    // Signal that we have a parent certificates to propose a new header.
-                    self.last_parent = Some(parent.clone());
+                    // Signal that we have a parent certificate to propose a new header.
+                    self.last_parent = Some(parent);
                 }
 
                 // Some((digest, worker_id)) = self.rx_workers.recv() => {
