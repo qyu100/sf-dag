@@ -574,19 +574,21 @@ class Bench:
         Print.info(msg + f' on {len(committee.primary_addresses())} honest machines...')
         
         tasks = []
+        honest_hosts_and_connections = []
         for name, authority in committee.json['authorities'].items():
             if not authority['is_honest']:
                 continue
             node_id = authority['node_id']
             ip = Committee.ip(authority['primary']['primary_to_primary'])
             connection = self.hosts_to_connections[ip]
+            honest_hosts_and_connections.append((ip, connection))
             tasks.append(self._configure_one(ip, node_id, connection, update))
 
         await self._gather_and_parse(tasks, 'Configure')
 
         if update:
             Print.info(f'Waiting for update to complete...')
-            await self._poll(hosts_and_connections, 'update')
+            await self._poll(honest_hosts_and_connections, 'update')
             
         Print.info(f'Successfully configured {len(tasks)} honest machines')
 
