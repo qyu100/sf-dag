@@ -1,6 +1,7 @@
 # Copyright(C) Facebook, Inc. and its affiliates.
 from datetime import datetime
 from glob import glob
+from math import ceil
 from multiprocessing import Pool
 from os.path import join
 from re import findall, search
@@ -56,7 +57,11 @@ class LogParser:
             raise ParseError(f'Failed to parse nodes\' logs: {e}')
         proposals, commits, self.configs, primary_ips, self.received_samples, sizes = zip(*results)
         self.proposals = self._merge_results([x.items() for x in proposals])
-        self.commits = self._merge_results([x.items() for x in commits])
+        self.commit_sample_size = max(1, ceil(len(primaries) * 0.5))
+        self.commits = self._merge_commits_at_sample(
+            [x.items() for x in commits],
+            self.commit_sample_size,
+        )
         self.sizes = {
             k: v for x in sizes for k, v in x.items() if k in self.commits
         }
@@ -83,6 +88,22 @@ class LogParser:
             for k, v in x:
                 if not k in merged or merged[k] > v:
                     merged[k] = v
+        return merged
+
+    def _merge_commits_at_sample(self, input, sample_size):
+        # Use the timestamp at which the sampled fraction of primaries committed
+        # the block, rather than the fastest primary's commit timestamp.
+        grouped = {}
+        for x in input:
+            for k, v in x:
+                grouped.setdefault(k, []).append(v)
+
+        merged = {}
+        for k, values in grouped.items():
+            if len(values) < sample_size:
+                continue
+            values.sort()
+            merged[k] = values[sample_size - 1]
         return merged
 
     def _search_group(self, pattern, log, error, default=None):
