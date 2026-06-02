@@ -91,6 +91,8 @@ pub struct Core {
     /// Headers waiting for optimistic echo gating: key is required certified round (r-2),
     /// value is header ids that can be echoed once that certificate exists.
     pending_echo_headers: HashMap<Round, HashSet<Digest>>,
+    /// Parent notifications waiting for cert(r-2) before a local leader can propose.
+    pending_proposer_parents: HashMap<Round, HashSet<ProposerParent>>,
     /// For storing info of header infos in processing
     processing_header_infos: HashMap<Digest, HeaderInfo>,
     /// For storing proof of header infos in processing
@@ -185,6 +187,7 @@ impl Core {
                 gc_round: 0,
                 last_voted: HashMap::with_capacity(2 * gc_depth as usize),
                 pending_echo_headers: HashMap::new(),
+                pending_proposer_parents: HashMap::new(),
                 processing_header_infos: HashMap::new(),
                 processing_header_proofs: HashMap::new(),
                 processing_echo_aggregators: HashMap::new(),
@@ -269,6 +272,7 @@ impl Core {
             gc_round: 0,
             last_voted: HashMap::with_capacity(2 * gc_depth as usize),
             pending_echo_headers: HashMap::new(),
+            pending_proposer_parents: HashMap::new(),
             processing_header_infos: HashMap::new(),
             processing_header_proofs: HashMap::new(),
             processing_echo_aggregators: HashMap::new(),
@@ -739,15 +743,7 @@ impl Core {
             }
         }
 
-        // Notify proposer as soon as we have this block and its parent delivered.
-        self.tx_proposer
-            .send(ProposerParent {
-                header_id: header_info_with_proof.id,
-                round: header_info_with_proof.round,
-                origin: header_info_with_proof.author,
-            })
-            .await
-            .expect("Failed to send parent candidate to proposer");
+        self.maybe_notify_proposer_or_defer(header_info_with_proof).await?;
 
         // Optimistic echo is gated by certificate(r-2) to avoid cascading optimistic failures.
         self.maybe_echo_or_defer(header_info_with_proof).await?;
@@ -805,15 +801,7 @@ impl Core {
             }
         }
 
-        // Notify proposer as soon as we have this block and its parent delivered.
-        self.tx_proposer
-            .send(ProposerParent {
-                header_id: header_info_with_proof.id,
-                round: header_info_with_proof.round,
-                origin: header_info_with_proof.author,
-            })
-            .await
-            .expect("Failed to send parent candidate to proposer");
+        self.maybe_notify_proposer_or_defer(header_info_with_proof).await?;
 
         // Optimistic echo is gated by certificate(r-2) to avoid cascading optimistic failures.
         self.maybe_echo_or_defer(header_info_with_proof).await?;
@@ -837,6 +825,43 @@ impl Core {
             return Ok(());
         }
         debug!("process_header_proof_optimized total time: {:?}", start.elapsed());
+        Ok(())
+    }
+
+    /// Notify the proposer only after the local leader has parent(r-1) and cert(r-2).
+    async fn maybe_notify_proposer_or_defer(&mut self, header_info_with_proof: &HeaderInfoWithProof) -> DagResult<()> {
+        let parent = ProposerParent {
+            header_id: header_info_with_proof.id,
+            round: header_info_with_proof.round,
+            origin: header_info_with_proof.author,
+        };
+        let propose_round = parent.round + 1;
+        let is_local_leader = self.committee.leader(propose_round as usize) == self.name;
+
+        if is_local_leader && parent.round > 1 {
+            let required_cert_round = parent.round - 1;
+            if !self.certificates.contains_key(&required_cert_round) {
+                self.pending_proposer_parents
+                    .entry(required_cert_round)
+                    .or_insert_with(HashSet::new)
+                    .insert(parent);
+                debug!(
+                    "Deferring proposal for round {}: waiting for certificate round {}",
+                    propose_round,
+                    required_cert_round
+                );
+                return Ok(());
+            }
+        }
+
+        self.notify_proposer(parent).await
+    }
+
+    async fn notify_proposer(&mut self, parent: ProposerParent) -> DagResult<()> {
+        self.tx_proposer
+            .send(parent)
+            .await
+            .expect("Failed to send parent candidate to proposer");
         Ok(())
     }
 
@@ -903,6 +928,18 @@ impl Core {
                 continue;
             };
             self.maybe_echo_or_defer(&header_info_with_proof).await?;
+        }
+
+        Ok(())
+    }
+
+    async fn release_deferred_proposer_parents(&mut self, certified_round: Round) -> DagResult<()> {
+        let Some(parents) = self.pending_proposer_parents.remove(&certified_round) else {
+            return Ok(());
+        };
+
+        for parent in parents {
+            self.notify_proposer(parent).await?;
         }
 
         Ok(())
@@ -1195,8 +1232,10 @@ impl Core {
 
         self.certificates.entry(certificate.round).or_insert(certificate.clone());
         self.release_deferred_echoes(certificate.round).await?;
+        self.release_deferred_proposer_parents(certificate.round).await?;
 
         let decide = Decide::new(certificate.header_id, certificate.round, &certificate.origin, &self.name).await;
+        self.process_decide(&decide).await?;
 
         let addresses = self
             .committee
@@ -1246,9 +1285,11 @@ impl Core {
         // Store in local map — move certificate in (no extra clone).
         self.certificates.entry(round).or_insert(certificate);
         self.release_deferred_echoes(round).await?;
+        self.release_deferred_proposer_parents(round).await?;
 
         // 4a: Build decide from the extracted small fields.
         let decide = Decide::new(header_id, round, &origin, &self.name).await;
+        self.process_decide(&decide).await?;
 
         let addresses = self
             .committee
@@ -1444,6 +1485,7 @@ impl Core {
                 self.processing_header_proofs
                     .retain(|_, h| &h.round >= &gc_round);
                 self.pending_echo_headers.retain(|k, _| k >= &gc_round);
+                self.pending_proposer_parents.retain(|k, _| k >= &gc_round);
                 self.cancel_handlers.retain(|k, _| k >= &gc_round);
                 // let _ = self.synchronizer.garbage_collect(gc_round).await;
                 self.gc_round = gc_round;
