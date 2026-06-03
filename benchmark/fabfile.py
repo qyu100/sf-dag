@@ -109,7 +109,7 @@ def install(ctx):
 
 
 @task
-def remote(ctx, debug=True):
+def remote(ctx, debug=False, update=True):
     """Run benchmarks on AWS"""
     bench_params = {
         "faults": 0,
@@ -147,7 +147,7 @@ def remote(ctx, debug=True):
         "asynchrony_duration": 3_000,  # ms
     }
     try:
-        Bench(ctx).run(bench_params, node_params, debug)
+        Bench(ctx).run(bench_params, node_params, debug, update=update)
     except BenchError as e:
         Print.error(e)
 

@@ -1,13 +1,17 @@
 # Copyright(C) Facebook, Inc. and its affiliates.
 from collections import OrderedDict
+from datetime import datetime
 from fabric import Connection, ThreadingGroup as Group
 from fabric.exceptions import GroupException
 from paramiko import RSAKey
 from paramiko.ssh_exception import PasswordRequiredException, SSHException
-from os.path import basename, splitext
+from os import listdir, makedirs
+from os.path import basename, exists, isfile, join, splitext
+from shutil import copy2
 from time import sleep
 from math import ceil
 from copy import deepcopy
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import subprocess
 
 from benchmark.config import (
@@ -37,6 +41,8 @@ class ExecutionError(Exception):
 
 
 class Bench:
+    MAX_PARALLEL_SSH = 32
+
     def __init__(self, ctx):
         self.manager = InstanceManager.make()
         self.settings = self.manager.settings
@@ -174,6 +180,34 @@ class Bench:
         output = c.run(cmd, hide=True)
         self._check_stderr(output)
 
+    def _run_parallel(self, action, items, label):
+        items = list(items)
+        if not items:
+            return
+
+        workers = min(self.MAX_PARALLEL_SSH, len(items))
+        Print.info(f"{label} ({len(items)} task(s), up to {workers} parallel)...")
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = [executor.submit(action, item) for item in items]
+            for future in as_completed(futures):
+                try:
+                    future.result()
+                except Exception as e:
+                    raise ExecutionError(f"{label} failed: {e}") from e
+
+    def _upload_config_one(self, item):
+        ip, key_file = item
+        c = Connection(ip, user=self.settings.username, connect_kwargs=self.connect)
+        c.run(f"{CommandMaker.cleanup()} || true", hide=True)
+        c.put(PathMaker.committee_file(), ".")
+        c.put(key_file, ".")
+        c.put(PathMaker.parameters_file(), ".")
+
+    def _download_log_one(self, item):
+        host, remote, local = item
+        c = Connection(host, user=self.settings.username, connect_kwargs=self.connect)
+        c.get(remote, local=local)
+
     def _update(self, hosts, collocate):
         if collocate:
             ips = list(set(hosts))
@@ -236,16 +270,11 @@ class Bench:
 
         # Cleanup all nodes and upload configuration files.
         names = names[: len(names) - bench_parameters.faults]
-        progress = progress_bar(names, prefix="Uploading config files:")
-        for i, name in enumerate(progress):
+        upload_tasks = []
+        for i, name in enumerate(names):
             for ip in committee.ips(name):
-                c = Connection(
-                    ip, user=self.settings.username, connect_kwargs=self.connect
-                )
-                c.run(f"{CommandMaker.cleanup()} || true", hide=True)
-                c.put(PathMaker.committee_file(), ".")
-                c.put(PathMaker.key_file(i), ".")
-                c.put(PathMaker.parameters_file(), ".")
+                upload_tasks.append((ip, PathMaker.key_file(i)))
+        self._run_parallel(self._upload_config_one, upload_tasks, "Uploading config files")
 
         return committee
 
@@ -259,9 +288,9 @@ class Bench:
         # Run the clients (they will wait for the nodes to be ready).
         # Filter all faulty nodes from the client addresses (or they will wait
         # for the faulty nodes to be online).
-        Print.info("Booting clients...")
         workers_addresses = committee.workers_addresses(faults)
         rate_share = ceil(rate / committee.workers())
+        client_tasks = []
         for i, addresses in enumerate(workers_addresses):
             for id, address in addresses:
                 host = Committee.ip(address)
@@ -273,10 +302,15 @@ class Bench:
                 )
                 print(cmd)
                 log_file = PathMaker.client_log_file(i, id)
-                self._background_run(host, cmd, log_file)
+                client_tasks.append((host, cmd, log_file))
+        self._run_parallel(
+            lambda item: self._background_run(*item),
+            client_tasks,
+            "Booting clients",
+        )
 
         # Run the primaries (except the faulty ones).
-        Print.info("Booting primaries...")
+        primary_tasks = []
         for i, address in enumerate(committee.primary_addresses(faults)):
             host = Committee.ip(address)
             cmd = CommandMaker.run_primary(
@@ -288,10 +322,15 @@ class Bench:
             )
             print(cmd)
             log_file = PathMaker.primary_log_file(i)
-            self._background_run(host, cmd, log_file)
+            primary_tasks.append((host, cmd, log_file))
+        self._run_parallel(
+            lambda item: self._background_run(*item),
+            primary_tasks,
+            "Booting primaries",
+        )
 
         # Run the workers (except the faulty ones).
-        Print.info("Booting workers...")
+        worker_tasks = []
         for i, addresses in enumerate(workers_addresses):
             for id, address in addresses:
                 host = Committee.ip(address)
@@ -305,7 +344,12 @@ class Bench:
                 )
                 print(cmd)
                 log_file = PathMaker.worker_log_file(i, id)
-                self._background_run(host, cmd, log_file)
+                worker_tasks.append((host, cmd, log_file))
+        self._run_parallel(
+            lambda item: self._background_run(*item),
+            worker_tasks,
+            "Booting workers",
+        )
 
         # Wait for all transactions to be processed.
         duration = bench_parameters.duration
@@ -412,44 +456,82 @@ class Bench:
         #    log_file = PathMaker.primary_log_file(i)
         #    self._background_run(host, cmd, log_file)
 
-    def _logs(self, committee, faults):
+    def _download_logs(self, committee, faults):
         # Delete local logs (if any).
         cmd = CommandMaker.clean_logs()
         subprocess.run([cmd], shell=True, stderr=subprocess.DEVNULL)
 
         # Download log files.
+        download_tasks = []
         workers_addresses = committee.workers_addresses(faults)
-        progress = progress_bar(workers_addresses, prefix="Downloading workers logs:")
-        for i, addresses in enumerate(progress):
+        for i, addresses in enumerate(workers_addresses):
             for id, address in addresses:
                 host = Committee.ip(address)
-                c = Connection(
-                    host, user=self.settings.username, connect_kwargs=self.connect
-                )
-                c.get(
-                    PathMaker.client_log_file(i, id),
-                    local=PathMaker.client_log_file(i, id),
-                )
-                c.get(
-                    PathMaker.worker_log_file(i, id),
-                    local=PathMaker.worker_log_file(i, id),
-                )
+                client_log = PathMaker.client_log_file(i, id)
+                worker_log = PathMaker.worker_log_file(i, id)
+                download_tasks.append((host, client_log, client_log))
+                download_tasks.append((host, worker_log, worker_log))
 
         primary_addresses = committee.primary_addresses(faults)
-        progress = progress_bar(primary_addresses, prefix="Downloading primaries logs:")
-        for i, address in enumerate(progress):
+        for i, address in enumerate(primary_addresses):
             host = Committee.ip(address)
-            c = Connection(
-                host, user=self.settings.username, connect_kwargs=self.connect
-            )
-            c.get(PathMaker.primary_log_file(i), local=PathMaker.primary_log_file(i))
+            primary_log = PathMaker.primary_log_file(i)
+            download_tasks.append((host, primary_log, primary_log))
+        self._run_parallel(self._download_log_one, download_tasks, "Downloading logs")
 
+    def _parse_logs(self, faults):
         # Parse logs and return the parser.
         Print.info("Parsing logs and computing performance...")
         return LogParser.process(PathMaker.logs_path(), faults=faults)
 
-    def run(self, bench_parameters_dict, node_parameters_dict, debug=False):
+    def _logs(self, committee, faults):
+        self._download_logs(committee, faults)
+        return self._parse_logs(faults)
+
+    def _backup_logs(self, faults, nodes, workers, run, rate, tx_size, status, summary=None):
+        log_path = PathMaker.logs_path()
+        if not exists(log_path):
+            return
+
+        log_files = [
+            name
+            for name in sorted(listdir(log_path))
+            if isfile(join(log_path, name))
+        ]
+        if not log_files:
+            return
+
+        timestamp = datetime.now().strftime("%Y-%m-%d-%H-%M-%S-%f")
+        branch = str(self.settings.branch).replace("/", "_")
+        status = str(status).replace(" ", "_")
+        backup_dir = join(
+            PathMaker.backup_logs_path(),
+            f"{timestamp}-{branch}-{nodes}nodes-{workers}workers-run{run}-rate{rate}-tx{tx_size}-{status}",
+        )
+        makedirs(backup_dir, exist_ok=True)
+
+        for name in log_files:
+            copy2(join(log_path, name), join(backup_dir, name))
+
+        with open(join(backup_dir, "run-info.txt"), "w") as f:
+            f.write(f"status: {status}\n")
+            f.write(f"branch: {self.settings.branch}\n")
+            f.write(f"faults: {faults}\n")
+            f.write(f"nodes: {nodes}\n")
+            f.write(f"workers: {workers}\n")
+            f.write(f"run: {run}\n")
+            f.write(f"rate: {rate}\n")
+            f.write(f"tx_size: {tx_size}\n")
+
+        if summary:
+            with open(join(backup_dir, "summary.txt"), "w") as f:
+                f.write(summary)
+
+        Print.info(f"Backed up logs to {backup_dir}")
+
+    def run(self, bench_parameters_dict, node_parameters_dict, debug=False, update=True):
         assert isinstance(debug, bool)
+        assert isinstance(update, bool)
         Print.heading("Starting remote benchmark")
         try:
             bench_parameters = BenchParameters(bench_parameters_dict)
@@ -465,16 +547,19 @@ class Bench:
 
         # Update nodes.
         print(selected_hosts)
-        try:
-            self._update(selected_hosts, bench_parameters.collocate)
-        except (GroupException, ExecutionError) as e:
-            e = FabricError(e) if isinstance(e, GroupException) else e
-            raise BenchError("Failed to update nodes", e)
+        if update:
+            try:
+                self._update(selected_hosts, bench_parameters.collocate)
+            except (GroupException, ExecutionError) as e:
+                e = FabricError(e) if isinstance(e, GroupException) else e
+                raise BenchError("Failed to update nodes", e)
+        else:
+            Print.info("Skipping remote update/build (--no-update)")
 
         # Upload all configuration files.
         try:
             committee = self._config(selected_hosts, node_parameters, bench_parameters)
-        except (subprocess.SubprocessError, GroupException) as e:
+        except (subprocess.SubprocessError, GroupException, ExecutionError) as e:
             e = FabricError(e) if isinstance(e, GroupException) else e
             raise BenchError("Failed to configure nodes", e)
 
@@ -489,12 +574,16 @@ class Bench:
                 # Run the benchmark.
                 for i in range(bench_parameters.runs):
                     Print.heading(f"Run {i+1}/{bench_parameters.runs}")
+                    faults = bench_parameters.faults
+                    logs_downloaded = False
                     try:
                         self._run_single(r, committee_copy, bench_parameters, debug)
 
-                        faults = bench_parameters.faults
-                        logger = self._logs(committee_copy, faults)
-                        logger.print(
+                        self._download_logs(committee_copy, faults)
+                        logs_downloaded = True
+                        logger = self._parse_logs(faults)
+                        summary = logger.result()
+                        with open(
                             PathMaker.result_file(
                                 faults,
                                 n,
@@ -502,15 +591,42 @@ class Bench:
                                 bench_parameters.collocate,
                                 r,
                                 bench_parameters.tx_size,
-                            )
+                            ),
+                            "a",
+                        ) as f:
+                            f.write(summary)
+                        self._backup_logs(
+                            faults,
+                            n,
+                            bench_parameters.workers,
+                            i + 1,
+                            r,
+                            bench_parameters.tx_size,
+                            "success",
+                            summary,
                         )
                     except (
                         subprocess.SubprocessError,
                         GroupException,
+                        ExecutionError,
                         ParseError,
                     ) as e:
                         self.kill(hosts=selected_hosts)
                         if isinstance(e, GroupException):
                             e = FabricError(e)
+                        if logs_downloaded:
+                            try:
+                                self._backup_logs(
+                                    faults,
+                                    n,
+                                    bench_parameters.workers,
+                                    i + 1,
+                                    r,
+                                    bench_parameters.tx_size,
+                                    "failed",
+                                    f"Benchmark failed: {type(e).__name__}: {e}\n",
+                                )
+                            except Exception as backup_error:
+                                Print.warn(f"Failed to back up logs: {backup_error}")
                         Print.error(BenchError("Benchmark failed", e))
                         continue
