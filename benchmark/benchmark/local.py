@@ -1,5 +1,6 @@
 # Copyright(C) Facebook, Inc. and its affiliates.
 import subprocess
+from datetime import datetime
 from math import ceil
 from os.path import basename, splitext
 from time import sleep
@@ -77,6 +78,7 @@ class LocalBench:
 
             self.node_parameters.print(PathMaker.parameters_file())
 
+            run_started_at = datetime.now()
             if not consensus_only:
                 # Run the clients (they will wait for the nodes to be ready).
                 workers_addresses = committee.workers_addresses(self.faults)
@@ -108,6 +110,7 @@ class LocalBench:
             Print.info(f'Running benchmark ({self.duration} sec)...')
             sleep(self.duration)
             self._kill_nodes()
+            run_finished_at = datetime.now()
 
             # Parse logs and return the parser.
             Print.info('Parsing logs...')
@@ -115,6 +118,8 @@ class LocalBench:
                 PathMaker.logs_path(),
                 faults=self.faults,
                 consensus_only=consensus_only,
+                run_started_at=run_started_at,
+                run_finished_at=run_finished_at,
             )
 
         except (subprocess.SubprocessError, ParseError) as e:

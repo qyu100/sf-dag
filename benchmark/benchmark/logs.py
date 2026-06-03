@@ -15,7 +15,17 @@ class ParseError(Exception):
 
 
 class LogParser:
-    def __init__(self, clients, primaries, workers, faults=0, consensus_only=False):
+    def __init__(
+        self,
+        clients,
+        primaries,
+        workers,
+        faults=0,
+        consensus_only=False,
+        bandwidth_logs=None,
+        run_started_at=None,
+        run_finished_at=None,
+    ):
         inputs = [clients, primaries]
         assert all(isinstance(x, list) for x in inputs)
         assert all(isinstance(x, str) for y in inputs for x in y)
@@ -25,6 +35,9 @@ class LogParser:
             assert all(x for x in inputs)
 
         self.consensus_only = consensus_only
+        self.bandwidth = self._parse_bandwidth_logs(bandwidth_logs or [])
+        self.run_started_at = run_started_at
+        self.run_finished_at = run_finished_at
 
         self.faults = faults
         if isinstance(faults, int):
@@ -105,6 +118,55 @@ class LogParser:
             values.sort()
             merged[k] = values[sample_size - 1]
         return merged
+
+    def _parse_bandwidth_logs(self, logs):
+        node_bandwidth = []
+
+        for log in logs:
+            iface_index = rx_index = tx_index = None
+            samples = []
+
+            for line in log.splitlines():
+                parts = line.split()
+                if not parts:
+                    continue
+                if 'IFACE' in parts and 'rxkB/s' in parts and 'txkB/s' in parts:
+                    iface_index = parts.index('IFACE')
+                    rx_index = parts.index('rxkB/s')
+                    tx_index = parts.index('txkB/s')
+                    continue
+                if iface_index is None or parts[0] == 'Average:':
+                    continue
+                if len(parts) <= max(iface_index, rx_index, tx_index):
+                    continue
+
+                iface = parts[iface_index]
+                if iface == 'lo':
+                    continue
+
+                try:
+                    rx_kbps = float(parts[rx_index].replace(',', '.'))
+                    tx_kbps = float(parts[tx_index].replace(',', '.'))
+                except ValueError:
+                    continue
+                samples.append((rx_kbps, tx_kbps))
+
+            if samples:
+                rx_avg = mean(x[0] for x in samples)
+                tx_avg = mean(x[1] for x in samples)
+                node_bandwidth.append((rx_avg, tx_avg))
+
+        if not node_bandwidth:
+            return None
+
+        rx_kbps = sum(x[0] for x in node_bandwidth)
+        tx_kbps = sum(x[1] for x in node_bandwidth)
+        return {
+            'nodes': len(node_bandwidth),
+            'rx_gbps': rx_kbps * 8 / 1_000_000,
+            'tx_gbps': tx_kbps * 8 / 1_000_000,
+            'total_gbps': (rx_kbps + tx_kbps) * 8 / 1_000_000,
+        }
 
     def _search_group(self, pattern, log, error, default=None):
         match = search(pattern, log)
@@ -197,6 +259,28 @@ class LogParser:
         x = datetime.fromisoformat(string.replace('Z', '+00:00'))
         return datetime.timestamp(x)
 
+    def _format_run_time(self, value):
+        if isinstance(value, datetime):
+            return value.isoformat(timespec='microseconds')
+        return str(value)
+
+    def _run_time_summary(self):
+        if not self.run_started_at or not self.run_finished_at:
+            return ''
+
+        elapsed = ''
+        if isinstance(self.run_started_at, datetime) and isinstance(self.run_finished_at, datetime):
+            elapsed = (
+                f' Run wall-clock elapsed: '
+                f'{(self.run_finished_at - self.run_started_at).total_seconds():.3f} s\n'
+            )
+
+        return (
+            f' Run started at: {self._format_run_time(self.run_started_at)}\n'
+            f' Run finished at: {self._format_run_time(self.run_finished_at)}\n'
+            f'{elapsed}'
+        )
+
     def _consensus_throughput(self):
         if not self.commits:
             return 0, 0, 0
@@ -258,11 +342,21 @@ class LogParser:
         sync_retry_nodes = self.configs[0]['sync_retry_nodes']
         batch_size = self.configs[0]['batch_size']
         max_batch_delay = self.configs[0]['max_batch_delay']
+        run_time_summary = self._run_time_summary()
 
         consensus_latency = self._consensus_latency() * 1_000
         consensus_tps, consensus_bps, _ = self._consensus_throughput()
         end_to_end_tps, end_to_end_bps, duration = self._end_to_end_throughput()
         end_to_end_latency = self._end_to_end_latency() * 1_000
+        if self.bandwidth:
+            bandwidth_summary = (
+                f' Consensus bandwidth nodes: {self.bandwidth["nodes"]:,}\n'
+                f' Consensus bandwidth TX: {self.bandwidth["tx_gbps"]:.3f} Gbps\n'
+                f' Consensus bandwidth RX: {self.bandwidth["rx_gbps"]:.3f} Gbps\n'
+                f' Consensus bandwidth total: {self.bandwidth["total_gbps"]:.3f} Gbps\n'
+            )
+        else:
+            bandwidth_summary = ' Consensus bandwidth: n/a\n'
 
         return (
             '\n'
@@ -277,6 +371,7 @@ class LogParser:
             f' Input rate: {sum(self.rate):,} tx/s\n'
             f' Transaction size: {self.size[0]:,} B\n'
             f' Execution time: {round(duration):,} s\n'
+            f'{run_time_summary}'
             '\n'
             #f' Timeout delay: {timeout_delay:,} ms\n'
             f' Header size: {header_size:,} B\n'
@@ -291,6 +386,7 @@ class LogParser:
             f' Consensus TPS: {round(consensus_tps):,} tx/s\n'
             f' Consensus BPS: {round(consensus_bps):,} B/s\n'
             f' Consensus latency: {round(consensus_latency):,} ms\n'
+            f'{bandwidth_summary}'
             # '\n'
             # f' End-to-end TPS: {round(end_to_end_tps):,} tx/s\n'
             # f' End-to-end BPS: {round(end_to_end_bps):,} B/s\n'
@@ -304,7 +400,7 @@ class LogParser:
             f.write(self.result())
 
     @classmethod
-    def process(cls, directory, faults=0, *args, **kwargs):
+    def process(cls, directory, faults=0, consensus_only=False, **kwargs):
         assert isinstance(directory, str)
 
         clients = []
@@ -315,4 +411,16 @@ class LogParser:
         for filename in sorted(glob(join(directory, 'primary-*.log'))):
             with open(filename, 'r') as f:
                 primaries += [f.read()]
-        return cls(clients, primaries, [], faults=faults, *args, **kwargs)
+        bandwidth_logs = []
+        for filename in sorted(glob(join(directory, 'sar-net-*.log'))):
+            with open(filename, 'r') as f:
+                bandwidth_logs += [f.read()]
+        return cls(
+            clients,
+            primaries,
+            [],
+            faults=faults,
+            consensus_only=consensus_only,
+            bandwidth_logs=bandwidth_logs,
+            **kwargs,
+        )
