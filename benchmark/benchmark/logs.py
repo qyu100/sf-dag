@@ -360,11 +360,18 @@ class LogParser:
             consensus_tps = self._consensus_only_throughput()
 
         if self.bandwidth:
+            nodes = self.bandwidth["nodes"]
+            tx_per_node = self.bandwidth["tx_gbps"] / nodes
+            rx_per_node = self.bandwidth["rx_gbps"] / nodes
+            total_per_node = self.bandwidth["total_gbps"] / nodes
             bandwidth_summary = (
-                f' Consensus bandwidth nodes: {self.bandwidth["nodes"]:,}\n'
-                f' Consensus bandwidth TX: {self.bandwidth["tx_gbps"]:.3f} Gbps\n'
-                f' Consensus bandwidth RX: {self.bandwidth["rx_gbps"]:.3f} Gbps\n'
-                f' Consensus bandwidth total: {self.bandwidth["total_gbps"]:.3f} Gbps\n'
+                f' Consensus bandwidth nodes: {nodes:,}\n'
+                f' Consensus bandwidth TX: {tx_per_node:.3f} Gbps/node\n'
+                f' Consensus bandwidth RX: {rx_per_node:.3f} Gbps/node\n'
+                f' Consensus bandwidth total: {total_per_node:.3f} Gbps/node\n'
+                f' Consensus bandwidth TX total: {self.bandwidth["tx_gbps"]:.3f} Gbps\n'
+                f' Consensus bandwidth RX total: {self.bandwidth["rx_gbps"]:.3f} Gbps\n'
+                f' Consensus bandwidth total aggregate: {self.bandwidth["total_gbps"]:.3f} Gbps\n'
             )
         else:
             bandwidth_summary = ' Consensus bandwidth: n/a\n'
