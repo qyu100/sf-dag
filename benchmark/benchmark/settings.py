@@ -1,5 +1,6 @@
 # Copyright(C) Facebook, Inc. and its affiliates.
 from json import load, JSONDecodeError
+from os.path import abspath, dirname, isabs, join
 
 
 class SettingsError(Exception):
@@ -8,10 +9,11 @@ class SettingsError(Exception):
 
 class Settings:
     def __init__(self, key_name, key_path, base_port, repo_name, repo_url,
-                 branch, instance_type, zones, project_id, username,
+                 branch, instance_type, zones, project_id, username, gcp_key_path,
                  boot_disk_size_gb=300, source_image=None):
         inputs_str = [
-            key_name, key_path, repo_name, repo_url, branch, instance_type
+            key_name, key_path, repo_name, repo_url, branch, instance_type,
+            project_id, username, gcp_key_path
         ]
         if isinstance(zones, list):
             zones = zones
@@ -38,11 +40,18 @@ class Settings:
         self.gcp_zones = zones
         self.project_id = project_id
         self.username = username
+        self.gcp_key_path = gcp_key_path
         self.boot_disk_size_gb = boot_disk_size_gb
         self.source_image = (
             source_image
             or 'projects/ubuntu-os-cloud/global/images/family/ubuntu-2204-lts'
         )
+
+    @staticmethod
+    def _resolve_path(settings_file, path):
+        if isabs(path):
+            return path
+        return join(dirname(abspath(settings_file)), path)
 
     @classmethod
     def load(cls, filename):
@@ -51,6 +60,10 @@ class Settings:
                 data = load(f)
             instances = data['instances']
             zones = instances.get('zones', instances.get('regions'))
+            gcp_key_path = data.get('gcp_key', {}).get(
+                'path',
+                'benchmark/key.json'
+            )
 
             return cls(
                 data['key']['name'],
@@ -63,6 +76,7 @@ class Settings:
                 zones,
                 data['project_id'],
                 data['username'],
+                cls._resolve_path(filename, gcp_key_path),
                 instances.get('boot_disk_size_gb', 300),
                 instances.get('source_image'),
             )

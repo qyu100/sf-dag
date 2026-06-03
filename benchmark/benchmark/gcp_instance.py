@@ -3,6 +3,8 @@ from botocore.exceptions import ClientError
 from collections import defaultdict
 from google.cloud import compute_v1
 from google.api_core.extended_operation import ExtendedOperation
+from google.oauth2 import service_account
+import os
 from os.path import exists
 
 from benchmark.utils import Print, BenchError, progress_bar
@@ -27,7 +29,12 @@ class InstanceManager:
     def __init__(self, settings):
         assert isinstance(settings, Settings)
         self.settings = settings
-        self.client = compute_v1.InstancesClient()
+        credentials = service_account.Credentials.from_service_account_file(
+            self.settings.gcp_key_path,
+            scopes=["https://www.googleapis.com/auth/cloud-platform"],
+        )
+        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = self.settings.gcp_key_path
+        self.client = compute_v1.InstancesClient(credentials=credentials)
 
     @classmethod
     def make(cls, settings_file="settings.json"):
@@ -35,6 +42,8 @@ class InstanceManager:
             return cls(Settings.load(settings_file))
         except SettingsError as e:
             raise BenchError("Failed to load settings", e)
+        except Exception as e:
+            raise BenchError("Failed to initialize GCP client", GCPError(e))
 
     def _get(self, state):
         # Possible states are: 'pending', 'running', 'shutting-down',

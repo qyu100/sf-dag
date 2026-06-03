@@ -3,6 +3,9 @@
         "name": "gcp",
         "path": "<PATH>"
     },
+    "gcp_key": {
+        "path": "benchmark/key.json"
+    },
     "port": 5000,
     "ports": {
         "consensus": 8000,

@@ -3,6 +3,9 @@
         "name": "gcp",
         "path": "/Users/balaji/.ssh/google_compute_engine"
     },
+    "gcp_key": {
+        "path": "benchmark/key.json"
+    },
     "port": 5000,
     "repo": {
         "name": "autobahn-artifact",
