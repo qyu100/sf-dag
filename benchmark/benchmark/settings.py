@@ -53,16 +53,42 @@ class Settings:
             return path
         return join(dirname(abspath(settings_file)), path)
 
+    @staticmethod
+    def _path_from_setting(value, default):
+        if value is None:
+            path = default
+        elif isinstance(value, str):
+            path = value
+        elif isinstance(value, dict):
+            path = value.get('path', default)
+        elif isinstance(value, list):
+            if not value:
+                path = default
+            elif isinstance(value[0], str):
+                path = value[0]
+            elif isinstance(value[0], dict):
+                path = value[0].get('path', default)
+            else:
+                raise SettingsError('Malformed settings: invalid gcp_key entry')
+        else:
+            raise SettingsError('Malformed settings: gcp_key must be an object, string, or list')
+
+        if not isinstance(path, str):
+            raise SettingsError('Malformed settings: gcp_key path must be a string')
+        return path
+
     @classmethod
     def load(cls, filename):
         try:
             with open(filename, 'r') as f:
                 data = load(f)
             instances = data['instances']
+            if not isinstance(instances, dict):
+                raise SettingsError('Malformed settings: instances must be an object')
             zones = instances.get('zones', instances.get('regions'))
-            gcp_key_path = data.get('gcp_key', {}).get(
-                'path',
-                'benchmark/key.json'
+            gcp_key_path = cls._path_from_setting(
+                data.get('gcp_key'),
+                'benchmark/key.json',
             )
 
             return cls(
