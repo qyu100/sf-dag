@@ -103,6 +103,19 @@ class Bench:
         self._parse_task_results(func, hosts_and_results, False)
         return hosts_and_results
 
+    async def _gather_optional(self, tasks, func):
+        hosts_and_results = await asyncio.gather(*tasks, return_exceptions=True)
+        for entry in hosts_and_results:
+            if isinstance(entry, Exception):
+                Print.warn(f'{func} failed: {entry}')
+                continue
+            host, result = entry
+            if isinstance(result, Exception):
+                Print.warn(f'{func} skipped on {host}: {result}')
+            elif result.exit_status and result.exit_status != 0:
+                Print.warn(f'{func} exited with status {result.exit_status} on {host}: {result.stderr}')
+        return hosts_and_results
+
     def install(self):
         asyncio.get_event_loop().run_until_complete(self._install())
 
@@ -452,6 +465,22 @@ class Bench:
         
         await self._gather_and_parse(tasks, 'Boot Workers')
 
+    async def _run_bandwidth_monitor_cmd(self, host, connection, cmd, action):
+        try:
+            result = await connection.run(cmd)
+            return host, result
+        except Exception as first_error:
+            try:
+                Print.warn(f'Bandwidth monitor {action} on {host} failed ({first_error}); reconnecting...')
+                connection = await asyncssh.connect(host, **self.connect_options)
+                self.hosts_to_connections[host] = connection
+                result = await connection.run(cmd)
+                return host, result
+            except Exception as second_error:
+                return host, Exception(
+                    f'Failed to {action} bandwidth monitor on {host} because of {second_error}'
+                )
+
     async def _start_bandwidth_monitor_one(self, host, connection, index):
         log_file = join(PathMaker.logs_path(), f'sar-net-{index}.log')
         pid_file = join(PathMaker.logs_path(), f'sar-net-{index}.pid')
@@ -465,11 +494,7 @@ class Bench:
             f'nohup env LC_ALL=C sar -n DEV 1 > {log_file} 2>&1 & echo $! > {pid_file} ; '
             f'else {procfs_sampler} ; fi'
         )
-        try:
-            result = await connection.run(cmd)
-            return host, result
-        except Exception as e:
-            return host, Exception(f'Failed to start bandwidth monitor on {host} because of {e}')
+        return await self._run_bandwidth_monitor_cmd(host, connection, cmd, 'start')
 
     async def _stop_bandwidth_monitor_one(self, host, connection, index):
         pid_file = join(PathMaker.logs_path(), f'sar-net-{index}.pid')
@@ -480,11 +505,7 @@ class Bench:
             f'rm -f {pid_file} ; '
             f'fi'
         )
-        try:
-            result = await connection.run(cmd)
-            return host, result
-        except Exception as e:
-            return host, Exception(f'Failed to stop bandwidth monitor on {host} because of {e}')
+        return await self._run_bandwidth_monitor_cmd(host, connection, cmd, 'stop')
 
     async def _start_bandwidth_monitors(self, committee, connections, faults):
         Print.info('Starting bandwidth monitors...')
@@ -493,7 +514,7 @@ class Bench:
             host = Committee.ip(address)
             connection = connections[host]
             tasks.append(self._start_bandwidth_monitor_one(host, connection, i))
-        await self._gather_and_parse(tasks, 'Start Bandwidth Monitors')
+        await self._gather_optional(tasks, 'Start Bandwidth Monitors')
 
     async def _stop_bandwidth_monitors(self, committee, connections, faults):
         Print.info('Stopping bandwidth monitors...')
@@ -502,7 +523,7 @@ class Bench:
             host = Committee.ip(address)
             connection = connections[host]
             tasks.append(self._stop_bandwidth_monitor_one(host, connection, i))
-        await self._gather_and_parse(tasks, 'Stop Bandwidth Monitors')
+        await self._gather_optional(tasks, 'Stop Bandwidth Monitors')
 
     async def _run_single(
         self, 
