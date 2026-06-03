@@ -14,7 +14,7 @@ class ParseError(Exception):
 
 
 class LogParser:
-    def __init__(self, clients, primaries, consensus_only=False, debug=False):
+    def __init__(self, clients, primaries, consensus_only=False, debug=False, bandwidth_logs=None):
         inputs = [primaries]
 
         if not consensus_only:
@@ -26,6 +26,7 @@ class LogParser:
 
         self.consensus_only = consensus_only
         self.debug = debug
+        self.bandwidth = self._parse_bandwidth_logs(bandwidth_logs or [])
 
         # Parse the primaries logs.
         try:
@@ -95,9 +96,10 @@ class LogParser:
         committed_blocks = [x.items() for x in block_commits]
         self.block_proposals = self._representative_results_by_digest([x.items() for x in block_proposals], True)
         self.block_first_commits = self._representative_results_by_digest(committed_blocks, True)
+        self.block_half_commits = self._half_results_by_digest(committed_blocks)
         self.block_last_commits = self._representative_results_by_digest(committed_blocks, False)
         if consensus_only:
-            self.sizes = {k: v for k, v in all_sizes.items() if k in self.block_first_commits}
+            self.sizes = {k: v for k, v in all_sizes.items() if k in self.block_half_commits}
 
     # Filters the given list of results for each node (where each result
     # set is itself a list of (digest, timestamp) pairs), keeping the 
@@ -131,6 +133,34 @@ class LogParser:
         
         return filtered
 
+    # Keep the timestamp at which at least half of the committee has committed
+    # each digest. For n=50 this is the 25th earliest commit timestamp.
+    def _half_results_by_digest(self, input):
+        merged = {}
+        filtered = {}
+
+        for node_results in input:
+            for digest, timestamp in node_results:
+                if digest not in merged:
+                    merged[digest] = [timestamp]
+                else:
+                    merged[digest].append(timestamp)
+
+        try:
+            half_commit_index = max(0, (int(self.committee_size) + 1) // 2 - 1)
+        except (TypeError, ValueError):
+            half_commit_index = None
+
+        for digest, timestamps in merged.items():
+            sorted_timestamps = sorted(timestamps)
+            index = half_commit_index
+            if index is None:
+                index = max(0, (len(sorted_timestamps) + 1) // 2 - 1)
+            if len(sorted_timestamps) > index:
+                filtered[digest] = sorted_timestamps[index]
+
+        return filtered
+
     def _parse_clients(self, log):
         if search(r'Error', log) is not None:
             raise Exception('Client(s) panicked')
@@ -149,6 +179,55 @@ class LogParser:
         
 
         return size, rate, start, misses, samples, burst
+
+    def _parse_bandwidth_logs(self, logs):
+        node_bandwidth = []
+
+        for log in logs:
+            iface_index = rx_index = tx_index = None
+            samples = []
+
+            for line in log.splitlines():
+                parts = line.split()
+                if not parts:
+                    continue
+                if 'IFACE' in parts and 'rxkB/s' in parts and 'txkB/s' in parts:
+                    iface_index = parts.index('IFACE')
+                    rx_index = parts.index('rxkB/s')
+                    tx_index = parts.index('txkB/s')
+                    continue
+                if iface_index is None or parts[0] == 'Average:':
+                    continue
+                if len(parts) <= max(iface_index, rx_index, tx_index):
+                    continue
+
+                iface = parts[iface_index]
+                if iface == 'lo':
+                    continue
+
+                try:
+                    rx_kbps = float(parts[rx_index].replace(',', '.'))
+                    tx_kbps = float(parts[tx_index].replace(',', '.'))
+                except ValueError:
+                    continue
+                samples.append((rx_kbps, tx_kbps))
+
+            if samples:
+                rx_avg = mean(x[0] for x in samples)
+                tx_avg = mean(x[1] for x in samples)
+                node_bandwidth.append((rx_avg, tx_avg))
+
+        if not node_bandwidth:
+            return None
+
+        rx_kbps = sum(x[0] for x in node_bandwidth)
+        tx_kbps = sum(x[1] for x in node_bandwidth)
+        return {
+            'nodes': len(node_bandwidth),
+            'rx_gbps': rx_kbps * 8 / 1_000_000,
+            'tx_gbps': tx_kbps * 8 / 1_000_000,
+            'total_gbps': (rx_kbps + tx_kbps) * 8 / 1_000_000,
+        }
     
     def _map_timestamps_to_digests(self, regex, log):
         return { d: self._to_posix(t) for t, d in findall(regex, log) }
@@ -537,6 +616,16 @@ class LogParser:
             total_tx = len(committed) * self.config['block_size']
         return total_tx / duration
 
+    def _bandwidth_output(self):
+        if self.bandwidth:
+            return (
+                f' Consensus bandwidth nodes: {self.bandwidth["nodes"]:,}\n'
+                f' Consensus bandwidth TX: {self.bandwidth["tx_gbps"]:.3f} Gbps\n'
+                f' Consensus bandwidth RX: {self.bandwidth["rx_gbps"]:.3f} Gbps\n'
+                f' Consensus bandwidth total: {self.bandwidth["total_gbps"]:.3f} Gbps\n'
+            )
+        return ' Consensus bandwidth: n/a\n'
+
     # Latency from the time a client sent a transaction to that the header 
     # containing that transaction was committed.
     def _end_to_end_latency(self, commits):
@@ -622,19 +711,25 @@ class LogParser:
                 f' Consensus BLPS: 0 Block/s\n'
                 f' Consensus TPS: 0 tx/s\n'
                 f' Consensus latency: 0 ms\n'
+                f'{self._bandwidth_output()}'
             )
 
         first_proposal_time = min(self.block_proposals.values())
 
+        # Report the time when at least half of the committee has committed
+        # each block, instead of the first node that commits. Do not fall back
+        # to first commits, otherwise missing half-commit data silently makes
+        # the reported latency optimistic again.
+        consensus_commits = self.block_half_commits
         committed, blps, duration = \
-            self._throughput(first_proposal_time, self.block_first_commits)
-        consensus_latency, _ = \
-            self._latency(self.block_proposals, self.block_first_commits)
-        consensus_tps = self._consensus_tps(first_proposal_time, self.block_first_commits)
+            self._throughput(first_proposal_time, consensus_commits)
+        consensus_latency, consensus_latency_median = \
+            self._latency(self.block_proposals, consensus_commits)
+        consensus_tps = self._consensus_tps(first_proposal_time, consensus_commits)
          
         csv_file_path = f'benchmark_{self.committee_size}_{self.config["header_size"]}_{self.config["block_size"]}.csv'
 
-        write_consensus_to_csv(round(consensus_latency), round(consensus_latency), round(blps), round(consensus_latency), round(consensus_latency), round(blps), csv_file_path)
+        write_consensus_to_csv(round(consensus_latency), round(consensus_latency_median), round(blps), round(consensus_latency), round(consensus_latency_median), round(blps), csv_file_path)
         
         return (
             f' Execution time: {round(duration):,} s\n'
@@ -643,6 +738,7 @@ class LogParser:
             f' Consensus TPS: {round(consensus_tps):,} tx/s\n'
             f' Consensus latency: {round(consensus_latency):,} ms\n'
             f' Total Blocks Committed: {round(committed):,}\n'
+            f'{self._bandwidth_output()}'
         )
     
     def _narwhal_output(self):
@@ -762,7 +858,18 @@ class LogParser:
                 with open(filename, 'r') as f:
                     clients += [f.read()]
 
-        return cls(clients, primaries, consensus_only=consensus_only, debug=debug)
+        bandwidth_logs = []
+        for filename in sorted(glob(join(directory, 'sar-net-*.log'))):
+            with open(filename, 'r') as f:
+                bandwidth_logs += [f.read()]
+
+        return cls(
+            clients,
+            primaries,
+            consensus_only=consensus_only,
+            debug=debug,
+            bandwidth_logs=bandwidth_logs,
+        )
 
 
 def write_to_csv(mean_latency_commit_first, median_latency_commit_first, mean_latency_commit_last, median_latency_commit_last, e2e_mean_latency_first_commit, e2e_median_latency_first_commit, e2e_mean_latency_last_commit,e2e_median_latency_last_commit, end_to_end_tps_last, end_to_end_bps_last, burst, csv_file_path):
@@ -778,14 +885,14 @@ def write_to_csv(mean_latency_commit_first, median_latency_commit_first, mean_la
         writer.writerow([mean_latency_commit_first, median_latency_commit_first, mean_latency_commit_last, median_latency_commit_last, e2e_mean_latency_first_commit, e2e_median_latency_first_commit, e2e_mean_latency_last_commit, e2e_median_latency_last_commit, end_to_end_tps_last, end_to_end_bps_last, burst])
 
 
-def write_consensus_to_csv(mean_latency_commit_first, median_latency_commit_first, blps_first, mean_latency_commit_last, median_latency_commit_last, blps_last, csv_file_path):
+def write_consensus_to_csv(mean_latency_commit_half, median_latency_commit_half, blps_half, mean_latency_commit_last, median_latency_commit_last, blps_last, csv_file_path):
 # Open the CSV file in append mode
     with open(csv_file_path, mode='a', newline='') as csv_file:
         writer = csv.writer(csv_file)
-        column_names = ['Block First Commit Mean Latency', 'Block First Commit Median Latency', 'BLPS_first', 'Block Last Commit Mean Latency', 'block Last Commit Mean Latency', 'BLPS_last']
+        column_names = ['Block Half Commit Mean Latency', 'Block Half Commit Median Latency', 'BLPS_half', 'Block Last Commit Mean Latency', 'block Last Commit Mean Latency', 'BLPS_last']
         # If the file is empty, write the header
         if csv_file.tell() == 0:
             writer.writerow(column_names)
 
         # Write the extracted data to the CSV file
-        writer.writerow([mean_latency_commit_first, median_latency_commit_first, blps_first, mean_latency_commit_last, median_latency_commit_last, blps_last])
+        writer.writerow([mean_latency_commit_half, median_latency_commit_half, blps_half, mean_latency_commit_last, median_latency_commit_last, blps_last])

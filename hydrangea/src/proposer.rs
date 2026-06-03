@@ -191,6 +191,12 @@ impl Proposer {
     fn record_proposal(&mut self, b: Block) {
         debug!("Created {:?}", b);
         info!("Created {}", b.digest());
+        info!(
+            "CreatedBlock round={} digest={} parent={}",
+            b.round,
+            b.digest(),
+            b.parent
+        );
         info!("Header {} contains {} B", b.digest(), b.payload_len);
         self.last_proposed = b;
     }

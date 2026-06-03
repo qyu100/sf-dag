@@ -100,7 +100,8 @@ class LocalBench:
                         self._background_run(cmd, log_file)
 
             # Run the primaries (except the faulty ones).
-            for i, address in enumerate(committee.primary_addresses(self.faults)):
+            primary_addresses = list(enumerate(committee.primary_addresses(self.faults)))
+            for i, address in reversed(primary_addresses):
                 cmd = CommandMaker.run_primary(
                     PathMaker.ed_key_file(i),
                     PathMaker.bls_key_file(i),
