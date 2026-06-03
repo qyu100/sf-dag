@@ -4,13 +4,16 @@ from fabric import Connection, ThreadingGroup as Group
 from fabric.exceptions import GroupException
 from paramiko import RSAKey
 from paramiko.ssh_exception import PasswordRequiredException, SSHException
-from os.path import basename, splitext
+from datetime import datetime
+from os import chmod, listdir, makedirs
+from os.path import basename, exists, isfile, join, splitext
+from shlex import quote
+from shutil import move
 from time import sleep
 from math import ceil
 from copy import deepcopy
 import subprocess
 from subprocess import SubprocessError
-from os import chmod
 import traceback
 from benchmark.config import Committee, EdKey, NodeParameters, BenchParameters, ConfigError
 from benchmark.utils import BenchError, Print, PathMaker, progress_bar
@@ -21,6 +24,36 @@ import asyncio, asyncssh
 
 STATUS_FAILURE=25
 STATUS_SUCCESS=0
+
+PROCFS_BANDWIDTH_SCRIPT = r'''
+import time
+from datetime import datetime, timezone
+
+def read_counters():
+    counters = {}
+    with open('/proc/net/dev') as f:
+        for line in f:
+            if ':' not in line:
+                continue
+            iface, rest = line.split(':', 1)
+            iface = iface.strip()
+            if iface == 'lo':
+                continue
+            fields = rest.split()
+            counters[iface] = (int(fields[0]), int(fields[8]))
+    return counters
+
+previous = read_counters()
+print('timestamp IFACE rxkB/s txkB/s', flush=True)
+while True:
+    time.sleep(1)
+    current = read_counters()
+    timestamp = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
+    for iface, (rx_bytes, tx_bytes) in current.items():
+        old_rx, old_tx = previous.get(iface, (rx_bytes, tx_bytes))
+        print(f'{timestamp} {iface} {(rx_bytes - old_rx) / 1024:.3f} {(tx_bytes - old_tx) / 1024:.3f}', flush=True)
+    previous = current
+'''
 
 
 class ExecutionError(Exception):
@@ -392,6 +425,58 @@ class Bench:
         
         await self._gather_and_parse(tasks, 'Boot Workers')
 
+    async def _start_bandwidth_monitor_one(self, host, connection, index):
+        log_file = join(PathMaker.logs_path(), f'sar-net-{index}.log')
+        pid_file = join(PathMaker.logs_path(), f'sar-net-{index}.pid')
+        procfs_sampler = (
+            f'nohup python3 -c {quote(PROCFS_BANDWIDTH_SCRIPT)} '
+            f'> {log_file} 2>&1 & echo $! > {pid_file}'
+        )
+        cmd = (
+            f'mkdir -p {PathMaker.logs_path()} ; '
+            f'if command -v sar >/dev/null 2>&1 ; then '
+            f'nohup env LC_ALL=C sar -n DEV 1 > {log_file} 2>&1 & echo $! > {pid_file} ; '
+            f'else {procfs_sampler} ; fi'
+        )
+        try:
+            result = await connection.run(cmd)
+            return host, result
+        except Exception as e:
+            return host, Exception(f'Failed to start bandwidth monitor on {host} because of {e}')
+
+    async def _stop_bandwidth_monitor_one(self, host, connection, index):
+        pid_file = join(PathMaker.logs_path(), f'sar-net-{index}.pid')
+        cmd = (
+            f'if test -f {pid_file} ; then '
+            f'kill -INT $(cat {pid_file}) 2>/dev/null || true ; '
+            f'sleep 1 ; '
+            f'rm -f {pid_file} ; '
+            f'fi'
+        )
+        try:
+            result = await connection.run(cmd)
+            return host, result
+        except Exception as e:
+            return host, Exception(f'Failed to stop bandwidth monitor on {host} because of {e}')
+
+    async def _start_bandwidth_monitors(self, committee, connections, faults):
+        Print.info('Starting bandwidth monitors...')
+        tasks = []
+        for i, address in enumerate(committee.primary_addresses(faults)):
+            host = Committee.ip(address)
+            connection = connections[host]
+            tasks.append(self._start_bandwidth_monitor_one(host, connection, i))
+        await self._gather_and_parse(tasks, 'Start Bandwidth Monitors')
+
+    async def _stop_bandwidth_monitors(self, committee, connections, faults):
+        Print.info('Stopping bandwidth monitors...')
+        tasks = []
+        for i, address in enumerate(committee.primary_addresses(faults)):
+            host = Committee.ip(address)
+            connection = connections[host]
+            tasks.append(self._stop_bandwidth_monitor_one(host, connection, i))
+        await self._gather_and_parse(tasks, 'Stop Bandwidth Monitors')
+
     async def _run_single(
         self, 
         rate, 
@@ -404,26 +489,31 @@ class Bench:
     ):
         # Kill any potentially unfinished run and delete logs.
         # hosts = committee.ips()
+        await self._stop_bandwidth_monitors(committee, hosts_to_connections, bench_parameters.faults)
         await self._kill(hosts_to_connections=hosts_to_connections, delete_logs=True)
+        await self._start_bandwidth_monitors(committee, hosts_to_connections, bench_parameters.faults)
 
-        # Run the primaries (except the faulty ones).
-        primaries = self._run_primaries(committee, hosts_to_connections, bench_parameters.faults, debug)
-        await primaries
-        
-        if not consensus_only:
-            # Run the clients (they will wait for the nodes to be ready).
-            # Filter all faulty nodes from the client addresses (or they will wait
-            # for the faulty nodes to be online).
-            workers_addresses = await self._run_clients(
-                rate, burst, committee, bench_parameters, hosts_to_connections)
-            # Run the workers (except the faulty ones).
-            # await self._run_workers(workers_addresses, hosts_to_connections, debug)
+        try:
+            # Run the primaries (except the faulty ones).
+            primaries = self._run_primaries(committee, hosts_to_connections, bench_parameters.faults, debug)
+            await primaries
+            
+            if not consensus_only:
+                # Run the clients (they will wait for the nodes to be ready).
+                # Filter all faulty nodes from the client addresses (or they will wait
+                # for the faulty nodes to be online).
+                workers_addresses = await self._run_clients(
+                    rate, burst, committee, bench_parameters, hosts_to_connections)
+                # Run the workers (except the faulty ones).
+                # await self._run_workers(workers_addresses, hosts_to_connections, debug)
 
-        # Wait for all transactions to be processed.
-        duration = bench_parameters.duration
-        for _ in progress_bar(range(20), prefix=f'Running benchmark ({duration} sec):'):
-            sleep(ceil(duration / 20))
-        await self._kill(hosts_to_connections=hosts_to_connections)
+            # Wait for all transactions to be processed.
+            duration = bench_parameters.duration
+            for _ in progress_bar(range(20), prefix=f'Running benchmark ({duration} sec):'):
+                sleep(ceil(duration / 20))
+        finally:
+            await self._stop_bandwidth_monitors(committee, hosts_to_connections, bench_parameters.faults)
+            await self._kill(hosts_to_connections=hosts_to_connections)
 
     def download_logs(self, consensus_only, committee=None):
         asyncio.get_event_loop().run_until_complete(
@@ -445,6 +535,7 @@ class Bench:
             hosts_to_connections = { host: connection for host, connection in hosts_and_connections }
             # Download remote logs
             await self._download_primary_logs(faults, committee, hosts_to_connections)
+            await self._download_bandwidth_logs(faults, committee, hosts_to_connections)
             
             if not consensus_only:
                 await self._download_client_logs(faults, committee, hosts_to_connections)
@@ -459,6 +550,15 @@ class Bench:
                 return host, result
         except Exception as e:
             return host, Exception(f'Failed to download {src} from {host} because of {e}')
+
+    async def _download_optional_log(self, host, connection, src, dest):
+        try:
+            async with connection.start_sftp_client() as sftp:
+                result = await sftp.get(src, localpath=dest)
+                return host, result
+        except Exception as e:
+            Print.warn(f'Skipping optional log {src} from {host}: {e}')
+            return host, None
 
     # async def _download_worker_logs(self, faults, committee, hosts_to_connections):
     #     workers_addresses = committee.workers_addresses(faults)
@@ -489,6 +589,20 @@ class Bench:
             
         await self._gather_and_parse(tasks, 'Download Primary Logs')
 
+    async def _download_bandwidth_logs(self, faults, committee, hosts_to_connections):
+        primary_addresses = committee.primary_addresses(faults)
+        tasks = []
+
+        print('Downloading bandwidth logs...')
+        for i, address in enumerate(primary_addresses):
+            host = Committee.ip(address)
+            src = join(PathMaker.logs_path(), f'sar-net-{i}.log')
+            dest = join(PathMaker.logs_path(), f'sar-net-{i}.log')
+            connection = hosts_to_connections[host]
+            tasks.append(self._download_optional_log(host, connection, src, dest))
+
+        await self._gather_and_parse(tasks, 'Download Bandwidth Logs')
+
     async def _download_client_logs(self, faults, committee, hosts_to_connections):
         workers_addresses = committee.workers_addresses(faults)
         tasks = []
@@ -503,6 +617,41 @@ class Bench:
                 tasks.append(self._download_log(host, connection, src, dest))
             
         await self._gather_and_parse(tasks, 'Download Client Logs')
+
+    def _backup_logs(self, faults, nodes, burst, run, rate, tx_size, consensus_only):
+        log_path = PathMaker.logs_path()
+        if not exists(log_path):
+            return
+
+        timestamp = datetime.now().strftime('%Y-%m-%d-%H-%M-%S-%f')
+        branch_name = str(self.settings.branch).replace('/', '_')
+        backup_dir = join(
+            'blockup_logs',
+            f'{timestamp}-{branch_name}-{nodes}nodes-burst{burst}-run{run}-rate{rate}-tx{tx_size}',
+        )
+        makedirs(backup_dir, exist_ok=True)
+
+        metadata = {
+            'timestamp': timestamp,
+            'branch': self.settings.branch,
+            'faults': faults,
+            'nodes': nodes,
+            'burst': burst,
+            'run': run,
+            'rate': rate,
+            'tx_size': tx_size,
+            'consensus_only': consensus_only,
+        }
+        with open(join(backup_dir, 'run-info.txt'), 'w') as f:
+            for key, value in metadata.items():
+                f.write(f'{key}: {value}\n')
+
+        for name in listdir(log_path):
+            src = join(log_path, name)
+            if isfile(src):
+                move(src, join(backup_dir, name))
+
+        Print.info(f'Backed up logs to {backup_dir}')
         
     async def _configure_one(self, host, id, connection, update=True):
         try: 
@@ -586,6 +735,15 @@ class Bench:
                             rate,
                             bench_parameters.tx_size,
                         ))
+                        self._backup_logs(
+                            faults,
+                            n,
+                            burst,
+                            i + 1,
+                            rate,
+                            bench_parameters.tx_size,
+                            consensus_only,
+                        )
                 
                     except (subprocess.SubprocessError, ParseError) as e:
                         self._kill(hosts_to_connections=self.hosts_to_connections)

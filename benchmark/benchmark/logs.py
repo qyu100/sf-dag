@@ -14,7 +14,7 @@ class ParseError(Exception):
 
 
 class LogParser:
-    def __init__(self, clients, primaries, burst, faults=0, consensus_only=False):
+    def __init__(self, clients, primaries, burst, faults=0, consensus_only=False, bandwidth_logs=None):
         
         inputs = [primaries]
 
@@ -28,6 +28,7 @@ class LogParser:
         self.consensus_only = consensus_only
         self.burst = burst
         self.faults = faults
+        self.bandwidth = self._parse_bandwidth_logs(bandwidth_logs or [])
         if isinstance(faults, int):
             self.committee_size = len(primaries) + int(faults)
         else:
@@ -53,10 +54,15 @@ class LogParser:
             raise ParseError(f'Failed to parse nodes\' logs: {e}')
         
         proposals, commits, self.configs, primary_ips, leader_commits, non_leader_commits, self.received_samples, sizes = zip(*results)
+        commit_threshold = self._commit_threshold(len(primaries))
         self.proposals = self._merge_results([x.items() for x in proposals])
-        self.commits = self._merge_results([x.items() for x in commits])
-        self.leader_commits = self._merge_results([x.items() for x in leader_commits])
-        self.non_leader_commits = self._merge_results([x.items() for x in non_leader_commits])
+        self.commits = self._merge_commit_results([x.items() for x in commits], commit_threshold)
+        self.leader_commits = self._merge_commit_results(
+            [x.items() for x in leader_commits], commit_threshold
+        )
+        self.non_leader_commits = self._merge_commit_results(
+            [x.items() for x in non_leader_commits], commit_threshold
+        )
 
         self.sizes = {
             k: v for x in sizes for k, v in x.items() if k in self.commits
@@ -88,6 +94,73 @@ class LogParser:
                 if not k in merged or merged[k] > v:
                     merged[k] = v
         return merged
+
+    def _commit_threshold(self, log_count):
+        if isinstance(self.committee_size, int):
+            return max(1, (self.committee_size + 1) // 2)
+        return max(1, (log_count + 1) // 2)
+
+    def _merge_commit_results(self, input, threshold):
+        # Use the timestamp when a block has been committed by 50% of the committee.
+        merged = {}
+        for x in input:
+            for k, v in x:
+                merged.setdefault(k, []).append(v)
+
+        return {
+            k: sorted(v)[threshold - 1]
+            for k, v in merged.items()
+            if len(v) >= threshold
+        }
+
+    def _parse_bandwidth_logs(self, logs):
+        node_bandwidth = []
+
+        for log in logs:
+            iface_index = rx_index = tx_index = None
+            samples = []
+
+            for line in log.splitlines():
+                parts = line.split()
+                if not parts:
+                    continue
+                if 'IFACE' in parts and 'rxkB/s' in parts and 'txkB/s' in parts:
+                    iface_index = parts.index('IFACE')
+                    rx_index = parts.index('rxkB/s')
+                    tx_index = parts.index('txkB/s')
+                    continue
+                if iface_index is None or parts[0] == 'Average:':
+                    continue
+                if len(parts) <= max(iface_index, rx_index, tx_index):
+                    continue
+
+                iface = parts[iface_index]
+                if iface == 'lo':
+                    continue
+
+                try:
+                    rx_kbps = float(parts[rx_index].replace(',', '.'))
+                    tx_kbps = float(parts[tx_index].replace(',', '.'))
+                except ValueError:
+                    continue
+                samples.append((rx_kbps, tx_kbps))
+
+            if samples:
+                rx_avg = mean(x[0] for x in samples)
+                tx_avg = mean(x[1] for x in samples)
+                node_bandwidth.append((rx_avg, tx_avg))
+
+        if not node_bandwidth:
+            return None
+
+        rx_kbps = sum(x[0] for x in node_bandwidth)
+        tx_kbps = sum(x[1] for x in node_bandwidth)
+        return {
+            'nodes': len(node_bandwidth),
+            'rx_gbps': rx_kbps * 8 / 1_000_000,
+            'tx_gbps': tx_kbps * 8 / 1_000_000,
+            'total_gbps': (rx_kbps + tx_kbps) * 8 / 1_000_000,
+        }
 
     # def _parse_clients(self, log):
     #     if search(r'Error', log) is not None:
@@ -283,6 +356,16 @@ class LogParser:
         else:
             consensus_tps = self._consensus_only_throughput()
 
+        if self.bandwidth:
+            bandwidth_summary = (
+                f' Consensus bandwidth nodes: {self.bandwidth["nodes"]:,}\n'
+                f' Consensus bandwidth TX: {self.bandwidth["tx_gbps"]:.3f} Gbps\n'
+                f' Consensus bandwidth RX: {self.bandwidth["rx_gbps"]:.3f} Gbps\n'
+                f' Consensus bandwidth total: {self.bandwidth["total_gbps"]:.3f} Gbps\n'
+            )
+        else:
+            bandwidth_summary = ' Consensus bandwidth: n/a\n'
+
         header_size = self.configs[0]['header_size']
         csv_file_path = f'benchmark_{self.committee_size}.csv'
         write_to_csv(round(leader_consensus_latency), round(non_leader_consensus_latency), round(consensus_tps), round(consensus_bps), round(
@@ -316,6 +399,7 @@ class LogParser:
                 f' Consensus latency: {round(consensus_latency):,} ms\n'
                 # f' Consensus leader latency: {round(leader_consensus_latency):,} ms\n'
                 # f' Consensus non leader latency: {round(non_leader_consensus_latency):,} ms\n'
+                f'{bandwidth_summary}'
                 '-----------------------------------------\n'
             )
         else:
@@ -347,6 +431,7 @@ class LogParser:
                 f' Consensus latency: {round(consensus_latency):,} ms\n'
                 f' Consensus leader latency: {round(leader_consensus_latency):,} ms\n'
                 f' Consensus non leader latency: {round(non_leader_consensus_latency):,} ms\n'
+                f'{bandwidth_summary}'
                 '\n'
                 f' End-to-end TPS: {round(end_to_end_tps):,} tx/s\n'
                 f' End-to-end BPS: {round(end_to_end_bps):,} B/s\n'
@@ -374,7 +459,19 @@ class LogParser:
                 with open(filename, 'r') as f:
                     clients += [f.read()]
 
-        return cls(clients, primaries, burst, faults=faults, consensus_only=consensus_only)
+        bandwidth_logs = []
+        for filename in sorted(glob(join(directory, 'sar-net-*.log'))):
+            with open(filename, 'r') as f:
+                bandwidth_logs += [f.read()]
+
+        return cls(
+            clients,
+            primaries,
+            burst,
+            faults=faults,
+            consensus_only=consensus_only,
+            bandwidth_logs=bandwidth_logs,
+        )
 
 
 def write_to_csv(con_r0_latency, con_r1_latency, consensus_tps, consensus_bps, consensus_latency, e2e_tps, e2e_bps, e2e_latency, blps, burst, header_size, csv_file_path):

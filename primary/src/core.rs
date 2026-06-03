@@ -441,6 +441,7 @@ impl Core {
         Ok(())
     }
 
+    #[async_recursion]
     async fn process_cut_proposal(&mut self, proposal: CutProposal) -> DagResult<()> {
         debug!("Processing cut proposal: {:?}", proposal);
         let mut queue = VecDeque::from([proposal]);
@@ -449,11 +450,7 @@ impl Core {
             let expected_leader = self.leader_elector.get_leader(proposal.round);
             ensure!(proposal.proposer == expected_leader, DagError::InvalidHeaderId);
 
-            let parent_known = (proposal.parent_cut == Digest::default() && proposal.round==1)
-                || self.cut_proposals.contains_key(&proposal.parent_cut)
-                || self.committed_cuts.contains(&proposal.parent_cut);
-
-            if !parent_known {
+            if !self.parent_cut_ready(&proposal) {
                 self.pending_cut_children
                     .entry(proposal.parent_cut.clone())
                     .or_default()
@@ -502,6 +499,26 @@ impl Core {
             self.try_commit_round(round).await;
         }
         Ok(())
+    }
+
+    fn parent_cut_ready(&self, proposal: &CutProposal) -> bool {
+        if proposal.round == 1 {
+            return proposal.parent_cut == Digest::default();
+        }
+
+        self.cut_proposals.contains_key(&proposal.parent_cut)
+            || self.committed_cuts.contains(&proposal.parent_cut)
+    }
+
+    fn parent_cut_certified(&self, round: u64, parent_cut: &Digest) -> bool {
+        if round == 1 {
+            return *parent_cut == Digest::default();
+        }
+
+        self.cut_certificates
+            .get(&(round - 1))
+            .map(|certificate| certificate.cut_id == *parent_cut)
+            .unwrap_or(false)
     }
 
 
@@ -598,7 +615,7 @@ impl Core {
         self.cut_round = self.cut_round.max(round + 1);
 
         if self.sent_decide_rounds.insert(round) {
-            let decide = Decide::new(cut_id, round, &self.name, &self.name).await;
+            let decide = Decide::new(cut_id.clone(), round, &self.name, &self.name).await;
             let addresses = self
                 .committee
                 .others_primaries(&self.name)
@@ -612,7 +629,13 @@ impl Core {
                 .entry(round)
                 .or_default()
                 .extend(handlers);
-            let _ = self.process_decide(decide);
+            self.process_decide(decide).await?;
+        }
+
+        if let Some(children) = self.pending_cut_children.remove(&cut_id) {
+            for child in children {
+                self.process_cut_proposal(child).await?;
+            }
         }
 
         self.try_propose_cut_for_current_round().await?;
@@ -695,11 +718,15 @@ impl Core {
         if self.name != self.leader_elector.get_leader(round) {
             return Ok(());
         }
+        let parent_cut = self.highest_certified_cut.clone();
+        if !self.parent_cut_certified(round, &parent_cut) {
+            return Ok(());
+        }
         if !self.proposed_cut_rounds.insert(round) {
             return Ok(());
         }
         debug!("Proposing cut for round {}", round);
-        let proposal = self.make_cut_proposal(round, self.highest_certified_cut.clone());
+        let proposal = self.make_cut_proposal(round, parent_cut);
 
         let addresses = self
             .committee
