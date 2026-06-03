@@ -8,18 +8,20 @@ class SettingsError(Exception):
 
 class Settings:
     def __init__(self, key_name, key_path, base_port, repo_name, repo_url,
-                 branch, instance_type, aws_regions, project_id, templates, username):
+                 branch, instance_type, zones, project_id, username,
+                 boot_disk_size_gb=300, source_image=None):
         inputs_str = [
             key_name, key_path, repo_name, repo_url, branch, instance_type
         ]
-        if isinstance(aws_regions, list):
-            regions = aws_regions
+        if isinstance(zones, list):
+            zones = zones
         else:
-            regions = [aws_regions]
-        inputs_str += regions
+            zones = [zones]
+        inputs_str += zones
         ok = all(isinstance(x, str) for x in inputs_str)
         ok &= isinstance(base_port, int)
-        ok &= len(regions) > 0
+        ok &= isinstance(boot_disk_size_gb, int)
+        ok &= len(zones) > 0
         if not ok:
             raise SettingsError('Invalid settings types')
 
@@ -33,16 +35,22 @@ class Settings:
         self.branch = branch
 
         self.instance_type = instance_type
-        self.gcp_zones = regions
+        self.gcp_zones = zones
         self.project_id = project_id
-        self.templates = templates
         self.username = username
+        self.boot_disk_size_gb = boot_disk_size_gb
+        self.source_image = (
+            source_image
+            or 'projects/ubuntu-os-cloud/global/images/family/ubuntu-2204-lts'
+        )
 
     @classmethod
     def load(cls, filename):
         try:
             with open(filename, 'r') as f:
                 data = load(f)
+            instances = data['instances']
+            zones = instances.get('zones', instances.get('regions'))
 
             return cls(
                 data['key']['name'],
@@ -51,11 +59,12 @@ class Settings:
                 data['repo']['name'],
                 data['repo']['url'],
                 data['repo']['branch'],
-                data['instances']['type'],
-                data['instances']['regions'],
+                instances.get('machine_type', instances.get('type')),
+                zones,
                 data['project_id'],
-                data['instances']['templates'],
                 data['username'],
+                instances.get('boot_disk_size_gb', 300),
+                instances.get('source_image'),
             )
         except (OSError, JSONDecodeError) as e:
             raise SettingsError(str(e))

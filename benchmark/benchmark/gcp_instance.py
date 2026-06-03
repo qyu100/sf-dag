@@ -3,6 +3,7 @@ from botocore.exceptions import ClientError
 from collections import defaultdict
 from google.cloud import compute_v1
 from google.api_core.extended_operation import ExtendedOperation
+from os.path import exists
 
 from benchmark.utils import Print, BenchError, progress_bar
 from benchmark.settings import Settings, SettingsError
@@ -10,9 +11,12 @@ from benchmark.settings import Settings, SettingsError
 
 class GCPError(Exception):
     def __init__(self, error):
-        assert isinstance(error, ClientError)
-        self.message = error.response["Error"]["Message"]
-        self.code = error.response["Error"]["Code"]
+        if isinstance(error, ClientError):
+            self.message = error.response["Error"]["Message"]
+            self.code = error.response["Error"]["Code"]
+        else:
+            self.message = str(error)
+            self.code = type(error).__name__
         super().__init__(self.message)
 
 
@@ -141,36 +145,84 @@ class InstanceManager:
         )
         return response["Images"][0]["ImageId"]
 
+    def _ssh_metadata(self):
+        public_key_path = f"{self.settings.key_path}.pub"
+        if not exists(public_key_path):
+            return None
+
+        with open(public_key_path, "r") as f:
+            parts = f.read().strip().split()
+        if len(parts) < 2:
+            return None
+
+        key_type, key = parts[0], parts[1]
+        return {
+            "items": [
+                {
+                    "key": "ssh-keys",
+                    "value": (
+                        f"{self.settings.username}:{key_type} "
+                        f"{key} {self.settings.username}"
+                    ),
+                }
+            ]
+        }
+
+    def _instance_resource(self, zone, instance):
+        resource = {
+            "name": f"{self.INSTANCE_NAME}{instance}-{zone}",
+            "machine_type": (
+                f"zones/{zone}/machineTypes/{self.settings.instance_type}"
+            ),
+            "tags": {"items": ["autobahn"]},
+            "disks": [
+                {
+                    "boot": True,
+                    "auto_delete": True,
+                    "type_": "PERSISTENT",
+                    "initialize_params": {
+                        "source_image": self.settings.source_image,
+                        "disk_size_gb": self.settings.boot_disk_size_gb,
+                    },
+                }
+            ],
+            "network_interfaces": [
+                {
+                    "name": "global/networks/default",
+                    "access_configs": [
+                        {"name": "External NAT", "type_": "ONE_TO_ONE_NAT"}
+                    ],
+                }
+            ],
+        }
+
+        metadata = self._ssh_metadata()
+        if metadata is not None:
+            resource["metadata"] = metadata
+        return resource
+
     def create_instances(self, instances):
         assert isinstance(instances, int) and instances > 0
 
         try:
             # Create all instances.
-            size = instances * self.settings.gcp_zones
+            size = instances * len(self.settings.gcp_zones)
             progress = progress_bar(
                 self.settings.gcp_zones, prefix=f"Creating {size} instances"
             )
 
             # Wait for instances to boot
             Print.info("Waiting for all instances to boot...")
-            i = 0
 
             ops = []
             for zone in progress:
                 for instance in range(instances):
-                    instance_insert_request = compute_v1.InsertInstanceRequest()
-                    instance_insert_request.project = self.settings.project_id
-                    instance_insert_request.zone = zone
-                    instance_insert_request.instance_resource.name = (
-                        self.INSTANCE_NAME + str(instance) + "-" + str(zone)
+                    operation = self.client.insert(
+                        project=self.settings.project_id,
+                        zone=zone,
+                        instance_resource=self._instance_resource(zone, instance),
                     )
-                    instance_insert_request.source_instance_template = (
-                        self.settings.templates[i]
-                    )
-                    print(self.settings.templates[i])
-                    operation = self.client.insert(instance_insert_request)
                     ops.append((operation, str(instance), zone))
-                i += 1
 
             for operation, instance, zone in ops:
                 Print.info(
@@ -178,8 +230,8 @@ class InstanceManager:
                 )
                 self._wait(operation, "RUNNING")
             Print.heading(f"Successfully created {size} new instances")
-        except ClientError as e:
-            raise BenchError("Failed to create AWS instances", GCPError(e))
+        except Exception as e:
+            raise BenchError("Failed to create GCP instances", GCPError(e))
 
     def terminate_instances(self):
         try:

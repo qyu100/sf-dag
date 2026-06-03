@@ -12,13 +12,7 @@
     "project_id": "forge-gcp-multiregion-test",
     "username": "balaji",
     "instances": {
-        "type": "t2d-standard-4",
-        "regions": ["us-east1-b", "us-east5-a", "us-west1-b", "us-west4-a"],
-        "templates": [
-            "projects/forge-gcp-multiregion-test/global/instanceTemplates/autobahn-instance-template", 
-            "projects/forge-gcp-multiregion-test/global/instanceTemplates/autobahn-instance-template",
-            "projects/forge-gcp-multiregion-test/global/instanceTemplates/autobahn-instance-template",
-            "projects/forge-gcp-multiregion-test/global/instanceTemplates/autobahn-instance-template"
-        ]
+        "machine_type": "t2d-standard-4",
+        "zones": ["us-east1-b", "us-east5-a", "us-west1-b", "us-west4-a"]
     }
 }
