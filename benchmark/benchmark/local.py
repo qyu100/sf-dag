@@ -25,7 +25,7 @@ class LocalBench:
 
     def _background_run(self, command, log_file):
         name = splitext(basename(log_file))[0]
-        cmd = f'{command} 2> {log_file}'
+        cmd = f'RUST_LOG=info {command} 2> {log_file}'
         subprocess.run(['tmux', 'new', '-d', '-s', name, cmd], check=True)
 
     def _kill_nodes(self):
@@ -56,7 +56,12 @@ class LocalBench:
             print('past cleanup')
             # Recompile the latest code.
             cmd = CommandMaker.compile().split()
-            subprocess.run(cmd, check=True, cwd=PathMaker.node_crate_path())
+            subprocess.run(
+                cmd,
+                check=True,
+                cwd=PathMaker.node_crate_path(),
+                env=CommandMaker.compile_env(),
+            )
             print('past compiled')
 
             # Create alias for the client and nodes binary.

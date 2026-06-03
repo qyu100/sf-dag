@@ -176,6 +176,10 @@ class LocalCommittee(Committee):
 
 class NodeParameters:
     def __init__(self, json):
+        json = dict(json)
+        self._set_defaults(json)
+        self._normalize_lists(json)
+
         inputs = []
         try:
             inputs += [json['timeout_delay']]
@@ -186,13 +190,50 @@ class NodeParameters:
             inputs += [json['sync_retry_nodes']]
             inputs += [json['batch_size']]
             inputs += [json['max_batch_delay']]
+            inputs += [json['k']]
+            inputs += [json['fast_path_timeout']]
+            inputs += [json['car_timeout']]
+            inputs += [json['egress_penalty']]
         except KeyError as e:
             raise ConfigError(f'Malformed parameters: missing key {e}')
 
         if not all(isinstance(x, int) for x in inputs):
             raise ConfigError('Invalid parameters type')
 
+        list_inputs = [
+            json['asynchrony_type'],
+            json['asynchrony_start'],
+            json['asynchrony_duration'],
+            json['affected_nodes'],
+        ]
+        if not all(isinstance(x, list) for x in list_inputs):
+            raise ConfigError('Invalid parameters type')
+        if not all(isinstance(x, int) for y in list_inputs for x in y):
+            raise ConfigError('Invalid parameters type')
+
         self.json = json
+
+    def _set_defaults(self, json):
+        defaults = {
+            'asynchrony_type': [0],
+            'affected_nodes': [0],
+            'egress_penalty': 0,
+            'use_fast_sync': False,
+            'use_exponential_timeouts': False,
+        }
+        for key, value in defaults.items():
+            json.setdefault(key, value)
+
+    def _normalize_lists(self, json):
+        keys = [
+            'asynchrony_type',
+            'asynchrony_start',
+            'asynchrony_duration',
+            'affected_nodes',
+        ]
+        for key in keys:
+            if key in json and not isinstance(json[key], list):
+                json[key] = [json[key]]
 
     def print(self, filename):
         assert isinstance(filename, str)

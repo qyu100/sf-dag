@@ -1,4 +1,7 @@
 # Copyright(C) Facebook, Inc. and its affiliates.
+import os
+import platform
+from os.path import exists
 from os.path import join
 
 from benchmark.utils import PathMaker
@@ -19,6 +22,23 @@ class CommandMaker:
     @staticmethod
     def compile():
         return 'cargo build --quiet --release --features benchmark'
+
+    @staticmethod
+    def compile_env():
+        xcode_sdk = (
+            '/Applications/Xcode.app/Contents/Developer/Platforms/'
+            'MacOSX.platform/Developer/SDKs/MacOSX.sdk'
+        )
+        if (
+            platform.system() != 'Darwin'
+            or os.environ.get('SDKROOT')
+            or not exists(xcode_sdk)
+        ):
+            return None
+
+        env = os.environ.copy()
+        env['SDKROOT'] = xcode_sdk
+        return env
 
     @staticmethod
     def generate_key(filename):
