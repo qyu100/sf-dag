@@ -186,7 +186,7 @@ class Bench:
             f"(cd {self.settings.repo_name} && git checkout -f {self.settings.branch})",
             f"(cd {self.settings.repo_name} && git pull -f)",
             "source $HOME/.cargo/env",
-            f"(cd {self.settings.repo_name}/node && {CommandMaker.compile()})",
+            f"(cd {self.settings.repo_name}/node && {CommandMaker.compile_shell()})",
             CommandMaker.alias_binaries(f"./{self.settings.repo_name}/target/release/"),
         ]
         g = Group(*ips, user=self.settings.username, connect_kwargs=self.connect)

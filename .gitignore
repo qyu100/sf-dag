@@ -9,6 +9,7 @@ rust/.idea/*
 .db-*
 
 target/
+.cargo-home/
 !/**/src/**/target/
 .test_*
 

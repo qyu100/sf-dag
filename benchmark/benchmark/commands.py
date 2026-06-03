@@ -1,8 +1,7 @@
 # Copyright(C) Facebook, Inc. and its affiliates.
 import os
 import platform
-from os.path import exists
-from os.path import join
+from os.path import abspath, dirname, exists, join
 
 from benchmark.utils import PathMaker
 
@@ -24,7 +23,23 @@ class CommandMaker:
         return 'cargo build --quiet --release --features benchmark'
 
     @staticmethod
+    def cargo_home():
+        return join(abspath(join(dirname(__file__), '..', '..')), '.cargo-home')
+
+    @staticmethod
+    def compile_shell():
+        return (
+            'CARGO_HOME=../.cargo-home '
+            'CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse '
+            f'{CommandMaker.compile()}'
+        )
+
+    @staticmethod
     def compile_env():
+        env = os.environ.copy()
+        env['CARGO_HOME'] = CommandMaker.cargo_home()
+        env['CARGO_REGISTRIES_CRATES_IO_PROTOCOL'] = 'sparse'
+
         xcode_sdk = (
             '/Applications/Xcode.app/Contents/Developer/Platforms/'
             'MacOSX.platform/Developer/SDKs/MacOSX.sdk'
@@ -34,9 +49,8 @@ class CommandMaker:
             or os.environ.get('SDKROOT')
             or not exists(xcode_sdk)
         ):
-            return None
+            return env
 
-        env = os.environ.copy()
         env['SDKROOT'] = xcode_sdk
         return env
 
