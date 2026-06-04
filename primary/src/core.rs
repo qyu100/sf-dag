@@ -1203,15 +1203,6 @@ impl Core {
     async fn process_certificate(&mut self, certificate: Certificate) -> DagResult<()> {
         debug!("Processing cert {:?}", certificate);
 
-        if self.defer_certificate_until_previous(certificate.clone()) {
-            debug!(
-                "Processing of {:?} suspended: missing previous certificate round {}",
-                certificate,
-                certificate.round - 1
-            );
-            return Ok(());
-        }
-
         // Ensure we have all the ancestor of this certificate yet. If we don't, the synchronizer will gather it and trigger re-processing of this certificate.
         // let t_deliver = Instant::now();
         if !self.synchronizer.deliver_certificate(&certificate).await? {
@@ -1223,6 +1214,15 @@ impl Core {
             return Ok(());
         }
         // debug!("deliver_certificate time: {:?}", t_deliver.elapsed());
+
+        if self.defer_certificate_until_previous(certificate.clone()) {
+            debug!(
+                "Processing of {:?} suspended: missing previous certificate round {}",
+                certificate,
+                certificate.round - 1
+            );
+            return Ok(());
+        }
 
         if self.pending_commit_rounds.contains(&certificate.round) {
             self.commit(certificate.round).await?;
@@ -1269,21 +1269,21 @@ impl Core {
     async fn process_certificate_optimized(&mut self, certificate: Certificate) -> DagResult<()> {
         debug!("Processing cert (optimized) {:?}", certificate);
 
-        if self.defer_certificate_until_previous(certificate.clone()) {
-            debug!(
-                "Processing of {:?} suspended: missing previous certificate round {}",
-                certificate,
-                certificate.round - 1
-            );
-            return Ok(());
-        }
-
         // Look up parent from in-memory map to avoid store read+deserialize.
         let parent = self.parent_info.get(&certificate.header_id).map(|(_, p)| *p);
         if !self.synchronizer.deliver_certificate_optimized(&certificate, parent).await? {
             debug!(
                 "Processing of {:?} suspended: missing parent",
                 certificate
+            );
+            return Ok(());
+        }
+
+        if self.defer_certificate_until_previous(certificate.clone()) {
+            debug!(
+                "Processing of {:?} suspended: missing previous certificate round {}",
+                certificate,
+                certificate.round - 1
             );
             return Ok(());
         }
