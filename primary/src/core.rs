@@ -88,11 +88,10 @@ pub struct Core {
     gc_round: Round,
     /// The authors of the last voted headers.
     last_voted: HashMap<Round, HashSet<PublicKey>>,
-    /// Headers waiting for optimistic echo gating: key is required certified round (r-2),
-    /// value is header ids that can be echoed once that certificate exists.
-    pending_echo_headers: HashMap<Round, HashSet<Digest>>,
     /// Parent notifications waiting for cert(r-2) before a local leader can propose.
     pending_proposer_parents: HashMap<Round, HashSet<ProposerParent>>,
+    /// Certificates waiting for the previous round certificate before being processed.
+    pending_certificates: HashMap<Round, Vec<Certificate>>,
     /// For storing info of header infos in processing
     processing_header_infos: HashMap<Digest, HeaderInfo>,
     /// For storing proof of header infos in processing
@@ -186,8 +185,8 @@ impl Core {
                 tx_consensus_header_msg,
                 gc_round: 0,
                 last_voted: HashMap::with_capacity(2 * gc_depth as usize),
-                pending_echo_headers: HashMap::new(),
                 pending_proposer_parents: HashMap::new(),
+                pending_certificates: HashMap::new(),
                 processing_header_infos: HashMap::new(),
                 processing_header_proofs: HashMap::new(),
                 processing_echo_aggregators: HashMap::new(),
@@ -271,8 +270,8 @@ impl Core {
             tx_consensus_header_msg,
             gc_round: 0,
             last_voted: HashMap::with_capacity(2 * gc_depth as usize),
-            pending_echo_headers: HashMap::new(),
             pending_proposer_parents: HashMap::new(),
+            pending_certificates: HashMap::new(),
             processing_header_infos: HashMap::new(),
             processing_header_proofs: HashMap::new(),
             processing_echo_aggregators: HashMap::new(),
@@ -745,8 +744,7 @@ impl Core {
 
         self.maybe_notify_proposer_or_defer(header_info_with_proof).await?;
 
-        // Optimistic echo is gated by certificate(r-2) to avoid cascading optimistic failures.
-        self.maybe_echo_or_defer(header_info_with_proof).await?;
+        self.send_echo(header_info_with_proof).await?;
 
         let hid = header_info_with_proof.id;
         let bytes = bincode::serialize(header_info_with_proof).expect("Failed to serialize header");
@@ -803,8 +801,7 @@ impl Core {
 
         self.maybe_notify_proposer_or_defer(header_info_with_proof).await?;
 
-        // Optimistic echo is gated by certificate(r-2) to avoid cascading optimistic failures.
-        self.maybe_echo_or_defer(header_info_with_proof).await?;
+        self.send_echo(header_info_with_proof).await?;
 
         let hid = header_info_with_proof.id;
         let bytes = bincode::serialize(header_info_with_proof).expect("Failed to serialize header");
@@ -865,27 +862,8 @@ impl Core {
         Ok(())
     }
 
-    /// Send optimistic echo immediately if gating is satisfied, otherwise defer until
-    /// certificate(round-2) is formed.
-    async fn maybe_echo_or_defer(&mut self, header_info_with_proof: &HeaderInfoWithProof) -> DagResult<()> {
+    async fn send_echo(&mut self, header_info_with_proof: &HeaderInfoWithProof) -> DagResult<()> {
         let round = header_info_with_proof.round;
-
-        if round > 2 {
-            let required_cert_round = round - 2;
-            if !self.certificates.contains_key(&required_cert_round) {
-                self.pending_echo_headers
-                    .entry(required_cert_round)
-                    .or_insert_with(HashSet::new)
-                    .insert(header_info_with_proof.id);
-                debug!(
-                    "Deferring echo for header {:?} at round {}: waiting for certificate round {}",
-                    header_info_with_proof.id,
-                    round,
-                    required_cert_round
-                );
-                return Ok(());
-            }
-        }
 
         if self
             .last_voted
@@ -917,22 +895,6 @@ impl Core {
         Ok(())
     }
 
-    /// If some headers were waiting for `certified_round == r-2`, release their deferred echoes now.
-    async fn release_deferred_echoes(&mut self, certified_round: Round) -> DagResult<()> {
-        let Some(ids) = self.pending_echo_headers.remove(&certified_round) else {
-            return Ok(());
-        };
-
-        for id in ids {
-            let Some(header_info_with_proof) = self.processing_header_proofs.get(&id).cloned() else {
-                continue;
-            };
-            self.maybe_echo_or_defer(&header_info_with_proof).await?;
-        }
-
-        Ok(())
-    }
-
     async fn release_deferred_proposer_parents(&mut self, certified_round: Round) -> DagResult<()> {
         let Some(parents) = self.pending_proposer_parents.remove(&certified_round) else {
             return Ok(());
@@ -940,6 +902,40 @@ impl Core {
 
         for parent in parents {
             self.notify_proposer(parent).await?;
+        }
+
+        Ok(())
+    }
+
+    fn defer_certificate_until_previous(&mut self, certificate: Certificate) -> bool {
+        if certificate.round <= 1 || self.certificates.contains_key(&(certificate.round - 1)) {
+            return false;
+        }
+
+        let wait_round = certificate.round - 1;
+        let pending = self
+            .pending_certificates
+            .entry(wait_round)
+            .or_insert_with(Vec::new);
+
+        if !pending.iter().any(|x| {
+            x.round == certificate.round
+                && x.header_id == certificate.header_id
+                && x.origin == certificate.origin
+        }) {
+            pending.push(certificate);
+        }
+
+        true
+    }
+
+    async fn release_deferred_certificates(&mut self, certified_round: Round) -> DagResult<()> {
+        let Some(certificates) = self.pending_certificates.remove(&certified_round) else {
+            return Ok(());
+        };
+
+        for certificate in certificates {
+            self.process_certificate_optimized(certificate).await?;
         }
 
         Ok(())
@@ -1207,6 +1203,15 @@ impl Core {
     async fn process_certificate(&mut self, certificate: Certificate) -> DagResult<()> {
         debug!("Processing cert {:?}", certificate);
 
+        if self.defer_certificate_until_previous(certificate.clone()) {
+            debug!(
+                "Processing of {:?} suspended: missing previous certificate round {}",
+                certificate,
+                certificate.round - 1
+            );
+            return Ok(());
+        }
+
         // Ensure we have all the ancestor of this certificate yet. If we don't, the synchronizer will gather it and trigger re-processing of this certificate.
         // let t_deliver = Instant::now();
         if !self.synchronizer.deliver_certificate(&certificate).await? {
@@ -1231,7 +1236,6 @@ impl Core {
         // debug!("store certificate time: {:?}", t_store.elapsed());
 
         self.certificates.entry(certificate.round).or_insert(certificate.clone());
-        self.release_deferred_echoes(certificate.round).await?;
         self.release_deferred_proposer_parents(certificate.round).await?;
 
         let decide = Decide::new(certificate.header_id, certificate.round, &certificate.origin, &self.name).await;
@@ -1251,6 +1255,8 @@ impl Core {
             .or_insert_with(Vec::new)
             .extend(handlers);
 
+        self.release_deferred_certificates(certificate.round).await?;
+
         Ok(())
     }
 
@@ -1262,6 +1268,15 @@ impl Core {
     #[async_recursion]
     async fn process_certificate_optimized(&mut self, certificate: Certificate) -> DagResult<()> {
         debug!("Processing cert (optimized) {:?}", certificate);
+
+        if self.defer_certificate_until_previous(certificate.clone()) {
+            debug!(
+                "Processing of {:?} suspended: missing previous certificate round {}",
+                certificate,
+                certificate.round - 1
+            );
+            return Ok(());
+        }
 
         // Look up parent from in-memory map to avoid store read+deserialize.
         let parent = self.parent_info.get(&certificate.header_id).map(|(_, p)| *p);
@@ -1284,7 +1299,6 @@ impl Core {
 
         // Store in local map — move certificate in (no extra clone).
         self.certificates.entry(round).or_insert(certificate);
-        self.release_deferred_echoes(round).await?;
         self.release_deferred_proposer_parents(round).await?;
 
         // 4a: Build decide from the extracted small fields.
@@ -1305,6 +1319,8 @@ impl Core {
             .entry(round)
             .or_insert_with(Vec::new)
             .extend(handlers);
+
+        self.release_deferred_certificates(round).await?;
 
         Ok(())
     }
@@ -1484,8 +1500,8 @@ impl Core {
                     .retain(|_, h| &h.round >= &gc_round);
                 self.processing_header_proofs
                     .retain(|_, h| &h.round >= &gc_round);
-                self.pending_echo_headers.retain(|k, _| k >= &gc_round);
                 self.pending_proposer_parents.retain(|k, _| k >= &gc_round);
+                self.pending_certificates.retain(|k, _| k >= &gc_round);
                 self.cancel_handlers.retain(|k, _| k >= &gc_round);
                 // let _ = self.synchronizer.garbage_collect(gc_round).await;
                 self.gc_round = gc_round;
