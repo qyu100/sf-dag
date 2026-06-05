@@ -89,9 +89,9 @@ pub struct Core {
     gc_round: Round,
     /// The authors of the last voted headers.
     last_voted: HashMap<Round, HashSet<PublicKey>>,
-    /// Parent notifications waiting for cert(r-2) before a local leader can propose.
+    /// Parent notifications waiting for cert(r-3) before a local leader can propose.
     pending_proposer_parents: HashMap<Round, HashMap<ProposerParent, Instant>>,
-    /// Rounds for which the proposer gate already nudged header processing to obtain cert(r-2).
+    /// Rounds for which the proposer gate already nudged header processing to obtain cert(r-3).
     syncing_proposer_certificates: HashSet<Round>,
     /// Certificates waiting for the previous round certificate before being processed.
     pending_certificates: HashMap<Round, Vec<Certificate>>,
@@ -798,7 +798,7 @@ impl Core {
         Ok(())
     }
 
-    /// Notify the proposer only after the local leader has parent(r-1) and cert(r-2).
+    /// Notify the proposer only after the local leader has parent(r-1) and cert(r-3).
     async fn maybe_notify_proposer_or_defer(&mut self, header_info_with_proof: &HeaderInfoWithProof) -> DagResult<()> {
         let parent = ProposerParent {
             header_id: header_info_with_proof.id,
@@ -808,12 +808,20 @@ impl Core {
         let propose_round = parent.round + 1;
         let is_local_leader = self.committee.leader(propose_round as usize) == self.name;
 
-        if is_local_leader && parent.round > 1 {
-            let required_cert_round = parent.round - 1;
+        if is_local_leader && propose_round > 3 {
+            let required_cert_round = propose_round - 3;
+            let Some((required_header_id, sync_child_header)) = self
+                .resolve_proposer_certificate_dependency(header_info_with_proof, required_cert_round)
+                .await?
+            else {
+                return Ok(());
+            };
+
             if !self.certificates.contains_key(&required_cert_round) {
                 self.sync_missing_proposer_certificate(
                     required_cert_round,
-                    header_info_with_proof.parent,
+                    required_header_id,
+                    sync_child_header,
                 ).await?;
 
                 let pending = self
@@ -848,10 +856,52 @@ impl Core {
         self.notify_proposer(parent).await
     }
 
+    async fn resolve_proposer_certificate_dependency(
+        &mut self,
+        header_info_with_proof: &HeaderInfoWithProof,
+        required_cert_round: Round,
+    ) -> DagResult<Option<(Digest, HeaderInfoWithProof)>> {
+        let child_header_id = header_info_with_proof.parent;
+        let Some(bytes) = self.store.read(child_header_id.to_vec()).await? else {
+            warn!(
+                "Missing child header while resolving proposer cert gate: child_digest={:?} required_cert_round={}",
+                child_header_id,
+                required_cert_round
+            );
+            return Ok(None);
+        };
+
+        let child_header: HeaderInfoWithProof = match bincode::deserialize(&bytes) {
+            Ok(header) => header,
+            Err(e) => {
+                warn!(
+                    "Failed to deserialize child header while resolving proposer cert gate: child_digest={:?} required_cert_round={} error={}",
+                    child_header_id,
+                    required_cert_round,
+                    e
+                );
+                return Ok(None);
+            }
+        };
+
+        if child_header.round != required_cert_round + 1 {
+            warn!(
+                "Unexpected child header round while resolving proposer cert gate: child_digest={:?} child_round={} required_cert_round={}",
+                child_header_id,
+                child_header.round,
+                required_cert_round
+            );
+            return Ok(None);
+        }
+
+        Ok(Some((child_header.parent, child_header)))
+    }
+
     async fn sync_missing_proposer_certificate(
         &mut self,
         required_cert_round: Round,
         required_header_id: Digest,
+        sync_child_header: HeaderInfoWithProof,
     ) -> DagResult<()> {
         if !self.syncing_proposer_certificates.insert(required_cert_round) {
             return Ok(());
@@ -904,13 +954,24 @@ impl Core {
                 }
             },
             None => {
-                self.syncing_proposer_certificates.remove(&required_cert_round);
                 debug!(
-                    "BENCH event=propose_cert_sync node={:?} wait_cert_round={} digest={:?} source=missing_header",
+                    "BENCH event=propose_cert_sync node={:?} wait_cert_round={} digest={:?} child_digest={:?} source=child_header_reprocess",
                     self.name,
                     required_cert_round,
-                    required_header_id
+                    required_header_id,
+                    sync_child_header.id
                 );
+                if let Err(e) = self
+                    .tx_primary
+                    .try_send(PrimaryMessage::HeaderInfoWithProof(sync_child_header))
+                {
+                    self.syncing_proposer_certificates.remove(&required_cert_round);
+                    warn!(
+                        "Failed to enqueue child header sync for proposer certificate round {}: {}",
+                        required_cert_round,
+                        e
+                    );
+                }
             }
         }
 
