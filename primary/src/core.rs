@@ -4,11 +4,12 @@ use crate::merkle::{Proof, MerkleTree};
 use hex_fmt::HexList;
 use crate::coding::Coding;
 use crate::aggregators::{
-    EchoAggregator, ReadyAggregator, DecideAggregator, TimeoutAggregator
+    EchoAggregator, ReadyAggregator, ReadyThreshold, DecideAggregator, TimeoutAggregator
 };
 use crate::error::{DagError, DagResult};
 use crate::messages::{
-    Certificate, Header, Ready, Timeout, TimeoutCert, HeaderInfoWithProof, Echo, Decide, ProposerParent
+    Certificate, Header, Ready, Timeout, TimeoutCert, HeaderInfoWithProof, Echo, Decide,
+    ProposerParent, ShardRequest, ShardResponse
 };
 use crate::primary::{HeaderType, PrimaryMessage, PrimaryMessageRef, Round};
 use crate::synchronizer::Synchronizer;
@@ -48,6 +49,8 @@ struct ReconstructionResult {
     root: Digest,
     success: bool,
 }
+
+type AvailabilityKey = (Digest, Digest);
 
 pub struct Core {
     /// The public key of this primary.
@@ -100,6 +103,20 @@ pub struct Core {
     processing_echo_aggregators: HashMap<Digest, EchoAggregator>,
     /// For storing info of ready aggregators in processing
     processing_ready_aggregators: HashMap<Digest, ReadyAggregator>,
+    /// The RBC instances for which this node already broadcast Ready.
+    sent_readies: HashSet<(Round, PublicKey)>,
+    /// Ready quorums that are waiting for local availability verification.
+    ready_quorums: HashMap<AvailabilityKey, (Round, PublicKey)>,
+    /// RBC payload roots that passed local erasure-code reconstruction.
+    reconstruction_ok: HashSet<AvailabilityKey>,
+    /// RBC payload roots with an in-flight reconstruction task.
+    started_reconstructions: HashSet<AvailabilityKey>,
+    /// Proofs collected from Echo and shard sync, indexed by (header id, root hash).
+    availability_proofs: HashMap<AvailabilityKey, Vec<Option<Proof>>>,
+    /// Shard requests already sent, indexed by (header id, root hash, shard index).
+    requested_shards: HashSet<(Digest, Digest, usize)>,
+    /// Certificates already emitted for an RBC instance.
+    formed_certificates: HashSet<AvailabilityKey>,
     /// For storing info of decide aggregators in processing
     processing_decide_aggregators: HashMap<Digest, DecideAggregator>,
     /// For storing info of processed certificates
@@ -191,6 +208,13 @@ impl Core {
                 processing_header_proofs: HashMap::new(),
                 processing_echo_aggregators: HashMap::new(),
                 processing_ready_aggregators: HashMap::new(),
+                sent_readies: HashSet::new(),
+                ready_quorums: HashMap::new(),
+                reconstruction_ok: HashSet::new(),
+                started_reconstructions: HashSet::new(),
+                availability_proofs: HashMap::new(),
+                requested_shards: HashSet::new(),
+                formed_certificates: HashSet::new(),
                 processing_decide_aggregators: HashMap::new(),
                 processed_certs: HashMap::with_capacity(2 * gc_depth as usize),
                 network: ReliableSender::new(),
@@ -276,6 +300,13 @@ impl Core {
             processing_header_proofs: HashMap::new(),
             processing_echo_aggregators: HashMap::new(),
             processing_ready_aggregators: HashMap::new(),
+            sent_readies: HashSet::new(),
+            ready_quorums: HashMap::new(),
+            reconstruction_ok: HashSet::new(),
+            started_reconstructions: HashSet::new(),
+            availability_proofs: HashMap::new(),
+            requested_shards: HashSet::new(),
+            formed_certificates: HashSet::new(),
             processing_decide_aggregators: HashMap::new(),
             processed_certs: HashMap::with_capacity(2 * gc_depth as usize),
             network: ReliableSender::new(),
@@ -751,12 +782,12 @@ impl Core {
         // Store the header.
         self.store.write(hid.to_vec(), bytes).await;
 
-        // If a reconstruction was waiting for this header's info, resume it now.
+        // If a reconstruction was waiting for this header's info, keep the
+        // certificate path gated by the Ready quorum.
         if let Some(root) = self.pending_reconstructions.remove(&header_info_with_proof.id) {
-            // clone header info to pass ownership into the async helper
-            if let Err(e) = self.finalize_reconstruction(header_info_with_proof.clone()).await {
-                warn!("Failed to finalize pending reconstruction for {:?}: {}", header_info_with_proof.id, e);
-            }
+            self.reconstruction_ok.insert((header_info_with_proof.id, root));
+            self.maybe_form_certificate(header_info_with_proof.id, root)
+                .await?;
             debug!("process_header_proof total time: {:?}", start.elapsed());
             return Ok(());
         }
@@ -808,16 +839,12 @@ impl Core {
         // Store the header.
         self.store.write(hid.to_vec(), bytes).await;
 
-        // If a reconstruction was waiting for this header's info, resume it now.
-        if let Some(_root) = self.pending_reconstructions.remove(&header_info_with_proof.id) {
-            // 3b: pass only the small fields needed by finalize_reconstruction_optimized.
-            if let Err(e) = self.finalize_reconstruction_optimized(
-                header_info_with_proof.id,
-                header_info_with_proof.round,
-                header_info_with_proof.author,
-            ).await {
-                warn!("Failed to finalize pending reconstruction for {:?}: {}", header_info_with_proof.id, e);
-            }
+        // If a reconstruction was waiting for this header's info, keep the
+        // certificate path gated by the Ready quorum.
+        if let Some(root) = self.pending_reconstructions.remove(&header_info_with_proof.id) {
+            self.reconstruction_ok.insert((header_info_with_proof.id, root));
+            self.maybe_form_certificate(header_info_with_proof.id, root)
+                .await?;
             debug!("process_header_proof_optimized total time: {:?}", start.elapsed());
             return Ok(());
         }
@@ -825,7 +852,7 @@ impl Core {
         Ok(())
     }
 
-    /// Notify the proposer only after the local leader has parent(r-1) and cert(r-2).
+    /// Notify the proposer only after the local leader has parent(r-1) and cert(r-3).
     async fn maybe_notify_proposer_or_defer(&mut self, header_info_with_proof: &HeaderInfoWithProof) -> DagResult<()> {
         let parent = ProposerParent {
             header_id: header_info_with_proof.id,
@@ -835,8 +862,8 @@ impl Core {
         let propose_round = parent.round + 1;
         let is_local_leader = self.committee.leader(propose_round as usize) == self.name;
 
-        if is_local_leader && parent.round > 1 {
-            let required_cert_round = parent.round - 1;
+        if is_local_leader && parent.round > 2 {
+            let required_cert_round = parent.round - 2;
             if !self.certificates.contains_key(&required_cert_round) {
                 self.pending_proposer_parents
                     .entry(required_cert_round)
@@ -860,6 +887,199 @@ impl Core {
             .await
             .expect("Failed to send parent candidate to proposer");
         Ok(())
+    }
+
+    fn record_availability_proof(
+        &mut self,
+        id: Digest,
+        root: Digest,
+        proof: Proof,
+    ) -> DagResult<()> {
+        ensure!(
+            proof.index() < self.committee.size()
+                && *proof.root_hash() == root
+                && proof.validate(self.committee.size()),
+            DagError::ProofConstructionFailed
+        );
+
+        let index = proof.index();
+        let committee_size = self.committee.size();
+        let proofs = self
+            .availability_proofs
+            .entry((id, root))
+            .or_insert_with(|| vec![None; committee_size]);
+        if proofs[index].is_none() {
+            proofs[index] = Some(proof);
+        }
+        Ok(())
+    }
+
+    fn collected_shards(&self, id: Digest, root: Digest) -> Vec<Option<Box<[u8]>>> {
+        let mut shards = vec![None; self.committee.size()];
+        if let Some(proofs) = self.availability_proofs.get(&(id, root)) {
+            for (index, proof) in proofs.iter().enumerate() {
+                if let Some(proof) = proof {
+                    shards[index] = Some(proof.clone().into_value());
+                }
+            }
+        }
+        shards
+    }
+
+    fn start_reconstruction_with_shards(
+        &mut self,
+        id: Digest,
+        root: Digest,
+        mut shards: Vec<Option<Box<[u8]>>>,
+    ) {
+        let key = (id, root);
+        if self.reconstruction_ok.contains(&key) || !self.started_reconstructions.insert(key) {
+            return;
+        }
+
+        if shards.iter().filter(|shard| shard.is_some()).count() < self.coding.data_shard_count() {
+            self.started_reconstructions.remove(&key);
+            return;
+        }
+
+        let coding = Arc::clone(&self.coding);
+        let rs_block_size = self.rs_block_size;
+        let rs_block_threads = self.rs_block_threads;
+        let tx = self.tx_reconstruction_result.clone();
+
+        tokio::task::spawn_blocking(move || {
+            let success = (|| -> DagResult<bool> {
+                coding.reconstruct_shards(&mut shards[..], rs_block_size, rs_block_threads)?;
+                let hashes: Vec<Digest> = shards
+                    .par_iter()
+                    .map(|shard| {
+                        shard
+                            .as_ref()
+                            .map(|value| MerkleTree::digest(&**value))
+                            .ok_or(DagError::ProofConstructionFailed)
+                    })
+                    .collect::<DagResult<_>>()?;
+                let mtree = MerkleTree::from_hashes(hashes);
+                Ok(*mtree.root_hash() == root)
+            })()
+            .unwrap_or_else(|e| {
+                warn!("Availability reconstruction failed for {:?}: {}", id, e);
+                false
+            });
+
+            let _ = tx.blocking_send(ReconstructionResult { id, root, success });
+        });
+    }
+
+    fn try_start_reconstruction(&mut self, id: Digest, root: Digest) {
+        let shards = self.collected_shards(id, root);
+        self.start_reconstruction_with_shards(id, root, shards);
+    }
+
+    async fn send_primary_message(
+        &mut self,
+        message: PrimaryMessage,
+        recipient: &PublicKey,
+    ) -> DagResult<()> {
+        if recipient == &self.name {
+            return Ok(());
+        }
+        let address = self
+            .committee
+            .primary(recipient)
+            .expect("Target node is not in the committee")
+            .primary_to_primary;
+        let bytes = bincode::serialize(&message).expect("Failed to serialize primary message");
+        let _handler = self.network.send(address, Bytes::from(bytes)).await;
+        Ok(())
+    }
+
+    async fn request_availability_shards(
+        &mut self,
+        id: Digest,
+        root: Digest,
+    ) -> DagResult<()> {
+        let shard_owners: Vec<(usize, PublicKey)> = self
+            .committee
+            .sorted_keys
+            .iter()
+            .copied()
+            .enumerate()
+            .collect();
+        for (index, signer) in shard_owners {
+            let have_proof = self
+                .availability_proofs
+                .get(&(id, root))
+                .and_then(|proofs| proofs.get(index))
+                .and_then(|proof| proof.as_ref())
+                .is_some();
+            if have_proof || signer == self.name {
+                continue;
+            }
+            if !self.requested_shards.insert((id, root, index)) {
+                continue;
+            }
+            let request = ShardRequest {
+                id,
+                root_hash: root,
+                index,
+                origin: self.name,
+            };
+            self.send_primary_message(PrimaryMessage::ShardRequest(request), &signer)
+                .await?;
+        }
+        Ok(())
+    }
+
+    #[async_recursion]
+    async fn maybe_form_certificate(&mut self, id: Digest, root: Digest) -> DagResult<()> {
+        let key = (id, root);
+        if !self.reconstruction_ok.contains(&key) {
+            return Ok(());
+        }
+        let Some((round, origin)) = self.ready_quorums.get(&key).copied() else {
+            return Ok(());
+        };
+        if !self.formed_certificates.insert(key) {
+            return Ok(());
+        }
+
+        let certificate = Certificate {
+            header_id: id,
+            round,
+            origin,
+        };
+        self.process_certificate_optimized(certificate).await
+    }
+
+    #[async_recursion]
+    async fn send_ready(
+        &mut self,
+        id: Digest,
+        round: Round,
+        origin: PublicKey,
+        root: Digest,
+    ) -> DagResult<()> {
+        if !self.sent_readies.insert((round, origin)) {
+            return Ok(());
+        }
+
+        let ready = Ready::new(id, round, &origin, &self.name, root).await;
+        let addresses = self
+            .committee
+            .others_primaries(&self.name)
+            .iter()
+            .map(|(_, x)| x.primary_to_primary)
+            .collect();
+        let bytes = bincode::serialize(&PrimaryMessageRef::Ready(&ready))
+            .expect("Failed to serialize our own ready");
+        let handlers = self.network.broadcast(addresses, Bytes::from(bytes)).await;
+        self.cancel_handlers
+            .entry(round)
+            .or_insert_with(Vec::new)
+            .extend(handlers);
+
+        self.process_ready(&ready).await
     }
 
     async fn send_echo(&mut self, header_info_with_proof: &HeaderInfoWithProof) -> DagResult<()> {
@@ -942,101 +1162,7 @@ impl Core {
     }
 
     async fn process_echo(&mut self, echo: Echo) -> DagResult<()> {
-        // debug!("Processing {:?}", echo);
-        let t_total = Instant::now();
-        let proof = echo.proof;
-        let author = echo.author;
-        let id = echo.id;
-        // Validate the proof
-        let t_validate = Instant::now();
-        if self.committee.index_of(&author) == Some(proof.index()) && proof.validate(self.committee.total_stake() as usize) {
-            let d_validate = t_validate.elapsed();
-            if !self.processing_echo_aggregators.contains_key(&id) {
-                self.processing_echo_aggregators
-                    .entry(id.clone())
-                    .or_insert(EchoAggregator::new());
-            }
-            if let Some(echo_aggregator) = self.processing_echo_aggregators.get_mut(&id) {
-                let t_agg = Instant::now();
-                if let Some((root, mut leaf_values)) = echo_aggregator.append(author, proof, &self.committee)? {
-                    let d_agg = t_agg.elapsed();
-                    // Store the collected leaf values for this root so we can reconstruct later
-                    // key by (round, root_hash)
-                    let t_reconstruct = Instant::now();
-                    // debug!("round {:?} - reconstructing for root", ready.round);
-                    // debug!("leaf_values {}", leaf_values.len());
-
-                    // Move the coding handle and the leaf_values into a blocking task so the
-                    // async runtime threads are not blocked by the CPU-heavy reconstruction.
-                    let coding = Arc::clone(&self.coding);
-                    let rs_block_size = self.rs_block_size;
-                    let rs_block_threads = self.rs_block_threads;
-                    let leaf_values = tokio::task::spawn_blocking(move || {
-                        coding.reconstruct_shards(&mut leaf_values[..], rs_block_size, rs_block_threads)?;
-                        Ok::<_, DagError>(leaf_values)
-                    })
-                    .await
-                    .map_err(|_| DagError::ProofConstructionFailed)??;
-                    let d_reconstruct = t_reconstruct.elapsed();
-
-                    debug!("reconstruct_shards time: {:?}", t_reconstruct.elapsed());
-
-                    let t_convert = Instant::now();
-                    let shards: Vec<Vec<u8>> = leaf_values
-                        .into_iter()
-                        .map(|opt| opt.expect("reconstruct_shards produced all shards").into_vec())
-                        .collect();
-                    let d_convert = t_convert.elapsed();
-
-                    // debug!("Reconstructed shards: {:0.10}", HexList(&shards));
-                    debug!("rayon threads: {}", rayon::current_num_threads());
-                    // Construct the Merkle tree.
-                    let t_hash = Instant::now();
-                    // Compute leaf digests in parallel and build tree from hashes to avoid cloning all shards.
-                    let hashes: Vec<Digest> = shards
-                        .par_iter()
-                        .map(|s| MerkleTree::digest(s.as_slice()))
-                        .collect();
-                    debug!("hashes compute time: {:?}", t_hash.elapsed());
-                    let d_hash = t_hash.elapsed();
-
-                    let t_tree = Instant::now();
-                    let mtree = MerkleTree::from_hashes(hashes);
-                    debug!("mtree rebuild time: {:?}", t_tree.elapsed());
-                    let d_tree = t_tree.elapsed();
-
-                    // If the root hash of the reconstructed tree does not match the one
-                    // received with proofs then abort.
-                    if *mtree.root_hash() != root {
-                        return Err(DagError::ProofConstructionFailed);
-                    }
-                    // self.mtrees.entry(root).or_insert(mtree);
-
-                    // Reconstruct and process the payload only if we have the corresponding header info with proof.
-                    let rid = echo.id;
-                    // Clone header info to avoid holding an immutable borrow across an await.
-                    let header_clone = match self.processing_header_proofs.get(&rid) {
-                        Some(h) => h.clone(),
-                        None => {
-                            // Store pending reconstruction to be resumed when HeaderInfoWithProof arrives.
-                            debug!("Missing HeaderInfoWithProof for echo id {:?}, storing pending reconstruction", rid);
-                            self.pending_reconstructions.insert(rid, root);
-                            return Ok(());
-                        }
-                    };
-
-                    // Move shards into helper that rebuilds the payload and submits the certificate.
-                    let t_finalize = Instant::now();
-                    self.finalize_reconstruction(header_clone).await?;
-                    let d_finalize = t_finalize.elapsed();
-                    debug!("finalize_reconstruction time: {:?}", t_finalize.elapsed());
-
-                    println!("    [original final echo] validate={:?} agg={:?} reconstruct={:?} convert={:?} hash={:?} tree={:?} finalize={:?} total={:?}",
-                        d_validate, d_agg, d_reconstruct, d_convert, d_hash, d_tree, d_finalize, t_total.elapsed());
-                }
-            }
-        }
-        Ok(())
+        self.process_echo_optimized(echo).await
     }
 
 
@@ -1089,70 +1215,132 @@ impl Core {
         let proof = echo.proof;
         let author = echo.author;
         let id = echo.id;
+        let round = echo.round;
+        let origin = echo.origin;
+        let root = *proof.root_hash();
 
         let t_validate = Instant::now();
-        let valid = self.committee.index_of(&author) == Some(proof.index()) && proof.validate(self.committee.total_stake() as usize);
+        let valid = self.committee.index_of(&author) == Some(proof.index())
+            && proof.validate(self.committee.total_stake() as usize);
         let d_validate = t_validate.elapsed();
 
         if valid {
-            if !self.processing_echo_aggregators.contains_key(&id) {
-                self.processing_echo_aggregators
-                    .entry(id)
-                    .or_insert(EchoAggregator::new());
-            }
-            if let Some(echo_aggregator) = self.processing_echo_aggregators.get_mut(&id) {
-                let t_agg = Instant::now();
-                let agg_result = echo_aggregator.append(author, proof, &self.committee)?;
-                let d_agg = t_agg.elapsed();
+            self.record_availability_proof(id, root, proof.clone())?;
+            self.processing_echo_aggregators
+                .entry(id)
+                .or_insert(EchoAggregator::new());
 
-                if let Some((root, mut leaf_values)) = agg_result {
-                    // Dispatch reconstruction to background so the event loop stays responsive.
-                    let coding = Arc::clone(&self.coding);
-                    let rs_block_size = self.rs_block_size;
-                    let rs_block_threads = self.rs_block_threads;
-                    let tx = self.tx_reconstruction_result.clone();
-                    let recon_id = id;
+            let t_agg = Instant::now();
+            let agg_result = self
+                .processing_echo_aggregators
+                .get_mut(&id)
+                .expect("echo aggregator exists")
+                .append(author, proof, &self.committee)?;
+            let d_agg = t_agg.elapsed();
 
-                    tokio::task::spawn_blocking(move || {
-                        let t_total = Instant::now();
-
-                        let t_reconstruct = Instant::now();
-                        if let Err(e) = coding.reconstruct_shards(&mut leaf_values[..], rs_block_size, rs_block_threads) {
-                            warn!("Reconstruction failed: {:?}", e);
-                            let _ = tx.blocking_send(ReconstructionResult { id: recon_id, root, success: false });
-                            return;
-                        }
-                        let d_reconstruct = t_reconstruct.elapsed();
-
-                        let t_hash = Instant::now();
-                        let hashes: Vec<Digest> = leaf_values
-                            .par_iter()
-                            .map(|opt| {
-                                let shard = opt.as_ref().expect("reconstruct_shards produced all shards");
-                                MerkleTree::digest(&**shard)
-                            })
-                            .collect();
-                        let d_hash = t_hash.elapsed();
-
-                        let t_tree = Instant::now();
-                        let mtree = MerkleTree::from_hashes(hashes);
-                        let d_tree = t_tree.elapsed();
-
-                        let success = *mtree.root_hash() == root;
-
-                        println!("    [reconstruction bg] reconstruct={:?} hash={:?} tree={:?} success={} total={:?}",
-                            d_reconstruct, d_hash, d_tree, success, t_total.elapsed());
-
-                        let _ = tx.blocking_send(ReconstructionResult { id: recon_id, root, success });
-                    });
-
-                    debug!("echo_optimized: dispatched reconstruction for {:?}", id);
-                } else {
-                    debug!("echo_optimized: validate={:?} agg={:?} total={:?}", d_validate, d_agg, t_total.elapsed());
-                }
+            if let Some((root, leaf_values)) = agg_result {
+                self.start_reconstruction_with_shards(id, root, leaf_values);
+                self.send_ready(id, round, origin, root).await?;
+                self.maybe_form_certificate(id, root).await?;
+                debug!("echo_optimized: echo quorum for {:?} root {:?}", id, root);
+            } else {
+                debug!("echo_optimized: validate={:?} agg={:?} total={:?}", d_validate, d_agg, t_total.elapsed());
             }
         }
         Ok(())
+    }
+
+    #[async_recursion]
+    async fn process_ready(&mut self, ready: &Ready) -> DagResult<()> {
+        ready.verify(&self.committee)?;
+        self.processing_ready_aggregators
+            .entry(ready.id)
+            .or_insert(ReadyAggregator::new());
+
+        let threshold = self
+            .processing_ready_aggregators
+            .get_mut(&ready.id)
+            .expect("ready aggregator exists")
+            .append(ready, &self.committee)?;
+
+        match threshold {
+            Some(ReadyThreshold::Relay(root)) => {
+                self.send_ready(ready.id, ready.round, ready.origin, root).await?;
+            }
+            Some(ReadyThreshold::Quorum(root)) => {
+                self.send_ready(ready.id, ready.round, ready.origin, root).await?;
+                let (round, origin) = self
+                    .processing_header_proofs
+                    .get(&ready.id)
+                    .map(|header| (header.round, header.author))
+                    .unwrap_or((ready.round, ready.origin));
+                self.ready_quorums
+                    .entry((ready.id, root))
+                    .or_insert((round, origin));
+                self.request_availability_shards(ready.id, root).await?;
+                self.try_start_reconstruction(ready.id, root);
+                self.maybe_form_certificate(ready.id, root).await?;
+            }
+            None => (),
+        }
+
+        Ok(())
+    }
+
+    async fn process_shard_request(&mut self, request: ShardRequest) -> DagResult<()> {
+        ensure!(
+            request.index < self.committee.size(),
+            DagError::ProofConstructionFailed
+        );
+        ensure!(
+            self.committee.stake(&request.origin) > 0,
+            DagError::UnknownAuthority(request.origin)
+        );
+
+        let proof = self
+            .availability_proofs
+            .get(&(request.id, request.root_hash))
+            .and_then(|proofs| proofs.get(request.index))
+            .and_then(|proof| proof.as_ref())
+            .cloned()
+            .or_else(|| {
+                self.processing_header_proofs
+                    .get(&request.id)
+                    .map(|header| header.proof.clone())
+                    .filter(|proof| {
+                        proof.index() == request.index
+                            && *proof.root_hash() == request.root_hash
+                    })
+            });
+
+        let Some(proof) = proof else {
+            debug!(
+                "Missing requested shard id={} root={} index={}",
+                request.id, request.root_hash, request.index
+            );
+            return Ok(());
+        };
+
+        ensure!(
+            proof.index() == request.index
+                && *proof.root_hash() == request.root_hash
+                && proof.validate(self.committee.size()),
+            DagError::ProofConstructionFailed
+        );
+
+        let response = ShardResponse {
+            id: request.id,
+            root_hash: request.root_hash,
+            proof,
+        };
+        self.send_primary_message(PrimaryMessage::ShardResponse(response), &request.origin)
+            .await
+    }
+
+    async fn process_shard_response(&mut self, response: ShardResponse) -> DagResult<()> {
+        self.record_availability_proof(response.id, response.root_hash, response.proof)?;
+        self.try_start_reconstruction(response.id, response.root_hash);
+        self.maybe_form_certificate(response.id, response.root_hash).await
     }
 
     /// Optimized finalize_reconstruction: takes only the small fields (id, round, author)
@@ -1179,24 +1367,14 @@ impl Core {
 
     /// Handle the result of a background echo reconstruction.
     async fn handle_reconstruction_result(&mut self, result: ReconstructionResult) -> DagResult<()> {
+        self.started_reconstructions.remove(&(result.id, result.root));
         if !result.success {
             warn!("Reconstruction verification failed for {:?}", result.id);
             return Err(DagError::ProofConstructionFailed);
         }
 
-        let (header_id, round, origin) = match self.processing_header_proofs.get(&result.id) {
-            Some(h) => (h.id, h.round, h.author),
-            None => {
-                debug!("Missing HeaderInfoWithProof for reconstruction result {:?}, storing pending", result.id);
-                self.pending_reconstructions.insert(result.id, result.root);
-                return Ok(());
-            }
-        };
-
-        let t_finalize = Instant::now();
-        self.finalize_reconstruction_optimized(header_id, round, origin).await?;
-        println!("    [handle_reconstruction_result] finalize={:?}", t_finalize.elapsed());
-        Ok(())
+        self.reconstruction_ok.insert((result.id, result.root));
+        self.maybe_form_certificate(result.id, result.root).await
     }
 
     #[async_recursion]
@@ -1426,6 +1604,22 @@ impl Core {
         Ok(())
     }
 
+    fn sanitize_ready(&mut self, ready: &Ready) -> DagResult<()> {
+        ensure!(
+            self.gc_round <= ready.round,
+            DagError::TooOld(ready.id, ready.round)
+        );
+        ready.verify(&self.committee)?;
+        if let Some(header_info_with_proof) = self.processing_header_proofs.get(&ready.id) {
+            ensure!(
+                ready.origin == header_info_with_proof.author
+                    && ready.round == header_info_with_proof.round,
+                DagError::UnexpectedVote(ready.id)
+            );
+        }
+        Ok(())
+    }
+
     // Main loop listening to incoming messages.
     pub async fn run(&mut self) {
 
@@ -1446,8 +1640,20 @@ impl Core {
                                 error => error
                             }
                         },
+                        PrimaryMessage::Ready(ready) => {
+                            match self.sanitize_ready(&ready) {
+                                Ok(()) => self.process_ready(&ready).await,
+                                error => error
+                            }
+                        },
                         PrimaryMessage::Decide(decide) => {
                             self.process_decide(&decide).await
+                        },
+                        PrimaryMessage::ShardRequest(request) => {
+                            self.process_shard_request(request).await
+                        },
+                        PrimaryMessage::ShardResponse(response) => {
+                            self.process_shard_response(response).await
                         },
                         PrimaryMessage::HeaderInfoWithProof(header_info_with_proof) => {
                             match self.sanitize_header_proof(&header_info_with_proof) {
@@ -1502,6 +1708,36 @@ impl Core {
                     .retain(|_, h| &h.round >= &gc_round);
                 self.pending_proposer_parents.retain(|k, _| k >= &gc_round);
                 self.pending_certificates.retain(|k, _| k >= &gc_round);
+                self.sent_readies.retain(|(r, _)| r >= &gc_round);
+                self.ready_quorums.retain(|_, (r, _)| *r >= gc_round);
+                let live_header_ids: HashSet<Digest> = self
+                    .processing_header_proofs
+                    .keys()
+                    .copied()
+                    .collect();
+                let live_ready_keys: HashSet<AvailabilityKey> =
+                    self.ready_quorums.keys().copied().collect();
+                let live_ready_ids: HashSet<Digest> =
+                    live_ready_keys.iter().map(|(id, _)| *id).collect();
+                self.processing_echo_aggregators
+                    .retain(|id, _| live_header_ids.contains(id) || live_ready_ids.contains(id));
+                self.processing_ready_aggregators
+                    .retain(|id, _| live_header_ids.contains(id) || live_ready_ids.contains(id));
+                self.availability_proofs.retain(|key, _| {
+                    live_header_ids.contains(&key.0) || live_ready_keys.contains(key)
+                });
+                self.started_reconstructions.retain(|key| {
+                    live_header_ids.contains(&key.0) || live_ready_keys.contains(key)
+                });
+                self.reconstruction_ok.retain(|key| {
+                    live_header_ids.contains(&key.0) || live_ready_keys.contains(key)
+                });
+                self.requested_shards.retain(|(id, root, _)| {
+                    live_header_ids.contains(id) || live_ready_keys.contains(&(*id, *root))
+                });
+                self.formed_certificates.retain(|key| {
+                    live_header_ids.contains(&key.0) || live_ready_keys.contains(key)
+                });
                 self.cancel_handlers.retain(|k, _| k >= &gc_round);
                 // let _ = self.synchronizer.garbage_collect(gc_round).await;
                 self.gc_round = gc_round;
@@ -1566,7 +1802,7 @@ mod core_bench {
     #[allow(dead_code)]
     struct CoreSinks {
         rx_consensus: tokio::sync::mpsc::Receiver<Certificate>,
-        rx_proposer_out: tokio::sync::mpsc::Receiver<Certificate>,
+        rx_proposer_out: tokio::sync::mpsc::Receiver<ProposerParent>,
         rx_timeout_cert: tokio::sync::mpsc::Receiver<(TimeoutCert, Round)>,
         rx_consensus_header_msg: tokio::sync::mpsc::Receiver<ConsensusMessage>,
     }

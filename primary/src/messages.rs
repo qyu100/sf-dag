@@ -1,8 +1,8 @@
 use crate::batch_maker::Transaction;
 // Copyright(C) Facebook, Inc. and its affiliates.
 use crate::error::{DagError, DagResult};
-use crate::primary::Round;
 use crate::merkle::Proof;
+use crate::primary::Round;
 use config::Committee;
 use crypto::{Digest, Hash, PublicKey, Signature, SignatureService};
 use ed25519_dalek::Digest as _;
@@ -328,7 +328,7 @@ pub struct Echo {
     pub round: Round,
     pub origin: PublicKey,
     pub author: PublicKey,
-    pub proof: Proof
+    pub proof: Proof,
 }
 
 impl Echo {
@@ -357,10 +357,7 @@ impl fmt::Debug for Echo {
         write!(
             f,
             "{}: V{}({}, {})",
-            self.id,
-            self.round,
-            self.author,
-            self.id
+            self.id, self.round, self.author, self.id
         )
     }
 }
@@ -457,12 +454,24 @@ impl fmt::Debug for Ready {
         write!(
             f,
             "{}: R{}({}, {})",
-            self.id,
-            self.round,
-            self.author,
-            self.id
+            self.id, self.round, self.author, self.id
         )
     }
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub struct ShardRequest {
+    pub id: Digest,
+    pub root_hash: Digest,
+    pub index: usize,
+    pub origin: PublicKey,
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub struct ShardResponse {
+    pub id: Digest,
+    pub root_hash: Digest,
+    pub proof: Proof,
 }
 
 // Commit message in the protocol
@@ -504,10 +513,7 @@ impl fmt::Debug for Decide {
         write!(
             f,
             "{}: D{}({}, {})",
-            self.id,
-            self.round,
-            self.author,
-            self.id
+            self.id, self.round, self.author, self.id
         )
     }
 }

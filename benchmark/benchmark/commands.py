@@ -18,7 +18,12 @@ class CommandMaker:
 
     @staticmethod
     def compile():
-        return "RUSTFLAGS='-C target-cpu=native' cargo build --quiet --release --features benchmark"
+        xcode_sdk = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk"
+        return (
+            f"if [ -d {xcode_sdk} ]; then "
+            f"SDKROOT={xcode_sdk} RUSTFLAGS='-C target-cpu=native' cargo build --quiet --release --features benchmark; "
+            "else RUSTFLAGS='-C target-cpu=native' cargo build --quiet --release --features benchmark; fi"
+        )
 
     @staticmethod
     def generate_ed_key(filename):
@@ -46,7 +51,8 @@ class CommandMaker:
         assert isinstance(parameters, str)
         assert isinstance(debug, bool)
         v = '-vvv' if debug else '-vv'
-        return (f'./node {v} run --edkeys {edkeys} --blskeys {blskeys} --committee {committee} '
+        log_level = 'debug' if debug else 'info'
+        return (f'RUST_LOG={log_level} ./node {v} run --edkeys {edkeys} --blskeys {blskeys} --committee {committee} '
                 f'--store {store} --parameters {parameters} primary')
 
     @staticmethod
@@ -57,7 +63,8 @@ class CommandMaker:
         assert isinstance(parameters, str)
         assert isinstance(debug, bool)
         v = '-vvv' if debug else '-vv'
-        return (f'./node {v} run --edkeys {edkeys} --blskeys {blskeys} --committee {committee} '
+        log_level = 'debug' if debug else 'info'
+        return (f'RUST_LOG={log_level} ./node {v} run --edkeys {edkeys} --blskeys {blskeys} --committee {committee} '
                 f'--store {store} --parameters {parameters} worker --id {id}')
 
     @staticmethod
@@ -69,7 +76,7 @@ class CommandMaker:
         assert isinstance(nodes, list)
         assert all(isinstance(x, str) for x in nodes)
         nodes = f'--nodes {" ".join(nodes)}' if nodes else ''
-        return f'./benchmark_client {address} --size {size} --burst {burst} --rate {rate} {nodes}'
+        return f'RUST_LOG=info ./benchmark_client {address} --size {size} --burst {burst} --rate {rate} {nodes}'
 
     @staticmethod
     def kill():

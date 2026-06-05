@@ -1,14 +1,14 @@
 // Copyright(C) Facebook, Inc. and its affiliates.
 use crate::error::{DagError, DagResult};
 use crate::merkle::Proof;
-use crate::messages::{Certificate, Ready, Timeout, TimeoutCert, Decide};
+use crate::messages::{Certificate, Decide, Ready, Timeout, TimeoutCert};
 use config::{Committee, Stake};
-use crypto::{PublicKey, Digest};
 use crypto::Signature;
+use crypto::{Digest, PublicKey};
 use log::debug;
-use std::time::Instant;
-use std::collections::{HashSet, HashMap};
+use std::collections::{HashMap, HashSet};
 use std::mem;
+use std::time::Instant;
 
 pub struct EchoAggregator {
     weight: Stake,
@@ -29,7 +29,12 @@ impl EchoAggregator {
         }
     }
 
-    pub fn append(&mut self, author: PublicKey, proof: Proof, committee: &Committee) -> DagResult<Option<(Digest, Vec<Option<Box<[u8]>>>)>> {
+    pub fn append(
+        &mut self,
+        author: PublicKey,
+        proof: Proof,
+        committee: &Committee,
+    ) -> DagResult<Option<(Digest, Vec<Option<Box<[u8]>>>)>> {
         // Ensure it is the first time this authority votes.
         ensure!(self.used.insert(author), DagError::AuthorityReuse(author));
 
@@ -42,7 +47,7 @@ impl EchoAggregator {
         let w = self.weights.entry(root.clone()).or_insert(0);
         *w += committee.stake(&author);
         // If this particular root reached quorum, build the ordered leaf vector
-        if *w >= committee.optimistic_threshold() {
+        if *w >= committee.quorum_threshold() {
             self.weights.remove(&root);
             let author_map = self.echos.remove(&root).expect("author_map exists");
             let mut owned_map = author_map;
@@ -63,6 +68,13 @@ pub struct ReadyAggregator {
     readies: HashMap<Digest, HashMap<PublicKey, Ready>>,
     // Accumulated stake per root hash
     weights: HashMap<Digest, Stake>,
+    relay_roots: HashSet<Digest>,
+    quorum_roots: HashSet<Digest>,
+}
+
+pub enum ReadyThreshold {
+    Relay(Digest),
+    Quorum(Digest),
 }
 
 impl ReadyAggregator {
@@ -71,15 +83,17 @@ impl ReadyAggregator {
             used: HashSet::new(),
             readies: HashMap::new(),
             weights: HashMap::new(),
+            relay_roots: HashSet::new(),
+            quorum_roots: HashSet::new(),
         }
     }
 
-    // Return the root hash when 2f+1 Ready messages are collected for it.
+    // Return the root hash when either f+1 or n-f Ready messages are collected for it.
     pub fn append(
         &mut self,
         ready: &Ready,
         committee: &Committee,
-    ) -> DagResult<Option<Digest>> {
+    ) -> DagResult<Option<ReadyThreshold>> {
         let author = ready.author;
         // Ensure it is the first time this authority votes.
         ensure!(self.used.insert(author), DagError::AuthorityReuse(author));
@@ -88,10 +102,11 @@ impl ReadyAggregator {
         author_map.insert(author, ready.clone());
         let w = self.weights.entry(root).or_insert(0);
         *w += committee.stake(&author);
-        if *w >= committee.quorum_threshold() {
-            // self.weights.remove(&root);
-            let _author_map = self.readies.remove(&root).expect("author_map exists");
-            return Ok(Some(root));
+        if *w >= committee.quorum_threshold() && self.quorum_roots.insert(root) {
+            return Ok(Some(ReadyThreshold::Quorum(root)));
+        }
+        if *w >= committee.validity_threshold() && self.relay_roots.insert(root) {
+            return Ok(Some(ReadyThreshold::Relay(root)));
         }
         Ok(None)
     }
@@ -110,11 +125,7 @@ impl DecideAggregator {
         }
     }
 
-    pub fn append(
-        &mut self,
-        decide: &Decide,
-        committee: &Committee,
-    ) -> DagResult<Option<bool>> {
+    pub fn append(&mut self, decide: &Decide, committee: &Committee) -> DagResult<Option<bool>> {
         let author = decide.author;
         ensure!(self.used.insert(author), DagError::AuthorityReuse(author));
         self.weight += committee.stake(&author);
