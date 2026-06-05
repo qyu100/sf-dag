@@ -40,6 +40,7 @@ struct OwnHeaderComputeResult {
     header_info: HeaderInfo,
     messages: Vec<(Option<HeaderInfoWithProof>, Option<Bytes>)>,
     round: Round,
+    build_total_ms: u128,
 }
 
 /// Result from background echo reconstruction.
@@ -89,7 +90,9 @@ pub struct Core {
     /// The authors of the last voted headers.
     last_voted: HashMap<Round, HashSet<PublicKey>>,
     /// Parent notifications waiting for cert(r-2) before a local leader can propose.
-    pending_proposer_parents: HashMap<Round, HashSet<ProposerParent>>,
+    pending_proposer_parents: HashMap<Round, HashMap<ProposerParent, Instant>>,
+    /// Rounds for which the proposer gate already nudged header processing to obtain cert(r-2).
+    syncing_proposer_certificates: HashSet<Round>,
     /// Certificates waiting for the previous round certificate before being processed.
     pending_certificates: HashMap<Round, Vec<Certificate>>,
     /// For storing info of header infos in processing
@@ -186,6 +189,7 @@ impl Core {
                 gc_round: 0,
                 last_voted: HashMap::with_capacity(2 * gc_depth as usize),
                 pending_proposer_parents: HashMap::new(),
+                syncing_proposer_certificates: HashSet::new(),
                 pending_certificates: HashMap::new(),
                 processing_header_infos: HashMap::new(),
                 processing_header_proofs: HashMap::new(),
@@ -271,6 +275,7 @@ impl Core {
             gc_round: 0,
             last_voted: HashMap::with_capacity(2 * gc_depth as usize),
             pending_proposer_parents: HashMap::new(),
+            syncing_proposer_certificates: HashSet::new(),
             pending_certificates: HashMap::new(),
             processing_header_infos: HashMap::new(),
             processing_header_proofs: HashMap::new(),
@@ -435,7 +440,7 @@ impl Core {
             }
         let d_proofs_send = t.elapsed();
         debug!("process_own_header proof construction and sending time: {:?}", t.elapsed());
-        println!("    [own_header_original] setup={:?} serialize={:?} pad={:?} encode={:?} merkle={:?} proofs+send={:?} total={:?}",
+        debug!("    [own_header_original] setup={:?} serialize={:?} pad={:?} encode={:?} merkle={:?} proofs+send={:?} total={:?}",
             d_setup, d_ser, d_pad, d_encode, d_mtree, d_proofs_send, start_total.elapsed());
         debug!("process_own_header total time: {:?}", start_total.elapsed());
         Ok(())
@@ -581,14 +586,11 @@ impl Core {
         tokio::task::spawn_blocking(move || {
             let start_total = Instant::now();
 
-            let t_setup = Instant::now();
             let mut header_info = HeaderInfo::create_from_fast(&header);
             let data_shard_num = coding.data_shard_count();
             let parity_shard_num = coding.parity_shard_count();
             let payload = header.payload;
-            let d_setup = t_setup.elapsed();
 
-            let t_ser = Instant::now();
             let payload_bytes = match bincode::serialize(&payload) {
                 Ok(b) => b,
                 Err(e) => {
@@ -596,13 +598,11 @@ impl Core {
                     return;
                 }
             };
-            let d_ser = t_ser.elapsed();
             let mut payload_bytes = payload_bytes;
 
             let payload_len = payload_bytes.len();
             header_info.payload_len = payload_len;
 
-            let t_pad = Instant::now();
             let mut shard_len = (payload_len + data_shard_num - 1) / data_shard_num;
             if shard_len == 0 {
                 shard_len = 1;
@@ -611,25 +611,19 @@ impl Core {
                 shard_len += 64 - (shard_len % 64);
             }
             payload_bytes.resize(shard_len * (data_shard_num + parity_shard_num), 0);
-            let d_pad = t_pad.elapsed();
 
             let mut shards_vec: Vec<&mut [u8]> = payload_bytes.chunks_mut(shard_len).collect();
 
-            let t_encode = Instant::now();
             coding.encode(&mut shards_vec, rs_block_size, rs_block_threads).expect("wrong shard size");
-            let d_encode = t_encode.elapsed();
 
-            let t_mtree = Instant::now();
             let hashes: Vec<Digest> = shards_vec
                 .par_iter()
                 .map(|s| MerkleTree::digest(&**s))
                 .collect();
             let mtree = MerkleTree::from_hashes(hashes);
-            let d_mtree = t_mtree.elapsed();
 
             assert_eq!(committee.total_stake() as usize, mtree.leaf_count());
 
-            let t_proofs = Instant::now();
             let sorted_keys = &committee.sorted_keys;
             let self_index = sorted_keys.iter().position(|pk| pk == &name);
 
@@ -661,16 +655,14 @@ impl Core {
                     }
                 })
                 .collect();
-            let d_proofs = t_proofs.elapsed();
 
             let round = header_info.round;
-            println!("    [dispatch_own_header bg] setup={:?} serialize={:?} pad={:?} encode={:?} merkle={:?} proofs={:?} total={:?}",
-                d_setup, d_ser, d_pad, d_encode, d_mtree, d_proofs, start_total.elapsed());
 
             let _ = tx.blocking_send(OwnHeaderComputeResult {
                 header_info,
                 messages,
                 round,
+                build_total_ms: start_total.elapsed().as_millis(),
             });
         });
         Ok(())
@@ -709,35 +701,31 @@ impl Core {
                 _ => unreachable!(),
             }
         }
-        println!("    [handle_own_header_result] send={:?}", start.elapsed());
+        debug!(
+            "BENCH event=own_header_sent node={:?} round={} digest={:?} build_total_ms={} send_ms={}",
+            self.name,
+            result.round,
+            result.header_info.id,
+            result.build_total_ms,
+            start.elapsed().as_millis()
+        );
         Ok(())
     }
 
     async fn process_header_proof(&mut self, header_info_with_proof: &HeaderInfoWithProof) -> DagResult<()> {
-        let start = Instant::now();
         // debug!("Processing proof: {:?}", header_info_with_proof);
-        debug!(
-            "Header info with proof payload len: {}",
-            header_info_with_proof.proof.value().len()
-        );
         self.parent_info.entry(header_info_with_proof.id).or_insert((header_info_with_proof.round, header_info_with_proof.parent));
 
         self.processing_header_proofs
              .entry(header_info_with_proof.id)
              .or_insert(header_info_with_proof.clone());
         
-        let t_parent = Instant::now();
         if header_info_with_proof.round != 1 {
             let parent = self
                 .synchronizer
                 .get_parent(&header_info_with_proof.clone())
                 .await?;
-            debug!("get_parent time: {:?}", t_parent.elapsed());
             if parent.is_none() {
-                debug!(
-                    "Processing of {} suspended: missing parent",
-                    header_info_with_proof.id
-                );
                 return Ok(());
             }
         }
@@ -752,15 +740,13 @@ impl Core {
         self.store.write(hid.to_vec(), bytes).await;
 
         // If a reconstruction was waiting for this header's info, resume it now.
-        if let Some(root) = self.pending_reconstructions.remove(&header_info_with_proof.id) {
+        if let Some(_root) = self.pending_reconstructions.remove(&header_info_with_proof.id) {
             // clone header info to pass ownership into the async helper
             if let Err(e) = self.finalize_reconstruction(header_info_with_proof.clone()).await {
                 warn!("Failed to finalize pending reconstruction for {:?}: {}", header_info_with_proof.id, e);
             }
-            debug!("process_header_proof total time: {:?}", start.elapsed());
             return Ok(());
         }
-        debug!("process_header_proof total time: {:?}", start.elapsed());
         Ok(())
     }
 
@@ -770,11 +756,6 @@ impl Core {
     /// - Uses or_insert_with for lazy clone in processing_header_proofs cache
     
     async fn process_header_proof_optimized(&mut self, header_info_with_proof: &HeaderInfoWithProof) -> DagResult<()> {
-        let start = Instant::now();
-        debug!(
-            "Header info with proof payload len: {}",
-            header_info_with_proof.proof.value().len()
-        );
         self.parent_info.entry(header_info_with_proof.id).or_insert((header_info_with_proof.round, header_info_with_proof.parent));
 
         // 2c: Use or_insert_with for lazy clone — only clones on cache miss.
@@ -782,19 +763,13 @@ impl Core {
              .entry(header_info_with_proof.id)
              .or_insert_with(|| header_info_with_proof.clone());
 
-        let t_parent = Instant::now();
         if header_info_with_proof.round != 1 {
             // 2b: Pass header_info_with_proof directly — no unnecessary .clone().
             let parent = self
                 .synchronizer
                 .get_parent(header_info_with_proof)
                 .await?;
-            debug!("get_parent time: {:?}", t_parent.elapsed());
             if parent.is_none() {
-                debug!(
-                    "Processing of {} suspended: missing parent",
-                    header_info_with_proof.id
-                );
                 return Ok(());
             }
         }
@@ -818,10 +793,8 @@ impl Core {
             ).await {
                 warn!("Failed to finalize pending reconstruction for {:?}: {}", header_info_with_proof.id, e);
             }
-            debug!("process_header_proof_optimized total time: {:?}", start.elapsed());
             return Ok(());
         }
-        debug!("process_header_proof_optimized total time: {:?}", start.elapsed());
         Ok(())
     }
 
@@ -838,20 +811,110 @@ impl Core {
         if is_local_leader && parent.round > 1 {
             let required_cert_round = parent.round - 1;
             if !self.certificates.contains_key(&required_cert_round) {
-                self.pending_proposer_parents
+                self.sync_missing_proposer_certificate(
+                    required_cert_round,
+                    header_info_with_proof.parent,
+                ).await?;
+
+                let pending = self
+                    .pending_proposer_parents
                     .entry(required_cert_round)
-                    .or_insert_with(HashSet::new)
-                    .insert(parent);
-                debug!(
-                    "Deferring proposal for round {}: waiting for certificate round {}",
-                    propose_round,
-                    required_cert_round
-                );
+                    .or_insert_with(HashMap::new);
+                if let std::collections::hash_map::Entry::Vacant(entry) = pending.entry(parent.clone()) {
+                    entry.insert(Instant::now());
+                    debug!(
+                        "BENCH event=propose_deferred node={:?} propose_round={} parent_round={} parent_digest={:?} parent_origin={:?} wait_cert_round={}",
+                        self.name,
+                        propose_round,
+                        parent.round,
+                        parent.header_id,
+                        parent.origin,
+                        required_cert_round
+                    );
+                }
                 return Ok(());
             }
+            debug!(
+                "BENCH event=propose_ready node={:?} propose_round={} parent_round={} parent_digest={:?} parent_origin={:?} wait_cert_round={} wait_ms=0 source=cert_present",
+                self.name,
+                propose_round,
+                parent.round,
+                parent.header_id,
+                parent.origin,
+                required_cert_round
+            );
         }
 
         self.notify_proposer(parent).await
+    }
+
+    async fn sync_missing_proposer_certificate(
+        &mut self,
+        required_cert_round: Round,
+        required_header_id: Digest,
+    ) -> DagResult<()> {
+        if !self.syncing_proposer_certificates.insert(required_cert_round) {
+            return Ok(());
+        }
+
+        match self.store.read(required_header_id.to_vec()).await? {
+            Some(bytes) => match bincode::deserialize::<HeaderInfoWithProof>(&bytes) {
+                Ok(header_info_with_proof)
+                    if header_info_with_proof.round == required_cert_round
+                        && header_info_with_proof.id == required_header_id =>
+                {
+                    debug!(
+                        "BENCH event=propose_cert_sync node={:?} wait_cert_round={} digest={:?} origin={:?} source=local_header_reprocess",
+                        self.name,
+                        required_cert_round,
+                        required_header_id,
+                        header_info_with_proof.author
+                    );
+
+                    if let Err(e) = self
+                        .tx_primary
+                        .try_send(PrimaryMessage::HeaderInfoWithProof(header_info_with_proof))
+                    {
+                        self.syncing_proposer_certificates.remove(&required_cert_round);
+                        warn!(
+                            "Failed to enqueue proposer certificate sync for round {}: {}",
+                            required_cert_round,
+                            e
+                        );
+                    }
+                }
+                Ok(header_info_with_proof) => {
+                    self.syncing_proposer_certificates.remove(&required_cert_round);
+                    warn!(
+                        "Stored header mismatch while syncing proposer certificate: expected round {} digest {:?}, got round {} digest {:?}",
+                        required_cert_round,
+                        required_header_id,
+                        header_info_with_proof.round,
+                        header_info_with_proof.id
+                    );
+                }
+                Err(e) => {
+                    self.syncing_proposer_certificates.remove(&required_cert_round);
+                    warn!(
+                        "Failed to deserialize header while syncing proposer certificate for round {} digest {:?}: {}",
+                        required_cert_round,
+                        required_header_id,
+                        e
+                    );
+                }
+            },
+            None => {
+                self.syncing_proposer_certificates.remove(&required_cert_round);
+                debug!(
+                    "BENCH event=propose_cert_sync node={:?} wait_cert_round={} digest={:?} source=missing_header",
+                    self.name,
+                    required_cert_round,
+                    required_header_id
+                );
+            }
+        }
+
+        Ok(())
     }
 
     async fn notify_proposer(&mut self, parent: ProposerParent) -> DagResult<()> {
@@ -900,7 +963,17 @@ impl Core {
             return Ok(());
         };
 
-        for parent in parents {
+        for (parent, started_at) in parents {
+            debug!(
+                "BENCH event=propose_released node={:?} propose_round={} parent_round={} parent_digest={:?} parent_origin={:?} wait_cert_round={} wait_ms={}",
+                self.name,
+                parent.round + 1,
+                parent.round,
+                parent.header_id,
+                parent.origin,
+                certified_round,
+                started_at.elapsed().as_millis()
+            );
             self.notify_proposer(parent).await?;
         }
 
@@ -1031,7 +1104,7 @@ impl Core {
                     let d_finalize = t_finalize.elapsed();
                     debug!("finalize_reconstruction time: {:?}", t_finalize.elapsed());
 
-                    println!("    [original final echo] validate={:?} agg={:?} reconstruct={:?} convert={:?} hash={:?} tree={:?} finalize={:?} total={:?}",
+                    debug!("    [original final echo] validate={:?} agg={:?} reconstruct={:?} convert={:?} hash={:?} tree={:?} finalize={:?} total={:?}",
                         d_validate, d_agg, d_reconstruct, d_convert, d_hash, d_tree, d_finalize, t_total.elapsed());
                 }
             }
@@ -1085,14 +1158,11 @@ impl Core {
     /// - Calls finalize_reconstruction_optimized with small fields only.
     #[allow(dead_code)]
     async fn process_echo_optimized(&mut self, echo: Echo) -> DagResult<()> {
-        let t_total = Instant::now();
         let proof = echo.proof;
         let author = echo.author;
         let id = echo.id;
 
-        let t_validate = Instant::now();
         let valid = self.committee.index_of(&author) == Some(proof.index()) && proof.validate(self.committee.total_stake() as usize);
-        let d_validate = t_validate.elapsed();
 
         if valid {
             if !self.processing_echo_aggregators.contains_key(&id) {
@@ -1101,55 +1171,47 @@ impl Core {
                     .or_insert(EchoAggregator::new());
             }
             if let Some(echo_aggregator) = self.processing_echo_aggregators.get_mut(&id) {
-                let t_agg = Instant::now();
                 let agg_result = echo_aggregator.append(author, proof, &self.committee)?;
-                let d_agg = t_agg.elapsed();
 
                 if let Some((root, mut leaf_values)) = agg_result {
                     // Dispatch reconstruction to background so the event loop stays responsive.
                     let coding = Arc::clone(&self.coding);
-                    let rs_block_size = self.rs_block_size;
-                    let rs_block_threads = self.rs_block_threads;
-                    let tx = self.tx_reconstruction_result.clone();
-                    let recon_id = id;
+	                    let rs_block_size = self.rs_block_size;
+	                    let rs_block_threads = self.rs_block_threads;
+	                    let tx = self.tx_reconstruction_result.clone();
+	                    let recon_id = id;
 
-                    tokio::task::spawn_blocking(move || {
-                        let t_total = Instant::now();
+	                    tokio::task::spawn_blocking(move || {
+	                        if let Err(e) = coding.reconstruct_shards(&mut leaf_values[..], rs_block_size, rs_block_threads) {
+	                            warn!("Reconstruction failed: {:?}", e);
+	                            let _ = tx.blocking_send(ReconstructionResult {
+	                                id: recon_id,
+	                                root,
+	                                success: false,
+	                            });
+	                            return;
+	                        }
 
-                        let t_reconstruct = Instant::now();
-                        if let Err(e) = coding.reconstruct_shards(&mut leaf_values[..], rs_block_size, rs_block_threads) {
-                            warn!("Reconstruction failed: {:?}", e);
-                            let _ = tx.blocking_send(ReconstructionResult { id: recon_id, root, success: false });
-                            return;
-                        }
-                        let d_reconstruct = t_reconstruct.elapsed();
-
-                        let t_hash = Instant::now();
-                        let hashes: Vec<Digest> = leaf_values
-                            .par_iter()
-                            .map(|opt| {
+	                        let hashes: Vec<Digest> = leaf_values
+	                            .par_iter()
+	                            .map(|opt| {
                                 let shard = opt.as_ref().expect("reconstruct_shards produced all shards");
                                 MerkleTree::digest(&**shard)
-                            })
-                            .collect();
-                        let d_hash = t_hash.elapsed();
+	                            })
+	                            .collect();
 
-                        let t_tree = Instant::now();
-                        let mtree = MerkleTree::from_hashes(hashes);
-                        let d_tree = t_tree.elapsed();
+	                        let mtree = MerkleTree::from_hashes(hashes);
 
-                        let success = *mtree.root_hash() == root;
+	                        let success = *mtree.root_hash() == root;
 
-                        println!("    [reconstruction bg] reconstruct={:?} hash={:?} tree={:?} success={} total={:?}",
-                            d_reconstruct, d_hash, d_tree, success, t_total.elapsed());
-
-                        let _ = tx.blocking_send(ReconstructionResult { id: recon_id, root, success });
-                    });
-
-                    debug!("echo_optimized: dispatched reconstruction for {:?}", id);
-                } else {
-                    debug!("echo_optimized: validate={:?} agg={:?} total={:?}", d_validate, d_agg, t_total.elapsed());
-                }
+                        let _ = tx.blocking_send(ReconstructionResult {
+	                            id: recon_id,
+	                            root,
+	                            success,
+	                        });
+	                    });
+	                } else {
+	                }
             }
         }
         Ok(())
@@ -1193,34 +1255,18 @@ impl Core {
             }
         };
 
-        let t_finalize = Instant::now();
         self.finalize_reconstruction_optimized(header_id, round, origin).await?;
-        println!("    [handle_reconstruction_result] finalize={:?}", t_finalize.elapsed());
         Ok(())
     }
 
     #[async_recursion]
     async fn process_certificate(&mut self, certificate: Certificate) -> DagResult<()> {
-        debug!("Processing cert {:?}", certificate);
-
         // Ensure we have all the ancestor of this certificate yet. If we don't, the synchronizer will gather it and trigger re-processing of this certificate.
-        // let t_deliver = Instant::now();
         if !self.synchronizer.deliver_certificate(&certificate).await? {
-            // debug!("deliver_certificate time: {:?}", t_deliver.elapsed());
-            debug!(
-                "Processing of {:?} suspended: missing parent",
-                certificate
-            );
             return Ok(());
         }
-        // debug!("deliver_certificate time: {:?}", t_deliver.elapsed());
 
         if self.defer_certificate_until_previous(certificate.clone()) {
-            debug!(
-                "Processing of {:?} suspended: missing previous certificate round {}",
-                certificate,
-                certificate.round - 1
-            );
             return Ok(());
         }
 
@@ -1236,6 +1282,7 @@ impl Core {
         // debug!("store certificate time: {:?}", t_store.elapsed());
 
         self.certificates.entry(certificate.round).or_insert(certificate.clone());
+        self.syncing_proposer_certificates.remove(&certificate.round);
         self.release_deferred_proposer_parents(certificate.round).await?;
 
         let decide = Decide::new(certificate.header_id, certificate.round, &certificate.origin, &self.name).await;
@@ -1267,24 +1314,13 @@ impl Core {
     #[allow(dead_code)]
     #[async_recursion]
     async fn process_certificate_optimized(&mut self, certificate: Certificate) -> DagResult<()> {
-        debug!("Processing cert (optimized) {:?}", certificate);
-
         // Look up parent from in-memory map to avoid store read+deserialize.
         let parent = self.parent_info.get(&certificate.header_id).map(|(_, p)| *p);
         if !self.synchronizer.deliver_certificate_optimized(&certificate, parent).await? {
-            debug!(
-                "Processing of {:?} suspended: missing parent",
-                certificate
-            );
             return Ok(());
         }
 
         if self.defer_certificate_until_previous(certificate.clone()) {
-            debug!(
-                "Processing of {:?} suspended: missing previous certificate round {}",
-                certificate,
-                certificate.round - 1
-            );
             return Ok(());
         }
 
@@ -1299,6 +1335,7 @@ impl Core {
 
         // Store in local map — move certificate in (no extra clone).
         self.certificates.entry(round).or_insert(certificate);
+        self.syncing_proposer_certificates.remove(&round);
         self.release_deferred_proposer_parents(round).await?;
 
         // 4a: Build decide from the extracted small fields.
@@ -1501,6 +1538,7 @@ impl Core {
                 self.processing_header_proofs
                     .retain(|_, h| &h.round >= &gc_round);
                 self.pending_proposer_parents.retain(|k, _| k >= &gc_round);
+                self.syncing_proposer_certificates.retain(|k| k >= &gc_round);
                 self.pending_certificates.retain(|k, _| k >= &gc_round);
                 self.cancel_handlers.retain(|k, _| k >= &gc_round);
                 // let _ = self.synchronizer.garbage_collect(gc_round).await;
