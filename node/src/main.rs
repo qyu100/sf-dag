@@ -94,12 +94,15 @@ async fn main() -> Result<()> {
 // Runs either a worker or a primary.
 async fn run(matches: &ArgMatches<'_>) -> Result<()> {
     let ed_key_file = matches.value_of("edkeys").unwrap();
+    let bls_key_file = matches.value_of("blskeys").unwrap();
     let committee_file = matches.value_of("committee").unwrap();
     let parameters_file = matches.value_of("parameters");
     let store_path = matches.value_of("store").unwrap();
 
     // Read the committee and node's keypair from file.
     let ed_keypair = KeyPair::import(ed_key_file).context("Failed to load the node's keypair")?;
+    let bls_keypair =
+        BlsKeyPair::import(bls_key_file).context("Failed to load the node's BLS keypair")?;
 
     let comm = Comm::import(committee_file).context("Failed to load the committee information")?;
 
@@ -127,6 +130,7 @@ async fn run(matches: &ArgMatches<'_>) -> Result<()> {
             let (tx_consensus_header, rx_consensus_header) = channel(CHANNEL_CAPACITY);
             Primary::spawn(
                 ed_keypair,
+                bls_keypair,
                 committee.clone(),
                 parameters.clone(),
                 store,

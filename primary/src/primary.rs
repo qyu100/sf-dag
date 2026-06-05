@@ -6,7 +6,7 @@ use crate::garbage_collector::GarbageCollector;
 use crate::header_waiter::HeaderWaiter;
 use crate::helper::Helper;
 use crate::messages::{
-    Certificate, Decide, Echo, Header, HeaderInfo, HeaderInfoWithCertificate, HeaderInfoWithProof,
+    Certificate, Echo, Header, HeaderInfo, HeaderInfoWithCertificate, HeaderInfoWithProof,
     HeaderWithCertificate, Ready, ShardRequest, ShardResponse, Timeout,
 };
 use crate::proposer::Proposer;
@@ -14,8 +14,8 @@ use crate::synchronizer::Synchronizer;
 use crate::worker::Worker;
 use async_trait::async_trait;
 use bytes::Bytes;
-use config::{Committee, KeyPair, Parameters, WorkerId};
-use crypto::{Digest, PublicKey, SignatureService};
+use config::{BlsKeyPair, Committee, KeyPair, Parameters, WorkerId};
+use crypto::{BlsSignatureService, Digest, PublicKey, SignatureService};
 use futures::sink::SinkExt as _;
 use log::info;
 use network::{MessageHandler, Receiver as NetworkReceiver, Writer};
@@ -40,7 +40,6 @@ pub enum PrimaryMessage {
     Ready(Ready),
     CertificatesRequest(Vec<Digest>, /* requestor */ PublicKey),
     HeaderInfoWithProof(HeaderInfoWithProof),
-    Decide(Decide),
     ShardRequest(ShardRequest),
     ShardResponse(ShardResponse),
 }
@@ -55,7 +54,6 @@ pub(crate) enum PrimaryMessageRef<'a> {
     Ready(&'a Ready),
     CertificatesRequest(&'a Vec<Digest>, &'a PublicKey),
     HeaderInfoWithProof(&'a HeaderInfoWithProof),
-    Decide(&'a Decide),
     ShardRequest(&'a ShardRequest),
     ShardResponse(&'a ShardResponse),
 }
@@ -101,6 +99,7 @@ pub struct Primary;
 impl Primary {
     pub fn spawn(
         keypair: KeyPair,
+        bls_keypair: BlsKeyPair,
         committee: Committee,
         parameters: Parameters,
         store: Store,
@@ -127,6 +126,7 @@ impl Primary {
         // Parse the public and secret key of this authority.
         let name = keypair.name;
         let secret = keypair.secret;
+        let bls_secret = bls_keypair.secret;
 
         // Atomic variable use to synchronizer all tasks with the latest consensus round. This is only
         // used for cleanup. The only tasks that write into this variable is `GarbageCollector`.
@@ -192,6 +192,7 @@ impl Primary {
 
         // The `SignatureService` is used to require signatures on specific digests.
         let signature_service = SignatureService::new(secret);
+        let bls_signature_service = BlsSignatureService::new(bls_secret);
         // The `Core` receives and handles headers, votes, and certificates from the other primaries.
         Core::spawn(
             name,
@@ -199,6 +200,7 @@ impl Primary {
             store.clone(),
             synchronizer,
             signature_service.clone(),
+            bls_signature_service,
             consensus_round.clone(),
             parameters.gc_depth,
             tx_primary_messages,

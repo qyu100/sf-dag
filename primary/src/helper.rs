@@ -10,7 +10,7 @@ use tokio::sync::mpsc::Receiver;
 
 /// bincode variant index for `PrimaryMessage::HeaderInfoWithProof`.
 /// PrimaryMessage variants: Timeout=0, Echo=1, Ready=2, CertificatesRequest=3,
-/// HeaderInfoWithProof=4, Decide=5, ShardRequest=6, ShardResponse=7.
+/// HeaderInfoWithProof=4, ShardRequest=5, ShardResponse=6.
 const HIWP_VARIANT_INDEX: u32 = 4;
 
 /// A task dedicated to help other authorities by replying to their certificates requests.

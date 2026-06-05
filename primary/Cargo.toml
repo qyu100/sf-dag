@@ -22,6 +22,7 @@ tiny-keccak = { version = "2.0.1", features = ["sha3"]}
 byteorder = "1.3.2"
 rayon = "1.7"
 blake3 = "1.4"
+blsttc = { git = "https://github.com/naitik-supraoracles/blsttc-supra-for-moonshot.git", rev = "4ca8a9d97893e2dfd74eee427400ac119e3e9dd9" }
 
 crypto = { path = "../crypto" }
 store = { path = "../store" }
@@ -33,7 +34,6 @@ hex_fmt = "0.3.0"
 
 [dev-dependencies]
 rand = "0.7.3"
-blsttc = { git = "https://github.com/naitik-supraoracles/blsttc-supra-for-moonshot.git", rev = "4ca8a9d97893e2dfd74eee427400ac119e3e9dd9" }
 
 [features]
 benchmark = []

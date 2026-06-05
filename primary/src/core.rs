@@ -4,21 +4,22 @@ use crate::merkle::{Proof, MerkleTree};
 use hex_fmt::HexList;
 use crate::coding::Coding;
 use crate::aggregators::{
-    EchoAggregator, ReadyAggregator, ReadyThreshold, DecideAggregator, TimeoutAggregator
+    EchoAggregator, ReadyAggregator, ReadyThreshold, TimeoutAggregator
 };
 use crate::error::{DagError, DagResult};
 use crate::messages::{
-    Certificate, Header, Ready, Timeout, TimeoutCert, HeaderInfoWithProof, Echo, Decide,
+    Certificate, Header, Ready, Timeout, TimeoutCert, HeaderInfoWithProof, Echo,
     ProposerParent, ShardRequest, ShardResponse
 };
 use crate::primary::{HeaderType, PrimaryMessage, PrimaryMessageRef, Round};
 use crate::synchronizer::Synchronizer;
 use crate::{ConsensusMessage, HeaderInfo, HeaderMessage};
 use async_recursion::async_recursion;
+use blsttc::SignatureShareG1;
 use bytes::Bytes;
 use config::Committee;
 use crypto::Hash as _;
-use crypto::{Digest, PublicKey, SignatureService};
+use crypto::{BlsSignatureService, Digest, PublicKey, SignatureService};
 use log::{debug, error, info, warn};
 use network::{CancelHandler, ReliableSender};
 use std::collections::{HashMap, HashSet};
@@ -27,7 +28,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use store::Store;
 use tokio::sync::mpsc::{Receiver, Sender};
-use std::collections::VecDeque;
 use std::hash::{Hash, Hasher};
 use std::collections::hash_map::DefaultHasher;
 use std::time::{Duration, Instant};
@@ -63,6 +63,8 @@ pub struct Core {
     synchronizer: Synchronizer,
     /// Service to sign headers.
     signature_service: SignatureService,
+    /// Service to sign Echo and Ready vote shares.
+    bls_signature_service: BlsSignatureService,
     /// The current consensus round (used for cleanup).
     consensus_round: Arc<AtomicU64>,
     /// The depth of the garbage collector.
@@ -91,7 +93,7 @@ pub struct Core {
     gc_round: Round,
     /// The authors of the last voted headers.
     last_voted: HashMap<Round, HashSet<PublicKey>>,
-    /// Parent notifications waiting for cert(r-2) before a local leader can propose.
+    /// Parent notifications waiting for cert(r-3) before a local leader can propose.
     pending_proposer_parents: HashMap<Round, HashSet<ProposerParent>>,
     /// Certificates waiting for the previous round certificate before being processed.
     pending_certificates: HashMap<Round, Vec<Certificate>>,
@@ -106,7 +108,7 @@ pub struct Core {
     /// The RBC instances for which this node already broadcast Ready.
     sent_readies: HashSet<(Round, PublicKey)>,
     /// Ready quorums that are waiting for local availability verification.
-    ready_quorums: HashMap<AvailabilityKey, (Round, PublicKey)>,
+    ready_quorums: HashMap<AvailabilityKey, (Round, PublicKey, Vec<u128>, SignatureShareG1)>,
     /// RBC payload roots that passed local erasure-code reconstruction.
     reconstruction_ok: HashSet<AvailabilityKey>,
     /// RBC payload roots with an in-flight reconstruction task.
@@ -117,11 +119,9 @@ pub struct Core {
     requested_shards: HashSet<(Digest, Digest, usize)>,
     /// Certificates already emitted for an RBC instance.
     formed_certificates: HashSet<AvailabilityKey>,
-    /// For storing info of decide aggregators in processing
-    processing_decide_aggregators: HashMap<Digest, DecideAggregator>,
     /// For storing info of processed certificates
     processed_certs: HashMap<Round, HashSet<PublicKey>>,
-    /// Rounds pending commit because certificate was missing at commit time
+    /// Rounds pending commit because a certificate or ancestor chain is incomplete.
     pending_commit_rounds: HashSet<Round>,
     /// A network sender to send the batches to the other workers.
     network: ReliableSender,
@@ -161,6 +161,7 @@ impl Core {
         store: Store,
         synchronizer: Synchronizer,
         signature_service: SignatureService,
+        bls_signature_service: BlsSignatureService,
         consensus_round: Arc<AtomicU64>,
         gc_depth: Round,
         tx_primary: Sender<PrimaryMessage>,
@@ -188,6 +189,7 @@ impl Core {
                 store,
                 synchronizer,
                 signature_service,
+                bls_signature_service,
                 consensus_round,
                 gc_depth,
                 tx_primary,
@@ -215,7 +217,6 @@ impl Core {
                 availability_proofs: HashMap::new(),
                 requested_shards: HashSet::new(),
                 formed_certificates: HashSet::new(),
-                processing_decide_aggregators: HashMap::new(),
                 processed_certs: HashMap::with_capacity(2 * gc_depth as usize),
                 network: ReliableSender::new(),
                 cancel_handlers: HashMap::with_capacity(2 * gc_depth as usize),
@@ -255,6 +256,7 @@ impl Core {
         store: Store,
         synchronizer: Synchronizer,
         signature_service: SignatureService,
+        bls_signature_service: BlsSignatureService,
         consensus_round: Arc<AtomicU64>,
         gc_depth: Round,
         tx_primary: Sender<PrimaryMessage>,
@@ -280,6 +282,7 @@ impl Core {
             store,
             synchronizer,
             signature_service,
+            bls_signature_service,
             consensus_round,
             gc_depth,
             tx_primary,
@@ -307,7 +310,6 @@ impl Core {
             availability_proofs: HashMap::new(),
             requested_shards: HashSet::new(),
             formed_certificates: HashSet::new(),
-            processing_decide_aggregators: HashMap::new(),
             processed_certs: HashMap::with_capacity(2 * gc_depth as usize),
             network: ReliableSender::new(),
             cancel_handlers: HashMap::with_capacity(2 * gc_depth as usize),
@@ -552,8 +554,10 @@ impl Core {
                 let hiwp = HeaderInfoWithProof {
                     author: header_info.author,
                     round: header_info.round,
+                    payload: header_info.payload,
                     parent: header_info.parent,
                     id: header_info.id,
+                    signature: header_info.signature.clone(),
                     proof,
                     payload_len: header_info.payload_len,
                 };
@@ -676,8 +680,10 @@ impl Core {
                     let hiwp = HeaderInfoWithProof {
                         author: header_info.author,
                         round: header_info.round,
+                        payload: header_info.payload,
                         parent: header_info.parent,
                         id: header_info.id,
+                        signature: header_info.signature.clone(),
                         proof,
                         payload_len: header_info.payload_len,
                     };
@@ -746,6 +752,7 @@ impl Core {
 
     async fn process_header_proof(&mut self, header_info_with_proof: &HeaderInfoWithProof) -> DagResult<()> {
         let start = Instant::now();
+        header_info_with_proof.verify(&self.committee)?;
         // debug!("Processing proof: {:?}", header_info_with_proof);
         debug!(
             "Header info with proof payload len: {}",
@@ -802,6 +809,7 @@ impl Core {
     
     async fn process_header_proof_optimized(&mut self, header_info_with_proof: &HeaderInfoWithProof) -> DagResult<()> {
         let start = Instant::now();
+        header_info_with_proof.verify(&self.committee)?;
         debug!(
             "Header info with proof payload len: {}",
             header_info_with_proof.proof.value().len()
@@ -1037,7 +1045,9 @@ impl Core {
         if !self.reconstruction_ok.contains(&key) {
             return Ok(());
         }
-        let Some((round, origin)) = self.ready_quorums.get(&key).copied() else {
+        let Some((round, origin, signer_bits, aggregate_signature)) =
+            self.ready_quorums.get(&key).cloned()
+        else {
             return Ok(());
         };
         if !self.formed_certificates.insert(key) {
@@ -1046,8 +1056,10 @@ impl Core {
 
         let certificate = Certificate {
             header_id: id,
+            root_hash: root,
             round,
             origin,
+            votes: (signer_bits, aggregate_signature),
         };
         self.process_certificate_optimized(certificate).await
     }
@@ -1064,7 +1076,15 @@ impl Core {
             return Ok(());
         }
 
-        let ready = Ready::new(id, round, &origin, &self.name, root).await;
+        let ready = Ready::new(
+            id,
+            round,
+            &origin,
+            &self.name,
+            root,
+            &mut self.bls_signature_service,
+        )
+        .await;
         let addresses = self
             .committee
             .others_primaries(&self.name)
@@ -1091,7 +1111,12 @@ impl Core {
             .or_insert_with(HashSet::new)
             .insert(header_info_with_proof.author)
         {
-            let echo = Echo::new(header_info_with_proof, &self.name).await;
+            let echo = Echo::new(
+                header_info_with_proof,
+                &self.name,
+                &mut self.bls_signature_service,
+            )
+            .await;
             let addresses = self
                 .committee
                 .others_primaries(&self.name)
@@ -1196,8 +1221,10 @@ impl Core {
 
         let certificate = Certificate {
             header_id: header_info_with_proof.id,
+            root_hash: *header_info_with_proof.proof.root_hash(),
             round: header_info_with_proof.round,
             origin: header_info_with_proof.author,
+            votes: (Vec::new(), SignatureShareG1::default()),
         };
 
         self.process_certificate(certificate).await?;
@@ -1212,6 +1239,8 @@ impl Core {
     #[allow(dead_code)]
     async fn process_echo_optimized(&mut self, echo: Echo) -> DagResult<()> {
         let t_total = Instant::now();
+        echo.verify(&self.committee)?;
+        let signature = echo.signature;
         let proof = echo.proof;
         let author = echo.author;
         let id = echo.id;
@@ -1235,7 +1264,7 @@ impl Core {
                 .processing_echo_aggregators
                 .get_mut(&id)
                 .expect("echo aggregator exists")
-                .append(author, proof, &self.committee)?;
+                .append(author, proof, signature, id, round, origin, &self.committee)?;
             let d_agg = t_agg.elapsed();
 
             if let Some((root, leaf_values)) = agg_result {
@@ -1267,7 +1296,7 @@ impl Core {
             Some(ReadyThreshold::Relay(root)) => {
                 self.send_ready(ready.id, ready.round, ready.origin, root).await?;
             }
-            Some(ReadyThreshold::Quorum(root)) => {
+            Some(ReadyThreshold::Quorum(root, signer_bits, aggregate_signature)) => {
                 self.send_ready(ready.id, ready.round, ready.origin, root).await?;
                 let (round, origin) = self
                     .processing_header_proofs
@@ -1276,7 +1305,7 @@ impl Core {
                     .unwrap_or((ready.round, ready.origin));
                 self.ready_quorums
                     .entry((ready.id, root))
-                    .or_insert((round, origin));
+                    .or_insert((round, origin, signer_bits, aggregate_signature));
                 self.request_availability_shards(ready.id, root).await?;
                 self.try_start_reconstruction(ready.id, root);
                 self.maybe_form_certificate(ready.id, root).await?;
@@ -1356,8 +1385,10 @@ impl Core {
 
         let certificate = Certificate {
             header_id,
+            root_hash: Digest::default(),
             round,
             origin: author,
+            votes: (Vec::new(), SignatureShareG1::default()),
         };
 
         self.process_certificate_optimized(certificate).await?;
@@ -1379,63 +1410,7 @@ impl Core {
 
     #[async_recursion]
     async fn process_certificate(&mut self, certificate: Certificate) -> DagResult<()> {
-        debug!("Processing cert {:?}", certificate);
-
-        // Ensure we have all the ancestor of this certificate yet. If we don't, the synchronizer will gather it and trigger re-processing of this certificate.
-        // let t_deliver = Instant::now();
-        if !self.synchronizer.deliver_certificate(&certificate).await? {
-            // debug!("deliver_certificate time: {:?}", t_deliver.elapsed());
-            debug!(
-                "Processing of {:?} suspended: missing parent",
-                certificate
-            );
-            return Ok(());
-        }
-        // debug!("deliver_certificate time: {:?}", t_deliver.elapsed());
-
-        if self.defer_certificate_until_previous(certificate.clone()) {
-            debug!(
-                "Processing of {:?} suspended: missing previous certificate round {}",
-                certificate,
-                certificate.round - 1
-            );
-            return Ok(());
-        }
-
-        if self.pending_commit_rounds.contains(&certificate.round) {
-            self.commit(certificate.round).await?;
-        }
-        
-        // Store the certificate.
-        // let t_store = Instant::now();
-        // let bytes = bincode::serialize(&certificate).expect("Failed to serialize certificate");
-        // self.store.write(certificate.digest().to_vec(), bytes).await;
-        // debug!("certificate length: {}", bytes.len());
-        // debug!("store certificate time: {:?}", t_store.elapsed());
-
-        self.certificates.entry(certificate.round).or_insert(certificate.clone());
-        self.release_deferred_proposer_parents(certificate.round).await?;
-
-        let decide = Decide::new(certificate.header_id, certificate.round, &certificate.origin, &self.name).await;
-        self.process_decide(&decide).await?;
-
-        let addresses = self
-            .committee
-            .others_primaries(&self.name)
-            .iter()
-            .map(|(_, x)| x.primary_to_primary)
-            .collect();
-        let bytes = bincode::serialize(&PrimaryMessage::Decide(decide.clone()))
-            .expect("Failed to serialize our own decide");
-        let handlers = self.network.broadcast(addresses, Bytes::from(bytes)).await;
-        self.cancel_handlers
-            .entry(certificate.round)
-            .or_insert_with(Vec::new)
-            .extend(handlers);
-
-        self.release_deferred_certificates(certificate.round).await?;
-
-        Ok(())
+        self.process_certificate_optimized(certificate).await
     }
 
     /// Optimized version of process_certificate:
@@ -1446,6 +1421,7 @@ impl Core {
     #[async_recursion]
     async fn process_certificate_optimized(&mut self, certificate: Certificate) -> DagResult<()> {
         debug!("Processing cert (optimized) {:?}", certificate);
+        certificate.verify(&self.committee)?;
 
         // Look up parent from in-memory map to avoid store read+deserialize.
         let parent = self.parent_info.get(&certificate.header_id).map(|(_, p)| *p);
@@ -1466,60 +1442,15 @@ impl Core {
             return Ok(());
         }
 
-        if self.pending_commit_rounds.contains(&certificate.round) {
-            self.commit(certificate.round).await?;
-        }
-
         // Extract small Copy/Clone-cheap fields before moving the certificate.
-        let header_id = certificate.header_id;
         let round = certificate.round;
-        let origin = certificate.origin;
 
         // Store in local map — move certificate in (no extra clone).
         self.certificates.entry(round).or_insert(certificate);
         self.release_deferred_proposer_parents(round).await?;
-
-        // 4a: Build decide from the extracted small fields.
-        let decide = Decide::new(header_id, round, &origin, &self.name).await;
-        self.process_decide(&decide).await?;
-
-        let addresses = self
-            .committee
-            .others_primaries(&self.name)
-            .iter()
-            .map(|(_, x)| x.primary_to_primary)
-            .collect();
-        // 4a: Move decide into serialization (no clone needed).
-        let bytes = bincode::serialize(&PrimaryMessage::Decide(decide))
-            .expect("Failed to serialize our own decide");
-        let handlers = self.network.broadcast(addresses, Bytes::from(bytes)).await;
-        self.cancel_handlers
-            .entry(round)
-            .or_insert_with(Vec::new)
-            .extend(handlers);
-
+        self.commit(round).await?;
+        self.try_commit_pending_rounds().await?;
         self.release_deferred_certificates(round).await?;
-
-        Ok(())
-    }
-
-    #[async_recursion]
-    async fn process_decide(&mut self, decide: &Decide) -> DagResult<()> {
-        // debug!("Processing {:?}", decide);
-
-        if !self.processing_decide_aggregators.contains_key(&decide.id) {
-            self.processing_decide_aggregators
-                .entry(decide.id.clone())
-                .or_insert(DecideAggregator::new());
-        }
-        if let Some(decide_aggregator) = self.processing_decide_aggregators.get_mut(&decide.id) {
-            // Call append() while holding a mutable borrow, capture the result and drop the borrow
-            let decide_quorum = decide_aggregator.append(&decide, &self.committee)?;
-            
-            if decide_quorum.is_some() {
-                self.commit(decide.round).await?;
-            }
-        }
 
         Ok(())
     }
@@ -1529,42 +1460,76 @@ impl Core {
             return Ok(());
         }
 
-        // Parent has been put in self.certificates.
         let certificate = match self.certificates.get(&round) {
             Some(c) => c.clone(),
             None => {
-                // Record the round so we can attempt commit again when the certificate arrives.
                 self.pending_commit_rounds.insert(round);
                 return Ok(());
             }
         };
 
-        let mut to_commit = VecDeque::new();
+        let mut to_commit = Vec::new();
         let mut cur = certificate.header_id;
-        to_commit.push_front(cur.clone());
-        for r in (self.last_committed_round + 1..=round - 1).rev() {
-            
-            let cur_info = match self.parent_info.get(&cur).cloned() {
-                Some(info) => info,
-                None => break, // To do.
-            };
-            let (_cur_round, parent_digest) = cur_info;
+        let mut cur_round = round;
 
-            let parent_info = match self.parent_info.get(&parent_digest).cloned() {
-                Some(info) => info,
-                None => break, // To do.
+        while cur_round > self.last_committed_round {
+            let Some(cur_certificate) = self.certificates.get(&cur_round) else {
+                self.pending_commit_rounds.insert(round);
+                return Ok(());
             };
-            let (parent_round, _) = parent_info;
+            if cur_certificate.header_id != cur {
+                self.pending_commit_rounds.insert(round);
+                return Ok(());
+            }
 
-            to_commit.push_front(parent_digest.clone());
+            to_commit.push((cur_round, cur));
+
+            let Some((_stored_round, parent_digest)) = self.parent_info.get(&cur).cloned() else {
+                if cur_round <= 1 {
+                    break;
+                }
+                self.pending_commit_rounds.insert(round);
+                return Ok(());
+            };
+
+            if parent_digest == Digest::default() {
+                if cur_round <= 1 {
+                    break;
+                } else {
+                    self.pending_commit_rounds.insert(round);
+                    return Ok(());
+                }
+            }
+
+            let Some((parent_round, _)) = self.parent_info.get(&parent_digest).cloned() else {
+                self.pending_commit_rounds.insert(round);
+                return Ok(());
+            };
 
             cur = parent_digest;
+            cur_round = parent_round;
         }
-        self.last_committed_round = round;
-        // If parent is missing, to do.
-        while let Some(header_id) = to_commit.pop_front() {
+        while let Some((committed_round, header_id)) = to_commit.pop() {
+            if committed_round <= self.last_committed_round {
+                continue;
+            }
             info!("Committed {:?} ", header_id);
-            // debug!("round {:?} committed", round);
+            self.last_committed_round = committed_round;
+        }
+        Ok(())
+    }
+
+    #[async_recursion]
+    async fn try_commit_pending_rounds(&mut self) -> DagResult<()> {
+        let mut rounds: Vec<_> = self.pending_commit_rounds.iter().copied().collect();
+        rounds.sort_unstable();
+        for round in rounds {
+            if round <= self.last_committed_round {
+                self.pending_commit_rounds.remove(&round);
+                continue;
+            }
+            self.pending_commit_rounds.remove(&round);
+            self.commit(round).await?;
         }
         Ok(())
     }
@@ -1583,7 +1548,7 @@ impl Core {
             self.gc_round <= header_info_with_proof.round,
             DagError::TooOld(header_info_with_proof.id, header_info_with_proof.round)
         );
-        Ok(())
+        header_info_with_proof.verify(&self.committee)
     }
 
     fn sanitize_echo(&mut self, echo: &Echo) -> DagResult<()> {
@@ -1646,9 +1611,6 @@ impl Core {
                                 error => error
                             }
                         },
-                        PrimaryMessage::Decide(decide) => {
-                            self.process_decide(&decide).await
-                        },
                         PrimaryMessage::ShardRequest(request) => {
                             self.process_shard_request(request).await
                         },
@@ -1709,7 +1671,7 @@ impl Core {
                 self.pending_proposer_parents.retain(|k, _| k >= &gc_round);
                 self.pending_certificates.retain(|k, _| k >= &gc_round);
                 self.sent_readies.retain(|(r, _)| r >= &gc_round);
-                self.ready_quorums.retain(|_, (r, _)| *r >= gc_round);
+                self.ready_quorums.retain(|_, (r, _, _, _)| *r >= gc_round);
                 let live_header_ids: HashSet<Digest> = self
                     .processing_header_proofs
                     .keys()
@@ -1757,8 +1719,8 @@ mod core_bench {
     use crate::primary::{PrimaryMessage, Round};
     use crate::synchronizer::Synchronizer;
     use config::{Authority, Committee, PrimaryAddresses};
-    use crypto::{generate_production_keypair, Digest, PublicKey, SignatureService};
-    use blsttc::PublicKeyShareG2;
+    use crypto::{generate_production_keypair, BlsSignatureService, Digest, PublicKey, SignatureService};
+    use blsttc::{PublicKeyShareG2, SignatureShareG1};
     use rand::RngCore;
     use std::collections::{BTreeMap, HashMap};
     use std::sync::atomic::AtomicU64;
@@ -1830,6 +1792,7 @@ mod core_bench {
         // Generate a fresh keypair just for the signature service.
         let (_, dummy_sk) = generate_production_keypair();
         let signature_service = SignatureService::new(dummy_sk);
+        let bls_signature_service = BlsSignatureService::new(blsttc::SecretKeyShare::default());
         let (tx_primary, rx_primaries) = channel(1);
         let (_tx_header_waiter2, rx_header_waiter) = channel(1);
         let (_tx_certificate_waiter2, rx_certificate_waiter) = channel(1);
@@ -1846,6 +1809,7 @@ mod core_bench {
             store,
             synchronizer,
             signature_service,
+            bls_signature_service,
             Arc::new(AtomicU64::new(0)),
             50, // gc_depth
             tx_primary,
@@ -1901,12 +1865,13 @@ mod core_bench {
         println!("N={}, f={}", n, f_num);
         println!("======================================");
 
-        let (committee, pks, _sks) = make_committee(n, f_num);
+        let (committee, pks, mut sks) = make_committee(n, f_num);
         let committee = Arc::new(committee);
         let my_pk = pks[0];
+        let mut signature_service = SignatureService::new(sks.remove(0));
 
         let payload = make_payload(payload_mb);
-        let header = Header::new(my_pk, 1, payload, Digest::default()).await;
+        let header = Header::new(my_pk, 1, payload, Digest::default(), &mut signature_service).await;
 
         for &threads in &thread_counts {
             let mut orig_times = Vec::with_capacity(iterations);
@@ -1969,7 +1934,7 @@ mod core_bench {
         println!("N={}, f={}", n, f_num);
         println!("======================================");
 
-        let (committee, pks, _sks) = make_committee(n, f_num);
+        let (committee, pks, mut sks) = make_committee(n, f_num);
         let committee = Arc::new(committee);
 
         let data_shard_num = committee.data_shard_num() as usize;
@@ -1979,8 +1944,9 @@ mod core_bench {
         let payload = make_payload(payload_mb);
         let proposer_pk = pks[0];
         let receiver_pk = pks[1];
+        let mut signature_service = SignatureService::new(sks.remove(0));
 
-        let header = Header::new(proposer_pk, 1, payload, Digest::default()).await;
+        let header = Header::new(proposer_pk, 1, payload, Digest::default(), &mut signature_service).await;
         let header_info = HeaderInfo::create_from(&header);
 
         let coding = Arc::new(Coding::new(data_shard_num, parity_shard_num).unwrap());
@@ -2008,8 +1974,10 @@ mod core_bench {
         let hiwp = HeaderInfoWithProof {
             author: header_info.author,
             round: header_info.round,
+            payload: header_info.payload,
             parent: header_info.parent,
             id: header_info.id,
+            signature: header_info.signature.clone(),
             proof: receiver_proof,
             payload_len,
         };
@@ -2035,6 +2003,7 @@ mod core_bench {
                     origin: proposer_pk,
                     author: pk,
                     proof,
+                    signature: SignatureShareG1::default(),
                 }
             })
             .collect();
@@ -2144,6 +2113,7 @@ mod core_bench {
             origin: pks[0],
             author: pks[1],
             proof,
+            signature: SignatureShareG1::default(),
         };
 
         // Serialize with owning enum.
@@ -2200,8 +2170,10 @@ mod core_bench {
         let hiwp = HeaderInfoWithProof {
             author: pks[0],
             round: 7,
+            payload: Digest::default(),
             parent: Digest::default(),
             id: Digest::default(),
+            signature: crypto::Signature::default(),
             proof,
             payload_len: 12345,
         };

@@ -3,8 +3,11 @@ use crate::batch_maker::Transaction;
 use crate::error::{DagError, DagResult};
 use crate::merkle::Proof;
 use crate::primary::Round;
+use blsttc::{PublicKeyShareG2, SignatureShareG1};
 use config::Committee;
-use crypto::{Digest, Hash, PublicKey, Signature, SignatureService};
+use crypto::{
+    combine_key_from_ids, BlsSignatureService, Digest, Hash, PublicKey, Signature, SignatureService,
+};
 use ed25519_dalek::Digest as _;
 use ed25519_dalek::Sha512;
 use serde::{Deserialize, Serialize};
@@ -17,8 +20,10 @@ pub struct Header {
     pub author: PublicKey,
     pub round: Round,
     pub payload: Vec<Transaction>,
+    pub payload_hash: Digest,
     pub parent: Digest,
     pub id: Digest,
+    pub signature: Signature,
 }
 
 impl Header {
@@ -27,26 +32,44 @@ impl Header {
         round: Round,
         payload: Vec<Transaction>,
         parent: Digest,
+        signature_service: &mut SignatureService,
     ) -> Self {
         let header = Self {
             author,
             round,
+            payload_hash: payload_digest(&payload),
             payload,
             parent,
             id: Digest::default(),
+            signature: Signature::default(),
         };
         let id = header.digest();
-        Self { id, ..header }
+        let signature = signature_service.request_signature(id).await;
+        Self {
+            id,
+            signature,
+            ..header
+        }
     }
 
     pub fn verify(&self, committee: &Committee) -> DagResult<()> {
+        if self.round == 0 && self.id == Digest::default() {
+            return Ok(());
+        }
+
         // Ensure the header id is well formed.
         ensure!(self.digest() == self.id, DagError::InvalidHeaderId);
+        ensure!(
+            payload_digest(&self.payload) == self.payload_hash,
+            DagError::InvalidHeaderId
+        );
 
         // Ensure the authority has voting rights.
         let voting_rights = committee.stake(&self.author);
         ensure!(voting_rights > 0, DagError::UnknownAuthority(self.author));
-        Ok(())
+        self.signature
+            .verify(&self.id, &self.author)
+            .map_err(DagError::from)
     }
 
     pub fn genesis(committee: &Committee) -> Vec<Self> {
@@ -60,17 +83,17 @@ impl Header {
 
 impl Hash for Header {
     fn digest(&self) -> Digest {
-        let mut hasher = Sha512::new();
-        hasher.update(&self.author);
-        hasher.update(self.round.to_le_bytes());
-        for x in &self.payload {
-            hasher.update(x);
-        }
-        // for x in &self.parents {
-        //     hasher.update(x);
-        // }
-        Digest(hasher.finalize().as_slice()[..32].try_into().unwrap())
+        header_digest(self.author, self.round, self.payload_hash, self.parent)
     }
+}
+
+fn header_digest(author: PublicKey, round: Round, payload_hash: Digest, parent: Digest) -> Digest {
+    let mut hasher = Sha512::new();
+    hasher.update(&author);
+    hasher.update(round.to_le_bytes());
+    hasher.update(&payload_hash);
+    hasher.update(&parent);
+    Digest(hasher.finalize().as_slice()[..32].try_into().unwrap())
 }
 
 impl fmt::Debug for Header {
@@ -132,8 +155,10 @@ impl fmt::Display for HeaderInfoWithCertificate {
 pub struct HeaderInfoWithProof {
     pub author: PublicKey,
     pub round: Round,
+    pub payload: Digest,
     pub parent: Digest,
     pub id: Digest,
+    pub signature: Signature,
     pub proof: Proof,
     pub payload_len: usize,
 }
@@ -142,18 +167,27 @@ impl HeaderInfoWithProof {
         let header_info_with_proof = Self {
             author: header_info.author,
             round: header_info.round,
+            payload: header_info.payload,
             parent: header_info.parent.clone(),
             id: header_info.id,
+            signature: header_info.signature.clone(),
             proof: proof.clone(),
             payload_len: header_info.payload_len,
         };
         header_info_with_proof
     }
     pub fn verify(&self, committee: &Committee) -> DagResult<()> {
+        ensure!(
+            header_digest(self.author, self.round, self.payload, self.parent) == self.id,
+            DagError::InvalidHeaderId
+        );
+
         // Ensure the authority has voting rights.
         let voting_rights = committee.stake(&self.author);
         ensure!(voting_rights > 0, DagError::UnknownAuthority(self.author));
-        Ok(())
+        self.signature
+            .verify(&self.id, &self.author)
+            .map_err(DagError::from)
     }
 }
 
@@ -198,6 +232,7 @@ pub struct HeaderInfo {
     pub payload: Digest,
     pub parent: Digest,
     pub id: Digest,
+    pub signature: Signature,
     pub payload_len: usize,
 }
 impl HeaderInfo {
@@ -205,9 +240,10 @@ impl HeaderInfo {
         let header_info = Self {
             author: header.author,
             round: header.round,
-            payload: payload_digest(&header),
+            payload: header.payload_hash,
             parent: header.parent.clone(),
             id: header.id,
+            signature: header.signature.clone(),
             payload_len: 0,
         };
         header_info
@@ -219,30 +255,39 @@ impl HeaderInfo {
         Self {
             author: header.author,
             round: header.round,
-            payload: payload_digest_fast(header),
+            payload: header.payload_hash,
             parent: header.parent.clone(),
             id: header.id,
+            signature: header.signature.clone(),
             payload_len: 0,
         }
     }
 
     pub fn verify(&self, committee: &Committee) -> DagResult<()> {
+        ensure!(
+            header_digest(self.author, self.round, self.payload, self.parent) == self.id,
+            DagError::InvalidHeaderId
+        );
+
         // Ensure the authority has voting rights.
         let voting_rights = committee.stake(&self.author);
         ensure!(voting_rights > 0, DagError::UnknownAuthority(self.author));
-        Ok(())
+        self.signature
+            .verify(&self.id, &self.author)
+            .map_err(DagError::from)
     }
 }
 
-fn payload_digest(header: &Header) -> Digest {
+fn payload_digest(payload: &[Transaction]) -> Digest {
     let mut hasher = Sha512::new();
-    for x in &header.payload {
+    for x in payload {
         hasher.update(x);
     }
     Digest(hasher.finalize().as_slice()[..32].try_into().unwrap())
 }
 
 /// Fast payload digest using blake3 (internally parallelized for large inputs).
+#[allow(dead_code)]
 fn payload_digest_fast(header: &Header) -> Digest {
     let mut hasher = blake3::Hasher::new();
     for x in &header.payload {
@@ -329,17 +374,25 @@ pub struct Echo {
     pub origin: PublicKey,
     pub author: PublicKey,
     pub proof: Proof,
+    pub signature: SignatureShareG1,
 }
 
 impl Echo {
-    pub async fn new(header_info_with_proof: &HeaderInfoWithProof, author: &PublicKey) -> Self {
-        Self {
+    pub async fn new(
+        header_info_with_proof: &HeaderInfoWithProof,
+        author: &PublicKey,
+        bls_signature_service: &mut BlsSignatureService,
+    ) -> Self {
+        let echo = Self {
             id: header_info_with_proof.id.clone(),
             round: header_info_with_proof.round,
             origin: header_info_with_proof.author,
             author: *author,
             proof: header_info_with_proof.proof.clone(),
-        }
+            signature: SignatureShareG1::default(),
+        };
+        let signature = bls_signature_service.request_signature(echo.digest()).await;
+        Self { signature, ..echo }
     }
 
     pub fn verify(&self, committee: &Committee) -> DagResult<()> {
@@ -348,8 +401,39 @@ impl Echo {
             committee.stake(&self.author) > 0,
             DagError::UnknownAuthority(self.author)
         );
+        ensure!(
+            self.proof.validate(committee.total_stake() as usize),
+            DagError::ProofConstructionFailed
+        );
+        SignatureShareG1::verify_batch(
+            &self.digest().0,
+            &committee.get_bls_public_g2(&self.author),
+            &self.signature,
+        )
+        .map_err(|_| DagError::InvalidBlsSignature)?;
         Ok(())
     }
+}
+
+impl Hash for Echo {
+    fn digest(&self) -> Digest {
+        echo_digest(self.id, *self.proof.root_hash(), self.round, self.origin)
+    }
+}
+
+pub(crate) fn echo_digest(
+    id: Digest,
+    root_hash: Digest,
+    round: Round,
+    origin: PublicKey,
+) -> Digest {
+    let mut hasher = Sha512::new();
+    hasher.update(b"Echo");
+    hasher.update(&id);
+    hasher.update(&root_hash);
+    hasher.update(round.to_le_bytes());
+    hasher.update(&origin);
+    Digest(hasher.finalize().as_slice()[..32].try_into().unwrap())
 }
 
 impl fmt::Debug for Echo {
@@ -420,6 +504,7 @@ pub struct Ready {
     pub origin: PublicKey,
     pub author: PublicKey,
     pub root_hash: Digest,
+    pub signature: SignatureShareG1,
 }
 
 impl Ready {
@@ -429,14 +514,20 @@ impl Ready {
         origin: &PublicKey,
         author: &PublicKey,
         root_hash: Digest,
+        bls_signature_service: &mut BlsSignatureService,
     ) -> Self {
-        Self {
+        let ready = Self {
             id: header_id,
             round,
             origin: *origin,
             author: *author,
             root_hash,
-        }
+            signature: SignatureShareG1::default(),
+        };
+        let signature = bls_signature_service
+            .request_signature(ready.digest())
+            .await;
+        Self { signature, ..ready }
     }
 
     pub fn verify(&self, committee: &Committee) -> DagResult<()> {
@@ -445,8 +536,35 @@ impl Ready {
             committee.stake(&self.author) > 0,
             DagError::UnknownAuthority(self.author)
         );
+        SignatureShareG1::verify_batch(
+            &self.digest().0,
+            &committee.get_bls_public_g2(&self.author),
+            &self.signature,
+        )
+        .map_err(|_| DagError::InvalidBlsSignature)?;
         Ok(())
     }
+}
+
+impl Hash for Ready {
+    fn digest(&self) -> Digest {
+        ready_digest(self.id, self.root_hash, self.round, self.origin)
+    }
+}
+
+pub(crate) fn ready_digest(
+    id: Digest,
+    root_hash: Digest,
+    round: Round,
+    origin: PublicKey,
+) -> Digest {
+    let mut hasher = Sha512::new();
+    hasher.update(b"Ready");
+    hasher.update(&id);
+    hasher.update(&root_hash);
+    hasher.update(round.to_le_bytes());
+    hasher.update(&origin);
+    Digest(hasher.finalize().as_slice()[..32].try_into().unwrap())
 }
 
 impl fmt::Debug for Ready {
@@ -472,50 +590,6 @@ pub struct ShardResponse {
     pub id: Digest,
     pub root_hash: Digest,
     pub proof: Proof,
-}
-
-// Commit message in the protocol
-#[derive(Clone, Serialize, Deserialize)]
-pub struct Decide {
-    pub id: Digest,
-    pub round: Round,
-    pub origin: PublicKey,
-    pub author: PublicKey,
-}
-
-impl Decide {
-    pub async fn new(
-        header_id: Digest,
-        round: Round,
-        origin: &PublicKey,
-        author: &PublicKey,
-    ) -> Self {
-        Self {
-            id: header_id,
-            round,
-            origin: *origin,
-            author: *author,
-        }
-    }
-
-    pub fn verify(&self, committee: &Committee) -> DagResult<()> {
-        // Ensure the authority has voting rights.
-        ensure!(
-            committee.stake(&self.author) > 0,
-            DagError::UnknownAuthority(self.author)
-        );
-        Ok(())
-    }
-}
-
-impl fmt::Debug for Decide {
-    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
-        write!(
-            f,
-            "{}: D{}({}, {})",
-            self.id, self.round, self.author, self.id
-        )
-    }
 }
 
 #[derive(Clone, Serialize, Deserialize, Default)]
@@ -572,8 +646,10 @@ impl TimeoutCert {
 #[derive(Clone, Serialize, Deserialize, Default)]
 pub struct Certificate {
     pub header_id: Digest,
+    pub root_hash: Digest,
     pub round: Round,
     pub origin: PublicKey,
+    pub votes: (Vec<u128>, SignatureShareG1),
 }
 
 impl Certificate {
@@ -591,7 +667,11 @@ impl Certificate {
             return Ok(());
         }
 
-        Ok(())
+        let signer_ids = signer_ids_from_bitset(&self.votes.0, committee)?;
+        let sorted_bls_keys = sorted_bls_public_keys(committee);
+        let agg_pk = combine_key_from_ids(signer_ids, &sorted_bls_keys);
+        SignatureShareG1::verify_batch(&self.digest().0, &agg_pk, &self.votes.1)
+            .map_err(|_| DagError::InvalidBlsSignature)
     }
 
     pub fn round(&self) -> Round {
@@ -605,11 +685,7 @@ impl Certificate {
 
 impl Hash for Certificate {
     fn digest(&self) -> Digest {
-        let mut hasher = Sha512::new();
-        hasher.update(&self.header_id);
-        hasher.update(self.round().to_le_bytes());
-        hasher.update(&self.origin());
-        Digest(hasher.finalize().as_slice()[..32].try_into().unwrap())
+        ready_digest(self.header_id, self.root_hash, self.round(), self.origin())
     }
 }
 
@@ -629,8 +705,55 @@ impl fmt::Debug for Certificate {
 impl PartialEq for Certificate {
     fn eq(&self, other: &Self) -> bool {
         let mut ret = self.header_id == other.header_id;
+        ret &= self.root_hash == other.root_hash;
         ret &= self.round() == other.round();
         ret &= self.origin() == other.origin();
         ret
     }
+}
+
+pub(crate) fn empty_signer_bitset(committee: &Committee) -> Vec<u128> {
+    vec![0; (committee.size() + 127) / 128]
+}
+
+pub(crate) fn set_signer_bit(bits: &mut [u128], index: usize) {
+    let chunk = index / 128;
+    let bit = index % 128;
+    bits[chunk] |= 1u128 << bit;
+}
+
+pub(crate) fn signer_ids_from_bitset(
+    bits: &[u128],
+    committee: &Committee,
+) -> DagResult<Vec<usize>> {
+    let expected_chunks = (committee.size() + 127) / 128;
+    ensure!(
+        bits.len() >= expected_chunks,
+        DagError::CertificateRequiresQuorum
+    );
+
+    let mut ids = Vec::new();
+    let mut weight = 0;
+    for (idx, public_key) in committee.sorted_keys.iter().enumerate() {
+        let chunk = idx / 128;
+        let bit = idx % 128;
+        if bits[chunk] & (1u128 << bit) != 0 {
+            ids.push(idx);
+            weight += committee.stake(public_key);
+        }
+    }
+
+    ensure!(
+        weight >= committee.quorum_threshold(),
+        DagError::CertificateRequiresQuorum
+    );
+    Ok(ids)
+}
+
+pub(crate) fn sorted_bls_public_keys(committee: &Committee) -> Vec<PublicKeyShareG2> {
+    committee
+        .sorted_keys
+        .iter()
+        .map(|key| committee.get_bls_public_g2(key))
+        .collect()
 }
