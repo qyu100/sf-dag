@@ -1,9 +1,7 @@
 use crate::coding::{shard_hashes, Coding};
 use crate::consensus::{ConsensusMessage, ProposalMessage, Round};
 use crate::merkle::MerkleTree;
-use crate::messages::{
-    payload_hash, Block, FallbackRecoveryProposal, NormalProposal, Transaction, QC, TC,
-};
+use crate::messages::{payload_hash, Block, NormalProposal, Transaction};
 use bytes::Bytes;
 use config::Committee;
 use crypto::{Digest, Hash as _, PublicKey, SignatureService};
@@ -18,9 +16,7 @@ use tokio::time::{sleep, Duration, Instant};
 
 #[derive(Debug, Clone)]
 pub enum ProposalTrigger {
-    QC(QC),
-    TC(TC),
-    Optimistic { parent: Block, qc: QC },
+    Parent { parent: Block },
 }
 
 #[derive(Debug)]
@@ -37,7 +33,6 @@ enum ProposalTarget {
 
 // Result of Phase 1: RS encoding + Merkle tree construction.
 struct Phase1Result {
-    trigger: ProposalTrigger,
     block: Block,
     encoded: Vec<u8>,
     shard_len: usize,
@@ -204,9 +199,7 @@ impl Proposer {
     // Decomposes a trigger into (parent_digest, round).
     fn trigger_parent_and_round(trigger: &ProposalTrigger) -> (Digest, Round) {
         match trigger {
-            ProposalTrigger::QC(qc) => (qc.blk_hash.clone(), qc.round + 1),
-            ProposalTrigger::TC(tc) => (tc.high_qc.blk_hash.clone(), tc.round + 1),
-            ProposalTrigger::Optimistic { parent, .. } => (parent.digest(), parent.round + 1),
+            ProposalTrigger::Parent { parent } => (parent.digest(), parent.round + 1),
         }
     }
 
@@ -272,7 +265,6 @@ impl Proposer {
             block.payload_root = merkle_tree.root_hash().clone();
 
             let _ = tx.blocking_send(Phase1Result {
-                trigger,
                 block,
                 encoded,
                 shard_len,
@@ -299,7 +291,6 @@ impl Proposer {
         let shard_len = p1.shard_len;
         let encoded = p1.encoded;
         let merkle_tree = p1.merkle_tree;
-        let trigger = p1.trigger;
         let block = p1.block;
         let sign_ms = 0;
 
@@ -313,17 +304,7 @@ impl Proposer {
                     let proof = merkle_tree
                         .proof_with_leaf(index, shard_refs[index])
                         .expect("Failed to build proof");
-                    let proposal = match trigger.clone() {
-                        ProposalTrigger::QC(qc) => {
-                            ProposalMessage::N(NormalProposal::new(block.clone(), qc, proof))
-                        }
-                        ProposalTrigger::TC(tc) => ProposalMessage::F(
-                            FallbackRecoveryProposal::new(block.clone(), tc, proof),
-                        ),
-                        ProposalTrigger::Optimistic { qc, .. } => {
-                            ProposalMessage::N(NormalProposal::new(block.clone(), qc, proof))
-                        }
-                    };
+                    let proposal = ProposalMessage::N(NormalProposal::new(block.clone(), proof));
                     if recipient == my_name {
                         ProposalTarget::Local(proposal)
                     } else {

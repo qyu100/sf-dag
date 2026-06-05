@@ -7,8 +7,7 @@ use crate::mempool::MempoolDriver;
 use crate::merkle::MerkleTree;
 use crate::merkle::Proof;
 use crate::messages::{
-    shard_store_key, Block, FallbackRecoveryProposal, NormalProposal, ShardRequest, ShardResponse,
-    Timeout, Vote, VoteType, QC, TC,
+    shard_store_key, Block, NormalProposal, ShardRequest, ShardResponse, Vote, VoteType, QC,
 };
 use crate::proposer::{ProposalTrigger, ProposerMessage};
 use crate::synchronizer::Synchronizer;
@@ -16,12 +15,11 @@ use crate::timer::Timer;
 use async_recursion::async_recursion;
 use bytes::Bytes;
 use config::Committee;
+use crypto::PublicKey;
 use crypto::{BlsSignatureService, Digest, Hash as _};
-use crypto::{PublicKey, SignatureService};
 use log::{debug, error, info, warn};
 use network::ReliableSender;
 use primary::Certificate;
-use std::cmp::max;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::time::Instant as StdInstant;
@@ -45,11 +43,7 @@ pub struct Core {
     commit_qcs: HashMap<Round, QC>,
     consensus_only: bool,
     last_commit: Block,
-    // t_l
-    last_timeout: Round,
     leader_elector: LeaderElector,
-    // qc_l
-    locked: QC,
     // Highest weak certificate
     // hwqc: WQC,
     mempool_driver: MempoolDriver,
@@ -65,25 +59,19 @@ pub struct Core {
     started_shard_verify: HashSet<(Round, Digest, Digest)>,
     network: ReliableSender,
     rx_proposal_net: Receiver<Vec<(SocketAddr, Bytes, String)>>,
-    qc_syncs: HashMap<PublicKey, Instant>,
     round: Round,
     rs_block_size: usize,
     rs_block_threads: usize,
     rx_proposer: Receiver<ProposalMessage>,
-    tx_message: Sender<ConsensusMessage>,
     rx_message: Receiver<ConsensusMessage>,
     rx_synchronizer: Receiver<Block>,
-    signature_service: SignatureService,
     bls_signature_service: BlsSignatureService,
     store: Store,
     synchronizer: Synchronizer,
     sync_requests: HashSet<Digest>,
     sent_normal_votes: HashSet<(Round, Digest, Digest)>,
     sent_commit_votes: HashSet<(Round, Digest, Digest)>,
-    fallback_blocks: HashSet<Digest>,
-    timeout_delay: u64,
-    // E
-    timeout_syncs: HashSet<Round>,
+    sent_decide_votes: HashSet<(Round, Digest, Digest)>,
     timer: Timer,
     tx_commit: Sender<Vec<Certificate>>,
     tx_output: Sender<Block>,
@@ -157,7 +145,6 @@ impl Core {
         name: PublicKey,
         committee: Committee,
         consensus_only: bool,
-        signature_service: SignatureService,
         bls_signature_service: BlsSignatureService,
         store: Store,
         leader_elector: LeaderElector,
@@ -166,7 +153,6 @@ impl Core {
         timeout_delay: u64,
         rs_block_size: usize,
         rs_block_threads: usize,
-        tx_message: Sender<ConsensusMessage>,
         rx_message: Receiver<ConsensusMessage>,
         rx_proposer: Receiver<ProposalMessage>,
         rx_synchronizer: Receiver<Block>,
@@ -183,7 +169,6 @@ impl Core {
             let pending_availability_qcs = HashMap::new();
             let requested_shards = HashSet::new();
             let started_shard_verify = HashSet::new();
-            let fallback_blocks = HashSet::new();
             let mut uncommitted_qcs = HashMap::new();
             let genesis_block = Block::genesis();
             let genesis_qc = QC::genesis();
@@ -202,31 +187,24 @@ impl Core {
                 commit_qcs,
                 consensus_only,
                 last_commit: genesis_block.clone(),
-                last_timeout: GENESIS,
                 leader_elector,
-                locked: QC::genesis(),
                 mempool_driver,
                 name,
                 network: ReliableSender::new(),
                 rx_proposal_net,
-                qc_syncs: HashMap::new(),
                 round: 1,
                 rs_block_size,
                 rs_block_threads,
                 rx_proposer,
-                tx_message,
                 rx_message,
                 rx_synchronizer,
-                signature_service,
                 bls_signature_service,
                 store,
                 synchronizer,
                 sync_requests: HashSet::new(),
                 sent_normal_votes: HashSet::new(),
                 sent_commit_votes: HashSet::new(),
-                fallback_blocks,
-                timeout_delay,
-                timeout_syncs: HashSet::new(),
+                sent_decide_votes: HashSet::new(),
                 timer: Timer::new(timeout_delay),
                 tx_commit,
                 tx_output,
@@ -251,29 +229,6 @@ impl Core {
     }
 
     // Sends the given ConsensusMessage to all but self.
-    async fn broadcast(&mut self, m: ConsensusMessage) {
-        debug!("Broadcasting {:?}", m);
-        let addresses = self.committee.others_consensus_sockets(&self.name);
-        let message =
-            bincode::serialize(&m).expect(format!("Failed to serialize message {:?}", m).as_str());
-        let m_bytes = Bytes::from(message);
-
-        match m {
-            ConsensusMessage::QC(_) => {
-                let _ = self.network.broadcast(addresses, m_bytes).await;
-            }
-            ConsensusMessage::Vote(vote) => {
-                let label = Self::vote_network_label(&vote);
-                self.broadcast_vote_bytes(&vote.kind, addresses, m_bytes, Some(label))
-                    .await
-            }
-            ConsensusMessage::Timeout(_) => {
-                let _ = self.network.broadcast(addresses, m_bytes).await;
-            }
-            _ => (),
-        }
-    }
-
     async fn broadcast_vote_ref(&mut self, vote: &Vote) -> VoteBroadcastStats {
         debug!("Broadcasting Vote {:?}", vote);
         let total_start = StdInstant::now();
@@ -331,17 +286,12 @@ impl Core {
             let m_bytes = Bytes::from(message);
 
             match m {
-                ConsensusMessage::QC(_) => {
-                    let _ = self.network.send(address, m_bytes).await;
-                }
                 ConsensusMessage::Vote(vote) => {
                     let label = Self::vote_network_label(&vote);
                     self.send_vote_bytes(&vote.kind, address, m_bytes, Some(label))
                         .await
                 }
-                ConsensusMessage::Timeout(_)
-                | ConsensusMessage::ShardRequest(_)
-                | ConsensusMessage::ShardResponse(_) => {
+                ConsensusMessage::ShardRequest(_) | ConsensusMessage::ShardResponse(_) => {
                     let _ = self.network.send(address, m_bytes).await;
                 }
                 _ => (),
@@ -413,30 +363,15 @@ impl Core {
         Ok(())
     }
 
-    fn qc_signers(&self, qc: &QC) -> Vec<(PublicKey, usize)> {
-        let expected_chunks = (self.committee.size() + 127) / 128;
-        if qc.votes.0.len() < expected_chunks {
-            return Vec::new();
-        }
-
-        self.committee
+    fn shard_owners(&self) -> Vec<(usize, PublicKey)> {
+        let mut owners: Vec<_> = self
+            .committee
             .authorities
             .iter()
-            .filter_map(|(name, authority)| {
-                let signer_idx = self
-                    .committee
-                    .sorted_keys
-                    .binary_search(&authority.bls_pubkey_g2)
-                    .ok()?;
-                let chunk = signer_idx / 128;
-                let bit = signer_idx % 128;
-                if qc.votes.0[chunk] & (1u128 << bit) == 0 {
-                    Some((*name, authority.id as usize))
-                } else {
-                    None
-                }
-            })
-            .collect()
+            .map(|(name, authority)| (authority.id as usize, *name))
+            .collect();
+        owners.sort_by_key(|(index, _)| *index);
+        owners
     }
 
     fn collected_shards(&self, block: &Digest, payload_root: &Digest) -> Vec<Option<Box<[u8]>>> {
@@ -488,9 +423,8 @@ impl Core {
         }
 
         let proof_key = Self::proof_key(&qc.blk_hash, &qc.payload_root);
-        let signers = self.qc_signers(qc);
-        for (signer, shard_index) in signers {
-            if signer == self.name {
+        for (shard_index, owner) in self.shard_owners() {
+            if owner == self.name {
                 continue;
             }
             if self
@@ -515,7 +449,7 @@ impl Core {
                 index: shard_index,
                 origin: self.name,
             };
-            self.send_to(ConsensusMessage::ShardRequest(request), &signer)
+            self.send_to(ConsensusMessage::ShardRequest(request), &owner)
                 .await;
         }
         Ok(())
@@ -598,9 +532,6 @@ impl Core {
 
     async fn get_block(&mut self, digest: Digest, round: Round) -> ConsensusResult<Option<Block>> {
         if round > self.last_commit.round {
-            // This function should only ever be called with digests of certified blocks.
-            assert!(self.uncommitted_qcs.contains_key(&round));
-
             let proposer = self.leader_elector.get_leader(round);
 
             // See if we have the corresponding block.
@@ -614,10 +545,10 @@ impl Core {
                     .synchronizer
                     .get_block(&digest, &proposer, None)
                     .await?;
-                // Should not have an uncommitted block on-disk but not in-memory.
-                assert!(maybe_b.is_none());
-                self.sync_requests.insert(digest);
-                Ok(None)
+                if maybe_b.is_none() {
+                    self.sync_requests.insert(digest);
+                }
+                Ok(maybe_b)
             }
         } else {
             Ok(None)
@@ -775,39 +706,6 @@ impl Core {
         Ok(())
     }
 
-    // Unicasts self.locked to the given peer to allow it to enter self.locked.round + 1.
-    // Triggered when we see a Timeout from round lower than self.locked.round + 1.
-    async fn sync_peer(&mut self, recipient: &PublicKey) {
-        // Ensure our network bandwidth cannot be consumed by Byzantine nodes that spam us
-        // with Timeouts for old rounds.
-        let rate_limited = match self.qc_syncs.get(recipient) {
-            // We expect to receive at most one Timeout message per timeout_delay per peer.
-            Some(synced_at) => synced_at.elapsed().as_millis() < self.timeout_delay.into(),
-            None => false,
-        };
-
-        if rate_limited {
-            debug!("Rate-limited peer {:?} for QC Sync", recipient);
-        } else {
-            debug!(
-                "Syncing peer {:?} with locked QC {:?}",
-                recipient, self.locked
-            );
-            let address = self
-                .committee
-                .consensus(recipient)
-                .expect("Recipient is not a member of the Validator Committee.")
-                .consensus_to_consensus;
-            let m = ConsensusMessage::QC(self.locked.clone());
-            let message = bincode::serialize(&m)
-                .expect(format!("Failed to serialize message {:?}", m).as_str());
-            let m_bytes = Bytes::from(message);
-            let _ = self.network.send(address, m_bytes).await;
-            // Note the time that we served this peer so that we can rate-limit it.
-            self.qc_syncs.insert(recipient.clone(), Instant::now());
-        }
-    }
-
     fn update_pending_proposals(&mut self, block: &Block) {
         // Should only ever be called with blocks that have already passed can_accept_block.
         if self.pending_proposals.contains_key(&block.round) {
@@ -947,10 +845,10 @@ impl Core {
             .retain(|(round, _, _)| *round > committing_round);
         self.sent_commit_votes
             .retain(|(round, _, _)| *round > committing_round);
+        self.sent_decide_votes
+            .retain(|(round, _, _)| *round > committing_round);
         self.uncommitted_blocks
             .retain(|_, b| b.round > committing_round);
-        self.fallback_blocks
-            .retain(|digest| self.uncommitted_blocks.contains_key(digest));
         self.uncommitted_qcs
             .retain(|_, qc| qc.round > committing_round);
         self.verified_normal_qcs
@@ -1078,63 +976,11 @@ impl Core {
         Ok(())
     }
 
-    fn has_normal_vote_qc(&self, round: Round, digest: &Digest) -> bool {
-        if round == GENESIS && digest.clone() == Block::genesis().digest() {
-            return true;
-        }
-        if self.last_commit.round == round && self.last_commit.digest() == digest.clone() {
-            return true;
-        }
-        if let Some(qc) = self.uncommitted_qcs.get(&round) {
-            if qc.blk_hash == digest.clone() && (qc.kind == VoteType::Normal || qc.round == GENESIS)
-            {
-                return true;
-            }
-        }
-        if let Some(qc) = self.commit_qcs.get(&round) {
-            if qc.blk_hash == digest.clone() {
-                return true;
-            }
-        }
-        false
-    }
-
-    fn has_commit_vote_qc(&self, round: Round, digest: &Digest) -> bool {
-        if round == GENESIS && digest.clone() == Block::genesis().digest() {
-            return true;
-        }
-        if self.last_commit.round == round && self.last_commit.digest() == digest.clone() {
-            return true;
-        }
-        if self.last_commit.round == round + 1 && self.last_commit.parent == digest.clone() {
-            return true;
-        }
-        if let Some(qc) = self.commit_qcs.get(&round) {
-            if qc.blk_hash == digest.clone() {
-                return true;
-            }
-        }
-        false
-    }
-
     fn has_required_certificates_for_normal_vote(&self, block: &Block) -> bool {
-        if self.fallback_blocks.contains(&block.digest()) {
-            return self.has_voting_parent_delivered(block);
-        }
-
         let Some(parent) = self.voting_parent_block(block) else {
             return false;
         };
-        if parent.round + 1 != block.round {
-            return false;
-        }
-        if !self.has_normal_vote_qc(parent.round, &block.parent) {
-            return false;
-        }
-        if block.round <= 1 {
-            return true;
-        }
-        self.has_commit_vote_qc(parent.round - 1, &parent.parent)
+        parent.round + 1 == block.round
     }
 
     fn qc_availability_key(qc: &QC) -> (Round, Digest, Digest) {
@@ -1142,10 +988,7 @@ impl Core {
     }
 
     async fn maybe_send_commit_vote(&mut self, qc: &QC) -> ConsensusResult<()> {
-        if qc.kind != VoteType::Normal
-            || qc.round <= self.last_commit.round
-            || self.last_timeout >= qc.round
-        {
+        if qc.kind != VoteType::Normal || qc.round <= self.last_commit.round {
             return Ok(());
         }
 
@@ -1154,25 +997,15 @@ impl Core {
             return Ok(());
         }
 
-        if !self.has_required_certificates_for_commit_vote(qc).await? {
+        if !self.has_block_matching_qc(qc).await? {
             return Ok(());
         }
 
-        self.sent_commit_votes.insert(key);
-        self.send_vote(
-            qc.blk_hash.clone(),
-            qc.payload_root.clone(),
-            qc.round,
-            VoteType::Commit,
-            None,
-        )
-        .await
+        self.send_ready_vote(qc.blk_hash.clone(), qc.payload_root.clone(), qc.round)
+            .await
     }
 
-    async fn has_required_certificates_for_commit_vote(
-        &mut self,
-        qc: &QC,
-    ) -> ConsensusResult<bool> {
+    async fn has_block_matching_qc(&mut self, qc: &QC) -> ConsensusResult<bool> {
         let Some(block) = self.uncommitted_blocks.get(&qc.blk_hash).cloned() else {
             self.get_block(qc.blk_hash.clone(), qc.round).await?;
             return Ok(false);
@@ -1187,14 +1020,7 @@ impl Core {
             return Ok(false);
         }
 
-        if self.fallback_blocks.contains(&block.digest()) {
-            let Some(parent) = self.voting_parent_block(&block) else {
-                return Ok(false);
-            };
-            return Ok(self.has_commit_vote_qc(parent.round, &block.parent));
-        }
-
-        Ok(self.has_commit_vote_qc(block.round - 1, &block.parent))
+        Ok(true)
     }
 
     async fn try_send_commit_votes(&mut self) -> ConsensusResult<()> {
@@ -1225,14 +1051,6 @@ impl Core {
             let Some(b) = self.uncommitted_blocks.get(&accepted).cloned() else {
                 continue;
             };
-
-            if self.last_timeout >= b.round {
-                debug!(
-                    "VOTE_BLOCKED reason=timed_out node={} round={} digest={} last_timeout={}",
-                    self.name, b.round, accepted, self.last_timeout
-                );
-                continue;
-            }
 
             let key = (b.round, accepted.clone(), b.payload_root.clone());
             if self.sent_normal_votes.contains(&key) {
@@ -1320,6 +1138,7 @@ impl Core {
         let vote_event = match vote.kind {
             VoteType::Normal => "nv_sent",
             VoteType::Commit => "cv_sent",
+            VoteType::Decide => "dv_sent",
         };
         debug!(
             "TIMELINE event={} node={} round={} digest={} payload_root={}",
@@ -1367,34 +1186,40 @@ impl Core {
         .await
     }
 
-    async fn send_timeout(&mut self, round: Round) -> ConsensusResult<()> {
-        // Avoid spamming Timeouts.
-        if !self.timeout_syncs.contains(&round) {
-            let timeout = Timeout::new(
-                self.locked.clone(),
-                round,
-                self.name,
-                self.signature_service.clone(),
-            )
-            .await;
-            debug!("Created {:?}", timeout);
-            self.last_timeout = max(round, self.last_timeout);
-            // Ensure that we trigger Timeout Sync for r at most once every timeout_delay.
-            self.timeout_syncs.insert(round);
-            self.timer.reset();
-            self.handle_timeout(&timeout).await?;
-            self.broadcast(ConsensusMessage::Timeout(timeout)).await;
+    async fn send_ready_vote(
+        &mut self,
+        block: Digest,
+        payload_root: Digest,
+        round: Round,
+    ) -> ConsensusResult<()> {
+        let key = (round, block.clone(), payload_root.clone());
+        if !self.sent_commit_votes.insert(key) {
+            return Ok(());
         }
-        Ok(())
+        self.send_vote(block, payload_root, round, VoteType::Commit, None)
+            .await
+    }
+
+    async fn send_decide_vote(
+        &mut self,
+        block: Digest,
+        payload_root: Digest,
+        round: Round,
+    ) -> ConsensusResult<()> {
+        let key = (round, block.clone(), payload_root.clone());
+        if !self.sent_decide_votes.insert(key) {
+            return Ok(());
+        }
+        self.send_vote(block, payload_root, round, VoteType::Decide, None)
+            .await
     }
 
     async fn local_timeout_round(&mut self) -> ConsensusResult<()> {
-        // Failed to form a QC this round.
         warn!("Timeout reached for round {}", self.round);
-        // Allow Timeout Sync to be triggered (again) for rounds between
-        // self.locked.round+1 and self.round.
-        self.timeout_syncs.clear();
-        self.send_timeout(self.round).await
+        // In the no-signature Bracha path, NQC/CQC are local-only and cannot
+        // justify Hydrangea timeout-sync or fallback recovery messages.
+        self.timer.reset();
+        Ok(())
     }
 
     #[async_recursion]
@@ -1404,9 +1229,31 @@ impl Core {
         if vote.round > self.last_commit.round {
             debug!("Processing {:?}", vote);
             match vote.kind {
+                VoteType::Decide => {
+                    let aggregate_start = Instant::now();
+                    if let Some(mut qc) = self.aggregator.add_decide_vote(vote.clone())? {
+                        debug!(
+                            "TIMING decide_qc_formed round={} aggregate_ms={}",
+                            qc.round,
+                            aggregate_start.elapsed().as_millis()
+                        );
+                        debug!("Assembled {:?}", qc);
+                        self.attach_block_to_qc(&mut qc);
+                        self.handle_decide_qc(&qc).await?;
+                    }
+                }
                 VoteType::Commit => {
                     let aggregate_start = Instant::now();
-                    if let Some(mut qc) = self.aggregator.add_commit_vote(vote.clone())? {
+                    let outcome = self.aggregator.add_ready_vote(vote.clone())?;
+                    if let Some((round, block, payload_root)) = outcome.relay {
+                        debug!(
+                            "TIMING ready_relay round={} aggregate_ms={}",
+                            round,
+                            aggregate_start.elapsed().as_millis()
+                        );
+                        self.send_ready_vote(block, payload_root, round).await?;
+                    }
+                    if let Some(mut qc) = outcome.quorum {
                         debug!(
                             "TIMING cqc_formed round={} aggregate_ms={}",
                             qc.round,
@@ -1414,7 +1261,7 @@ impl Core {
                         );
                         debug!("Assembled {:?}", qc);
                         self.attach_block_to_qc(&mut qc);
-                        self.handle_qc(&qc).await?;
+                        self.handle_ready_qc(&qc).await?;
                     }
                 }
                 VoteType::Normal => {
@@ -1423,6 +1270,9 @@ impl Core {
                         let aggregate_ms = aggregate_start.elapsed().as_millis();
                         debug!("Assembled {:?}", qc);
                         let key = Self::qc_availability_key(&qc);
+                        self.uncommitted_qcs
+                            .entry(qc.round)
+                            .or_insert_with(|| qc.clone());
                         if self.started_nqc_verify.insert(key) {
                             // Vote accumulation path: verify both the aggregate BLS signature
                             // and that the collected shards interpolate to the committed payload
@@ -1436,7 +1286,6 @@ impl Core {
                             );
                         }
                         self.attach_block_to_qc(&mut qc);
-                        self.handle_qc(&qc).await?;
                     }
                 }
             }
@@ -1453,61 +1302,6 @@ impl Core {
                 "TIMING handle_vote_slow kind={} round={} digest={} total_ms={}",
                 vote.kind, vote.round, vote.blk_hash, handle_ms
             );
-        }
-        Ok(())
-    }
-
-    #[async_recursion]
-    async fn handle_timeout(&mut self, timeout: &Timeout) -> ConsensusResult<()> {
-        // The sender claims to be stuck in timeout.round.
-        debug!("Processing {:?}", timeout);
-        let r = timeout.round;
-
-        if r <= self.locked.round {
-            // This helps to compensate for the lack of Eventual Delivery in real networks.
-            if timeout.author_is_authorised(&self.committee)? {
-                // Send our locked QC to our peer to allow it to enter a new round.
-                self.sync_peer(&timeout.author).await;
-            }
-            // else: Spam message from a node outside the validator set.
-        } else {
-            // We cannot immediately sync our peer to a higher round.
-            if r >= self.round {
-                // Attempt to trigger Timeout Sync.
-                self.handle_qc(&timeout.high_qc).await?;
-
-                let (votes, maybe_tc) = self.aggregator.add_timeout(timeout.clone())?;
-                if votes >= self.committee.validity_threshold() {
-                    // Timeout Sync: We have observed at least f+1 (one honest) Timeouts for r.
-                    // We also have not triggered this path since the last time our round timer expired.
-                    debug!("Attempting Timeout Sync for round {}", r);
-                    self.send_timeout(r).await?;
-
-                    if let Some(tc) = maybe_tc {
-                        debug!("Assembled {:?}", tc);
-                        self.handle_tc(&tc).await?
-                    }
-                }
-            } else {
-                // This helps to compensate for the lack of Eventual Delivery in real networks.
-                //
-                // self.locked.round < r < self.round, so we must have entered self.round via a TC.
-                // Therefore, there must be at least f+1 honest that have already sent Timeouts for
-                // self.round - 1, so we can respond with this Timeout instead of a Timeout for r.
-                //
-                // This is Live because:
-                //  1. If these f+1 will remain in self.round - 1 or self.round then they will
-                //     continue to send these Timeout messages to any validators still in lower
-                //     rounds due to timer expiry or this branch, so all will eventually observe
-                //     a TC for self.round - 1.
-                //  2. If any honest process advances to a higher round then either it must have
-                //     locked a QC for a higher round, which all will soon see, or there must be
-                //     some higher round for which f+1 honest processes are sending Timeout
-                //     messages, which all will soon see and do the same via the branch above.
-                //
-                // Hence, we need only respond to our peer with a Timeout for self.round - 1.
-                self.send_timeout(self.round - 1).await?;
-            }
         }
         Ok(())
     }
@@ -1535,13 +1329,8 @@ impl Core {
             .retain(|round, _| round >= &r.saturating_sub(2));
     }
 
-    async fn propose_fallback(&mut self, tc: TC) {
-        self.propose_if_leader(tc.round + 1, ProposalTrigger::TC(tc))
-            .await
-    }
-
-    async fn propose_normal(&mut self, parent_qc: QC) {
-        self.propose_if_leader(parent_qc.round + 1, ProposalTrigger::QC(parent_qc))
+    async fn propose_parent(&mut self, parent: Block) {
+        self.propose_if_leader(parent.round + 1, ProposalTrigger::Parent { parent })
             .await
     }
 
@@ -1550,17 +1339,10 @@ impl Core {
             return;
         }
         let commit_qc_round = parent.round.saturating_sub(2);
-        let Some(qc) = self.commit_qcs.get(&commit_qc_round).cloned() else {
+        if !self.commit_qcs.contains_key(&commit_qc_round) {
             return;
         };
-        self.propose_if_leader(
-            parent.round + 1,
-            ProposalTrigger::Optimistic {
-                parent: parent.clone(),
-                qc,
-            },
-        )
-        .await
+        self.propose_parent(parent.clone()).await
     }
 
     async fn propose_optimistic_children_waiting_on_commit_qc(&mut self, qc_round: Round) {
@@ -1587,12 +1369,6 @@ impl Core {
     fn consensus_message_label(message: &ConsensusMessage) -> String {
         match message {
             ConsensusMessage::Propose(proposal) => Self::proposal_message_label(proposal),
-            ConsensusMessage::QC(qc) => format!(
-                "QC({}),round={},digest={},root={}",
-                qc.kind, qc.round, qc.blk_hash, qc.payload_root
-            ),
-            ConsensusMessage::TC(tc) => format!("TC,round={}", tc.round),
-            ConsensusMessage::Timeout(timeout) => format!("Timeout,round={}", timeout.round),
             ConsensusMessage::Vote(vote) => format!(
                 "Vote({}),round={},digest={},root={}",
                 vote.kind, vote.round, vote.blk_hash, vote.payload_root
@@ -1629,11 +1405,6 @@ impl Core {
                 proposal.block.round,
                 proposal.block.digest()
             ),
-            ProposalMessage::F(proposal) => format!(
-                "Propose(Fallback),round={},digest={}",
-                proposal.block.round,
-                proposal.block.digest()
-            ),
         }
     }
 
@@ -1649,30 +1420,6 @@ impl Core {
                 label, handle_ms
             );
         }
-    }
-
-    async fn verify_availability(
-        &self,
-        payload_root: &Digest,
-        availability_shards: Vec<Option<Box<[u8]>>>,
-    ) -> ConsensusResult<AvailabilityTiming> {
-        let data_shards = (self.committee.n - 2 * self.committee.f) as usize;
-        let parity_shards = (2 * self.committee.f) as usize;
-        let rs_block_size = self.rs_block_size;
-        let rs_block_threads = self.rs_block_threads;
-        let payload_root = payload_root.clone();
-        tokio::task::spawn_blocking(move || {
-            check_availability_sync(
-                payload_root,
-                availability_shards,
-                data_shards,
-                parity_shards,
-                rs_block_size,
-                rs_block_threads,
-            )
-        })
-        .await
-        .map_err(|_| ConsensusError::ProofConstructionFailed)?
     }
 
     // NQC verification: BLS aggregate verify + RS reconstruction (verify_interpolation
@@ -1743,78 +1490,27 @@ impl Core {
         });
     }
 
-    async fn handle_prepare_qc(&mut self, qc: &QC) -> ConsensusResult<()> {
+    async fn handle_ready_qc(&mut self, qc: &QC) -> ConsensusResult<()> {
         let start = Instant::now();
         self.store_qc_block(qc).await?;
-        if !self.uncommitted_qcs.contains_key(&qc.round) {
-            // Ensure QC is valid (has a quorum). This is a relatively expensive check.
-            // qc.is_well_formed(&self.committee, &self.sorted_keys, &self.combined_pubkey)?;
-            debug!("Processing new QC {:?}", qc);
-            self.uncommitted_qcs.insert(qc.round, qc.clone());
-
-            // A compact NQC proves that some quorum has voted, but to match the
-            // Lionfish timing model this node must verify local recoverability before
-            // sending its CommitVote. Nodes that learned the NQC via sync therefore
-            // fetch shards and wait for source=shard_sync availability verification.
-            self.request_availability_shards(qc).await?;
-
-            if self.round < qc.round + 1 {
-                self.propose_normal(qc.clone()).await;
-            }
-
-            if self.locked.round < qc.round {
-                debug!("Locked {:?}", qc);
-                self.locked = qc.clone();
-                // Can now sync peers in lower rounds using this QC, so no need to keep Timeouts.
-                self.aggregator.cleanup_timeouts(&self.locked.round);
-            }
-
-            // This is a no-op for qc_sync until local_nqc or shard_sync marks
-            // the QC as availability-verified.
-            if self.last_timeout < qc.round {
-                self.maybe_send_commit_vote(qc).await?;
-            }
-
-            // See if we have the related block and request it from our peers if we do not.
-            self.get_block(qc.blk_hash.clone(), qc.round).await?;
-            self.broadcast(ConsensusMessage::QC(qc.clone())).await;
-            self.advance_to_round(qc.round + 1).await?;
-            // A newly observed NQC may regularize buffered optimistic proposals.
-            self.try_vote().await?;
-        }
-        let total_ms = start.elapsed().as_millis();
-        if total_ms >= 10 {
-            debug!(
-                "TIMING handle_prepare_qc_slow round={} digest={} total_ms={}",
-                qc.round, qc.blk_hash, total_ms
-            );
-        }
-        Ok(())
-    }
-
-    async fn handle_commit_qc(&mut self, qc: &QC) -> ConsensusResult<()> {
-        let start = Instant::now();
-        self.store_qc_block(qc).await?;
+        let key = Self::qc_availability_key(qc);
         self.commit_qcs
             .entry(qc.round)
             .or_insert_with(|| qc.clone());
-        if !self.committable_blocks.contains_key(&qc.blk_hash) {
-            // Ensure QC is valid (has a quorum). This is a relatively expensive check.
-            // qc.is_well_formed(&self.committee, &self.sorted_keys, &self.combined_pubkey)?;
-            debug!("Processing new QC {:?}", qc);
-            self.schedule_commit(qc).await?;
-            self.broadcast(ConsensusMessage::QC(qc.clone())).await;
-            self.aggregator.cleanup_prepares(&qc.round);
+
+        if self.verified_normal_qcs.contains(&key) {
+            self.send_decide_vote(qc.blk_hash.clone(), qc.payload_root.clone(), qc.round)
+                .await?;
+        } else {
+            self.request_availability_shards(qc).await?;
         }
+
         self.propose_optimistic_children_waiting_on_commit_qc(qc.round)
             .await;
-        // A newly observed CQC may unblock NormalVotes for buffered proposals.
+        self.advance_to_round(qc.round + 1).await?;
         self.try_vote().await?;
-        // It may also unblock CommitVotes for proposals whose NQC was already verified.
-        self.try_send_commit_votes().await?;
-        // else: Already observed this Commit QC but still syncing ancestors. Ignore.
         debug!(
-            "TIMING handle_commit_qc round={} digest={} total_ms={}",
+            "TIMING handle_ready_qc round={} digest={} total_ms={}",
             qc.round,
             qc.blk_hash,
             start.elapsed().as_millis()
@@ -1822,46 +1518,17 @@ impl Core {
         Ok(())
     }
 
-    // TODO: Change to return a bool based on whether QC quorum is valid once panics have been removed.
-    #[async_recursion]
-    async fn handle_qc(&mut self, qc: &QC) -> ConsensusResult<()> {
-        if qc.round > self.last_commit.round {
-            if qc.kind == VoteType::Commit {
-                self.handle_commit_qc(qc).await
-            } else {
-                self.handle_prepare_qc(qc).await
-            }
-        } else {
-            // Old QC. Ignore.
-            Ok(())
-        }
-    }
-
-    async fn handle_tc(&mut self, tc: &TC) -> ConsensusResult<()> {
-        debug!("Received TC {:?}", tc);
-        if self.round < tc.round + 1 {
-            // Process the high QC in case it is new.
-            self.handle_qc(&tc.high_qc).await?;
-
-            // Although the paper has only proposal under this condition, this is only to make
-            // the proof reasoning simpler. We need not send Timeout messages for lower rounds
-            // than our current round because if we entered this round via a QC then we will
-            // use that to sync our peer, or if we entered via a TC instead then there must exist
-            // at least f+1 honest Timeout messages for r_c - 1, so all honest will eventually
-            // observe TC_{r_c-1} and will enter our current round.
-            tc.is_well_formed(&self.committee)?;
-            debug!("Processing new TC {:?}", tc);
-            self.propose_fallback(tc.clone()).await;
-            // Forward TC to next leader.
-            let next_leader = self.leader_elector.get_leader(tc.round + 1);
-            self.send_to(ConsensusMessage::TC(tc.clone()), &next_leader)
-                .await;
-            // Make sure we send the corresponding Timeout message so that the adversary
-            // cannot prevent us from ever sending it by delivering us this TC before our
-            // round timer expires.
-            self.send_timeout(tc.round).await?;
-            self.advance_to_round(tc.round + 1).await?;
-        }
+    async fn handle_decide_qc(&mut self, qc: &QC) -> ConsensusResult<()> {
+        let start = Instant::now();
+        self.store_qc_block(qc).await?;
+        self.schedule_commit(qc).await?;
+        self.aggregator.cleanup_prepares(&qc.round);
+        debug!(
+            "TIMING handle_decide_qc round={} digest={} total_ms={}",
+            qc.round,
+            qc.blk_hash,
+            start.elapsed().as_millis()
+        );
         Ok(())
     }
 
@@ -1883,15 +1550,10 @@ impl Core {
         }
 
         if let Some(qc) = self.uncommitted_qcs.get(&block.round) {
-            // Have a QC for this round and are not trying to sync this block, so
-            // either the QC if for this block and we already have it, or another
-            // block was certified for this round instead. Either way, no need to
-            // keep processing.
-            assert!(
-                qc.blk_hash != block.digest()
-                    || self.uncommitted_blocks.contains_key(&block.digest())
-            );
-            return Ok(false);
+            // In the Bracha path, votes can arrive before the proposal frame is
+            // processed. If the local NQC is for this block, accept the delayed
+            // block now; otherwise this round already certified a different block.
+            return Ok(qc.blk_hash == digest);
         }
 
         // Ensure that the block proposer is the leader of block.round.
@@ -1922,6 +1584,7 @@ impl Core {
 
         if self.can_accept_block(block).await? {
             self.store_block(block, proof).await;
+            self.advance_to_round(block.round).await?;
             self.try_vote().await?;
             self.try_commit_or_sync_ancestor(block).await?;
             self.propose_optimistic_child(block).await;
@@ -1932,55 +1595,20 @@ impl Core {
 
     async fn process_normal_proposal(&mut self, p: NormalProposal) -> ConsensusResult<()> {
         debug!("Received Normal Proposal {:?}", p); // Ensure embedded QC is valid. TODO: Remove panics.
-        self.handle_qc(&p.qc).await?;
-        // Ensure:
-        //   1. Proposer has voting rights.
-        //   2. Proposal includes a QC p.block.round - 1 and this QC certifies block.parent.
-        //   3. Block is signed by the proposer.
+                                                    // Ensure:
+                                                    //   1. Proposer has voting rights.
+                                                    //   2. Block is signed by the proposer.
         p.is_well_formed(&self.committee)?;
         ensure!(
             p.proof.index() == self.committee.id(&self.name) as usize,
             ConsensusError::InvalidProof
         );
         let proof = p.proof.clone();
-        self.process_block(&p.block, Some(proof)).await
-    }
-
-    async fn process_fallback_recovery_proposal(
-        &mut self,
-        p: FallbackRecoveryProposal,
-    ) -> ConsensusResult<()> {
-        debug!("Received Fallback Recovery Proposal {:?}", p);
-        debug!(
-            "TIMELINE event=fallback_proposal_received node={} author={} round={} digest={} payload_root={} payload_bytes={}",
-            self.name,
-            p.block.author,
-            p.block.round,
-            p.block.digest(),
-            p.block.payload_root,
-            p.block.payload_len
-        );
-        // Ensure embedded TC is valid. TODO: Remove panics.
-        self.handle_tc(&p.tc).await?;
-        // Ensure:
-        //   1. Proposer has voting rights.
-        //   2. Block is signed by the proposer.
-        //   3. Proposal includes a TC for p.block.round - 1.
-        //   4. The parent of the included block is the block certified by
-        //      the QC with the highest round included in the included TC.
-        p.is_well_formed(&self.committee)?;
-        ensure!(
-            p.proof.index() == self.committee.id(&self.name) as usize,
-            ConsensusError::InvalidProof
-        );
-        let proof = p.proof.clone();
-        self.fallback_blocks.insert(p.block.digest());
         self.process_block(&p.block, Some(proof)).await
     }
 
     async fn handle_proposal(&mut self, proposal: ProposalMessage) -> ConsensusResult<()> {
         match proposal {
-            ProposalMessage::F(f) => self.process_fallback_recovery_proposal(f).await,
             ProposalMessage::N(n) => self.process_normal_proposal(n).await,
         }
     }
@@ -2031,31 +1659,11 @@ impl Core {
         Ok(())
     }
 
-    fn sanitize_certificate(&mut self, qc: &QC) -> ConsensusResult<()> {
-        if qc.round > self.last_commit.round {
-            match qc.kind {
-                VoteType::Commit => {
-                    if !self.committable_blocks.contains_key(&qc.blk_hash) {
-                        // let start_time = Instant::now();
-                        qc.is_well_formed(&self.committee)?;
-                    }
-                }
-                _ => {
-                    if !self.uncommitted_qcs.contains_key(&qc.round) {
-                        // let start_time = Instant::now();
-                        qc.is_well_formed(&self.committee)?;
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
     pub async fn run(&mut self) {
         // Upon booting, generate the very first block (if we are the leader).
         // Also, schedule a timer in case we don't hear from the leader.
         self.timer.reset();
-        self.propose_normal(QC::genesis()).await;
+        self.propose_parent(Block::genesis()).await;
 
         // This is the main loop: it processes incoming blocks, votes and QCs,
         // and receives timeout notifications from our Timeout Manager.
@@ -2076,9 +1684,20 @@ impl Core {
                             qc.round, result.aggregate_ms, result.bls_verify_ms, result.reconstruct_ms
                         );
                         self.verified_normal_qcs.insert(Self::qc_availability_key(&qc));
-                        match self.maybe_send_commit_vote(&qc).await {
-                            Ok(()) => self.try_commit_verified_blocks().await,
-                            Err(e) => Err(e),
+                        match qc.kind {
+                            VoteType::Normal => match self.maybe_send_commit_vote(&qc).await {
+                                Ok(()) => self.try_commit_verified_blocks().await,
+                                Err(e) => Err(e),
+                            },
+                            VoteType::Commit => {
+                                self.send_decide_vote(
+                                    qc.blk_hash.clone(),
+                                    qc.payload_root.clone(),
+                                    qc.round,
+                                )
+                                .await
+                            }
+                            VoteType::Decide => self.try_commit_verified_blocks().await,
                         }
                     } else {
                         warn!(
@@ -2103,17 +1722,9 @@ impl Core {
                     let handle_start = Instant::now();
                     let result = match message {
                         ConsensusMessage::Propose(proposal) => self.handle_proposal(proposal).await,
-                        ConsensusMessage::QC(qc) => {
-                            match self.sanitize_certificate(&qc){
-                                Ok(()) => self.handle_qc(&qc).await,
-                                error => error
-                            }
-                        }
                         ConsensusMessage::SyncResponse(block) => self.handle_sync_response(block).await,
                         ConsensusMessage::ShardRequest(request) => self.handle_shard_request(request).await,
                         ConsensusMessage::ShardResponse(response) => self.handle_shard_response(response).await,
-                        ConsensusMessage::TC(timeout) => self.handle_tc(&timeout).await,
-                        ConsensusMessage::Timeout(timeout) => self.handle_timeout(&timeout).await,
                         ConsensusMessage::Vote(vote) => self.handle_vote(&vote).await,
                         _ => panic!("Unexpected protocol message")
                     };

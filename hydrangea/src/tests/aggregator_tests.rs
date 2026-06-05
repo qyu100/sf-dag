@@ -49,10 +49,8 @@ fn cleanup() {
     let result = aggregator.add_vote(vote());
     assert!(result.is_ok());
     assert_eq!(aggregator.votes_aggregators.len(), 1);
-    assert!(aggregator.timeouts_aggregators.is_empty());
 
     // Clean up the aggregator.
     aggregator.cleanup(&2);
     assert!(aggregator.votes_aggregators.is_empty());
-    assert!(aggregator.timeouts_aggregators.is_empty());
 }

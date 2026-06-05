@@ -4,10 +4,7 @@ use crate::error::ConsensusError;
 use crate::helper::{Helper, HelperRequest};
 use crate::leader::LeaderElector;
 use crate::mempool::MempoolDriver;
-use crate::messages::{
-    Block, FallbackRecoveryProposal, NormalProposal, ShardRequest, ShardResponse, Timeout, Vote,
-    QC, TC,
-};
+use crate::messages::{Block, NormalProposal, ShardRequest, ShardResponse, Vote};
 use crate::proposer::Proposer;
 use crate::synchronizer::Synchronizer;
 use async_trait::async_trait;
@@ -15,7 +12,7 @@ use bytes::Bytes;
 use config::{Committee, Parameters};
 use crypto::{BlsSignatureService, Digest, Hash as _, PublicKey, SignatureService};
 use futures::SinkExt as _;
-use log::{debug, info};
+use log::debug;
 use network::{MessageHandler, Receiver as NetworkReceiver, Writer};
 use primary::Certificate;
 use serde::{Deserialize, Serialize};
@@ -39,9 +36,6 @@ pub enum ConsensusMessage {
     Propose(ProposalMessage),
     Vote(Vote),
     VerifiedVote(Vote),
-    Timeout(Timeout),
-    QC(QC),
-    TC(TC),
     SyncRequest(Digest, PublicKey),
     SyncResponse(Block),
     ShardRequest(ShardRequest),
@@ -54,9 +48,6 @@ pub enum ConsensusMessageRef<'a> {
     Propose(&'a ProposalMessage),
     Vote(&'a Vote),
     VerifiedVote(&'a Vote),
-    Timeout(&'a Timeout),
-    QC(&'a QC),
-    TC(&'a TC),
     SyncRequest(&'a Digest, &'a PublicKey),
     SyncResponse(&'a Block),
     ShardRequest(&'a ShardRequest),
@@ -65,7 +56,6 @@ pub enum ConsensusMessageRef<'a> {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum ProposalMessage {
-    F(FallbackRecoveryProposal),
     N(NormalProposal),
 }
 
@@ -137,7 +127,6 @@ impl Consensus {
             name,
             committee.clone(),
             parameters.consensus_only,
-            signature_service.clone(),
             bls_signature_service,
             store.clone(),
             leader_elector,
@@ -146,7 +135,6 @@ impl Consensus {
             parameters.timeout_delay,
             parameters.rs_block_size,
             parameters.rs_block_threads,
-            tx_consensus,
             /* rx_message */ rx_consensus,
             rx_proposer_core,
             rx_sync_core,
@@ -213,13 +201,6 @@ impl MessageHandler for ConsensusReceiverHandler {
                     p.block.digest()
                 )
             }
-            ConsensusMessage::Propose(ProposalMessage::F(p)) => {
-                format!(
-                    "Propose(Fallback),round={},digest={}",
-                    p.block.round,
-                    p.block.digest()
-                )
-            }
             ConsensusMessage::Vote(v) => format!(
                 "Vote({}),round={},digest={},root={}",
                 v.kind, v.round, v.blk_hash, v.payload_root
@@ -228,12 +209,6 @@ impl MessageHandler for ConsensusReceiverHandler {
                 "VerifiedVote({}),round={},digest={},root={}",
                 v.kind, v.round, v.blk_hash, v.payload_root
             ),
-            ConsensusMessage::Timeout(t) => format!("Timeout,round={}", t.round),
-            ConsensusMessage::QC(qc) => format!(
-                "QC({}),round={},digest={},root={}",
-                qc.kind, qc.round, qc.blk_hash, qc.payload_root
-            ),
-            ConsensusMessage::TC(tc) => format!("TC,round={}", tc.round),
             ConsensusMessage::SyncRequest(missing, _) => {
                 format!("SyncRequest,digest={}", missing)
             }
@@ -367,12 +342,6 @@ impl ConsensusReceiverHandler {
     fn proposal_metadata(proposal: &ProposalMessage) -> (PublicKey, Round, Digest, usize) {
         match proposal {
             ProposalMessage::N(proposal) => (
-                proposal.block.author,
-                proposal.block.round,
-                proposal.block.digest(),
-                proposal.block.payload_len,
-            ),
-            ProposalMessage::F(proposal) => (
                 proposal.block.author,
                 proposal.block.round,
                 proposal.block.digest(),

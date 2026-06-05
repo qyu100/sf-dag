@@ -1,15 +1,12 @@
 use crate::consensus::Round;
 use crate::error::{ConsensusError, ConsensusResult};
 use crate::merkle::Proof;
-use blsttc::{PublicKeyShareG2, SignatureShareG1};
+use blsttc::SignatureShareG1;
 use config::Committee;
-use crypto::{
-    remove_pubkeys, BlsSignatureService, Digest, Hash, PublicKey, Signature, SignatureService,
-};
+use crypto::{BlsSignatureService, Digest, Hash, PublicKey, Signature, SignatureService};
 use ed25519_dalek::Digest as _;
 use ed25519_dalek::Sha512;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
 use std::convert::TryInto;
 use std::fmt;
 
@@ -65,9 +62,9 @@ impl Block {
         payload_root: Digest,
         payload_len: usize,
         round: Round,
-        mut signature_service: SignatureService,
+        _signature_service: SignatureService,
     ) -> Self {
-        let mut b = Block {
+        let b = Block {
             author,
             parent,
             payload_hash,
@@ -76,7 +73,6 @@ impl Block {
             round,
             signature: Signature::default(),
         };
-        b.signature = signature_service.request_signature(b.digest()).await;
         b
     }
 
@@ -101,8 +97,6 @@ impl Block {
                 voting_rights > 0,
                 ConsensusError::UnknownAuthority(self.author)
             );
-            // Ensure the included signature is that of the author.
-            self.signature.verify(&self.digest(), &self.author)?;
         }
         Ok(())
     }
@@ -167,15 +161,12 @@ pub fn shard_store_key(block: &Digest, payload_root: &Digest, index: usize) -> V
 #[derive(Serialize, Deserialize, Clone)]
 pub struct NormalProposal {
     pub block: Block,
-    // QC for block.parent, which must have been proposed in block.round - 1.
-    //Todo: replace the following with progress certificate
-    pub qc: QC,
     pub proof: Proof,
 }
 
 impl NormalProposal {
-    pub fn new(block: Block, qc: QC, proof: Proof) -> Self {
-        Self { block, qc, proof }
+    pub fn new(block: Block, proof: Proof) -> Self {
+        Self { block, proof }
     }
 
     pub fn is_well_formed(&self, committee: &Committee) -> ConsensusResult<()> {
@@ -184,20 +175,6 @@ impl NormalProposal {
             *self.proof.root_hash() == self.block.payload_root
                 && self.proof.validate(committee.size()),
             ConsensusError::InvalidProof
-        );
-
-        // A normal proposal can either be chained directly from a normal QC for
-        // its parent, or optimistically extend the previous round while carrying
-        // a commit QC two rounds behind the parent.
-        let chained_qc = self.qc.blk_hash == self.block.parent
-            && self.qc.round == self.block.round - 1
-            && (self.qc.kind == VoteType::Normal || self.qc.round == 0);
-        let optimistic_qc = self.qc.kind == VoteType::Commit
-            && (self.qc.round + 3 == self.block.round
-                || (self.qc.round == 0 && self.block.round == 2));
-        ensure!(
-            chained_qc || optimistic_qc,
-            ConsensusError::MalformedNormalProposal(self.digest())
         );
 
         Ok(())
@@ -208,7 +185,6 @@ impl Hash for NormalProposal {
     fn digest(&self) -> Digest {
         let mut hasher = Sha512::new();
         hasher.update(self.block.digest());
-        hasher.update(self.qc.digest());
         Digest(hasher.finalize().as_slice()[..32].try_into().unwrap())
     }
 }
@@ -217,10 +193,9 @@ impl fmt::Debug for NormalProposal {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         write!(
             f,
-            "NormalProposal {}: Block {:?}, {:?})",
+            "NormalProposal {}: Block {:?})",
             self.digest(),
-            self.block,
-            self.qc
+            self.block
         )
     }
 }
@@ -228,71 +203,6 @@ impl fmt::Debug for NormalProposal {
 impl fmt::Display for NormalProposal {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         write!(f, "NormalProposal B{}", self.block.round)
-    }
-}
-
-#[derive(Serialize, Deserialize, Default, Clone)]
-pub struct FallbackRecoveryProposal {
-    pub block: Block,
-    // TC for block.round - 1, the highest QC of which must certify block.parent.
-    pub tc: TC,
-    pub proof: Proof,
-}
-
-impl FallbackRecoveryProposal {
-    pub fn new(block: Block, tc: TC, proof: Proof) -> Self {
-        Self { block, tc, proof }
-    }
-
-    pub fn is_well_formed(&self, committee: &Committee) -> ConsensusResult<()> {
-        self.block.is_well_formed(committee)?;
-        ensure!(
-            *self.proof.root_hash() == self.block.payload_root
-                && self.proof.validate(committee.size()),
-            ConsensusError::InvalidProof
-        );
-
-        // Ensure that the correct TC has been used to justify this proposal.
-        ensure!(
-            self.tc.round == self.block.round - 1,
-            ConsensusError::BlockBadTC(self.digest(), self.block.round, self.tc.round)
-        );
-
-        // Parent of the block must be certified by qc_prime.
-        ensure!(
-            self.block.parent == self.tc.high_qc.blk_hash,
-            ConsensusError::FallbackRecoveryBadParent(self.block.digest())
-        );
-
-        // TC validity is checked when the TC is processed.
-        Ok(())
-    }
-}
-
-impl Hash for FallbackRecoveryProposal {
-    fn digest(&self) -> Digest {
-        let mut hasher = Sha512::new();
-        hasher.update(self.block.digest());
-        hasher.update(self.tc.digest());
-        Digest(hasher.finalize().as_slice()[..32].try_into().unwrap())
-    }
-}
-
-impl fmt::Debug for FallbackRecoveryProposal {
-    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
-        write!(
-            f,
-            "FallbackRecoveryProposal {}: {:?}, {:?}",
-            self.digest(),
-            self.block,
-            self.tc
-        )
-    }
-}
-
-impl fmt::Display for FallbackRecoveryProposal {
-    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
-        write!(f, "FallbackRecoveryProposal B{}", self.block.round)
     }
 }
 
@@ -325,6 +235,7 @@ impl fmt::Display for ProposalType {
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Hash, Default, Debug)]
 pub enum VoteType {
     Commit,
+    Decide,
     #[default]
     Normal,
 }
@@ -334,6 +245,7 @@ impl Hash for VoteType {
         let mut hasher = Sha512::new();
         match self {
             Self::Commit => hasher.update("C"),
+            Self::Decide => hasher.update("D"),
             Self::Normal => hasher.update("NV"),
         }
         Digest(hasher.finalize().as_slice()[..32].try_into().unwrap())
@@ -344,6 +256,7 @@ impl fmt::Display for VoteType {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         match self {
             Self::Commit => write!(f, "C"),
+            Self::Decide => write!(f, "D"),
             Self::Normal => write!(f, "NV"),
         }
     }
@@ -370,7 +283,7 @@ impl Vote {
         kind: VoteType,
         round: Round,
         proof: Option<Proof>,
-        bls_signature_service: &mut BlsSignatureService,
+        _bls_signature_service: &mut BlsSignatureService,
     ) -> Self {
         let vote = Self {
             author,
@@ -381,10 +294,8 @@ impl Vote {
             proof,
             signature: SignatureShareG1::default(),
         };
-        // Only sign the block. The network channels are already authenticated so
-        // no need to sign the whole message.
-        let signature = bls_signature_service.request_signature(vote.digest()).await;
-        Self { signature, ..vote }
+        // Bracha RBC uses authenticated channels but no vote signatures.
+        vote
     }
 
     pub fn is_well_formed(&self, committee: &Committee) -> ConsensusResult<()> {
@@ -486,14 +397,8 @@ impl QC {
             ConsensusError::QCRequiresQuorum(self.round)
         );
 
-        let agg_pk = remove_pubkeys(
-            &committee.combined_pubkey,
-            ids_to_remove,
-            &committee.sorted_keys,
-        );
-
-        SignatureShareG1::verify_batch(&self.digest().0, &agg_pk, &self.votes.1)
-            .map_err(ConsensusError::from)
+        let _ = ids_to_remove;
+        Ok(())
     }
 }
 
@@ -526,153 +431,5 @@ impl fmt::Debug for QC {
 impl PartialEq for QC {
     fn eq(&self, other: &Self) -> bool {
         self.kind == other.kind && self.blk_hash == other.blk_hash && self.round == other.round
-    }
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-pub struct Timeout {
-    pub high_qc: QC,
-    pub round: Round,
-    pub author: PublicKey,
-    pub signature: Signature,
-}
-
-impl Timeout {
-    pub async fn new(
-        high_qc: QC,
-        round: Round,
-        author: PublicKey,
-        mut signature_service: SignatureService,
-    ) -> Self {
-        let timeout = Self {
-            high_qc,
-            round,
-            author,
-            signature: Signature::default(),
-        };
-        let signature = signature_service.request_signature(timeout.digest()).await;
-        Self {
-            signature,
-            ..timeout
-        }
-    }
-
-    pub fn author_is_authorised(&self, committee: &Committee) -> ConsensusResult<bool> {
-        // Ensure the author has voting rights.
-        ensure!(
-            committee.stake(&self.author) > 0,
-            ConsensusError::UnknownAuthority(self.author)
-        );
-        Ok(true)
-    }
-
-    pub fn is_well_formed(&self, committee: &Committee) -> ConsensusResult<()> {
-        self.author_is_authorised(committee)?;
-        // Check the signature.
-        self.signature.verify(&self.digest(), &self.author)?;
-
-        // Check the embedded QC.
-        if self.high_qc != QC::genesis() {
-            self.high_qc.is_well_formed(committee)?;
-        }
-        Ok(())
-    }
-}
-
-impl Hash for Timeout {
-    fn digest(&self) -> Digest {
-        let mut hasher = Sha512::new();
-        hasher.update(self.high_qc.round.to_le_bytes());
-        hasher.update(self.round.to_le_bytes());
-        Digest(hasher.finalize().as_slice()[..32].try_into().unwrap())
-    }
-}
-
-impl fmt::Debug for Timeout {
-    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
-        write!(f, "TV({}, {}, {:?})", self.author, self.round, self.high_qc)
-    }
-}
-
-#[derive(Clone, Serialize, Deserialize, Default)]
-pub struct TC {
-    // Justifies the correctness of `votes`. Without this, a Byzantine node
-    // can forge a TC that includes erroneous votes with arbitrarily high
-    // round numbers, which the adversary can use to force honest proposers
-    // to create invalid Fallback Recovery Proposals (if, say, we create
-    // such a proposal using our locked QC and the TC, as the old Jolteon
-    // implementation did), since a leader will create an FRP from the first
-    // TC that it receives. This allows the adversary to break liveness
-    // permanently by always preventing honest leaders from generating valid
-    // Fallback Recovery Proposals.
-    pub high_qc: QC,
-    pub round: Round,
-    pub votes: Vec<(PublicKey, Signature, Round)>,
-}
-
-impl TC {
-    pub fn is_well_formed(&self, committee: &Committee) -> ConsensusResult<()> {
-        // Ensure the TC has a quorum.
-        let mut weight = 0;
-        let mut used = HashSet::new();
-        for (name, _, locked_qc_round) in self.votes.iter() {
-            // Ensure that the creator of this TC reported the highest round
-            // reported in `self.votes`.
-            ensure!(
-                *locked_qc_round <= self.high_qc.round,
-                ConsensusError::TCInvalidHighQC(self.high_qc.clone())
-            );
-            ensure!(!used.contains(name), ConsensusError::AuthorityReuse(*name));
-            let voting_rights = committee.stake(name);
-            ensure!(voting_rights > 0, ConsensusError::UnknownAuthority(*name));
-            used.insert(*name);
-            weight += voting_rights;
-        }
-        ensure!(
-            weight >= committee.quorum_threshold(),
-            ConsensusError::TCRequiresQuorum
-        );
-
-        for (author, signature, locked_qc_round) in &self.votes {
-            // Check the signature.
-            let mut hasher = Sha512::new();
-            hasher.update(locked_qc_round.to_le_bytes());
-            hasher.update(self.round.to_le_bytes());
-            let digest = Digest(hasher.finalize().as_slice()[..32].try_into().unwrap());
-            signature.verify(&digest, &author)?;
-        }
-        Ok(())
-    }
-
-    pub fn locked_rounds(&self) -> Vec<&Round> {
-        self.votes
-            .iter()
-            .map(|(_, _, locked_round)| locked_round)
-            .collect()
-    }
-}
-
-impl Hash for TC {
-    fn digest(&self) -> Digest {
-        let mut hasher = Sha512::new();
-        hasher.update(self.round.to_le_bytes());
-        hasher.update(self.high_qc.digest());
-        for (_node, _sig, locked_round) in &self.votes {
-            hasher.update(locked_round.to_be_bytes());
-        }
-
-        Digest(hasher.finalize().as_slice()[..32].try_into().unwrap())
-    }
-}
-
-impl fmt::Debug for TC {
-    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
-        write!(
-            f,
-            "TC({}, {:?}, {:?})",
-            self.round,
-            self.high_qc,
-            self.locked_rounds()
-        )
     }
 }

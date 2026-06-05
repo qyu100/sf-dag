@@ -1,10 +1,10 @@
 use crate::consensus::Round;
 use crate::error::{ConsensusError, ConsensusResult};
-use crate::messages::{Timeout, Vote, VoteType, QC, TC};
+use crate::messages::{Vote, VoteType, QC};
 use blsttc::{PublicKeyShareG2, SignatureShareG1};
 use config::{Committee, Stake};
-use crypto::{aggregate_sign, remove_pubkeys, Digest, Hash, PublicKey, Signature};
-use log::{debug, info};
+use crypto::{aggregate_sign, remove_pubkeys, Digest, Hash, PublicKey};
+use log::debug;
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
@@ -17,7 +17,12 @@ pub struct Aggregator {
     // Proposals indexed by round and block digest.
     votes_aggregators: HashMap<Round, HashMap<Digest, Box<QCMaker>>>,
     commit_aggregators: HashMap<Round, Box<QCMaker>>,
-    timeouts_aggregators: HashMap<Round, Box<TCMaker>>,
+    decide_aggregators: HashMap<Round, Box<QCMaker>>,
+}
+
+pub struct ReadyVoteOutcome {
+    pub relay: Option<(Round, Digest, Digest)>,
+    pub quorum: Option<QC>,
 }
 
 impl Aggregator {
@@ -26,7 +31,7 @@ impl Aggregator {
             committee,
             votes_aggregators: HashMap::new(),
             commit_aggregators: HashMap::new(),
-            timeouts_aggregators: HashMap::new(),
+            decide_aggregators: HashMap::new(),
         }
     }
 
@@ -49,23 +54,21 @@ impl Aggregator {
             .append(vote, &self.committee, false)
     }
 
-    pub fn add_commit_vote(&mut self, vote: Vote) -> ConsensusResult<Option<QC>> {
+    pub fn add_ready_vote(&mut self, vote: Vote) -> ConsensusResult<ReadyVoteOutcome> {
         let total_nodes = self.committee.n as usize;
         self.commit_aggregators
             .entry(vote.round)
             .or_insert_with(|| Box::new(QCMaker::new(total_nodes)))
-            .append(vote, &self.committee, true)
-            .map(|maybe| maybe.map(|(qc, _)| qc))
+            .append_ready(vote, &self.committee)
     }
 
-    pub fn add_timeout(&mut self, timeout: Timeout) -> ConsensusResult<(Stake, Option<TC>)> {
-        // TODO: A bad node may make us run out of memory by sending many timeouts
-        // with different round numbers.
-        // Add the new timeout to our aggregator and see if we have a TC.
-        self.timeouts_aggregators
-            .entry(timeout.round)
-            .or_insert_with(|| Box::new(TCMaker::new()))
-            .append(timeout, &self.committee)
+    pub fn add_decide_vote(&mut self, vote: Vote) -> ConsensusResult<Option<QC>> {
+        let total_nodes = self.committee.n as usize;
+        self.decide_aggregators
+            .entry(vote.round)
+            .or_insert_with(|| Box::new(QCMaker::new(total_nodes)))
+            .append(vote, &self.committee, false)
+            .map(|maybe| maybe.map(|(qc, _)| qc))
     }
 
     pub fn cleanup_prepares(&mut self, r: &Round) {
@@ -73,10 +76,8 @@ impl Aggregator {
             .retain(|block_round, _| block_round > r);
         self.commit_aggregators
             .retain(|block_round, _| block_round > r);
-    }
-
-    pub fn cleanup_timeouts(&mut self, round: &Round) {
-        self.timeouts_aggregators.retain(|k, _| k > round);
+        self.decide_aggregators
+            .retain(|block_round, _| block_round > r);
     }
 }
 
@@ -88,6 +89,7 @@ struct QCMaker {
     pk_bit_vec: Vec<u128>,
     availability_shards: Vec<Option<Box<[u8]>>>,
     is_qc_formed: bool,
+    relay_formed: bool,
     first_nv_ts: Option<Instant>,
 }
 
@@ -101,8 +103,57 @@ impl QCMaker {
             pk_bit_vec: vec![u128::MAX; (total_nodes + 127) / 128],
             availability_shards: vec![None; total_nodes],
             is_qc_formed: false,
+            relay_formed: false,
             first_nv_ts: None,
         }
+    }
+
+    pub fn append_ready(
+        &mut self,
+        vote: Vote,
+        committee: &Committee,
+    ) -> ConsensusResult<ReadyVoteOutcome> {
+        let mut outcome = ReadyVoteOutcome {
+            relay: None,
+            quorum: None,
+        };
+        if self.is_qc_formed {
+            return Ok(outcome);
+        }
+
+        let author = vote.author;
+        if !self.is_valid(&vote) {
+            return Ok(outcome);
+        }
+
+        self.used.insert(author);
+        self.weight += committee.stake(&author);
+
+        let author_bls_g2 = committee.get_bls_public_g2(&author);
+        let id = committee.sorted_keys.binary_search(&author_bls_g2).unwrap();
+        let chunk = id / 128;
+        let bit = id % 128;
+        self.pk_bit_vec[chunk] &= !(1 << bit);
+
+        if !self.relay_formed && self.weight >= committee.validity_threshold() {
+            self.relay_formed = true;
+            outcome.relay = Some((vote.round, vote.blk_hash.clone(), vote.payload_root.clone()));
+        }
+
+        if self.weight >= committee.quorum_threshold() {
+            self.is_qc_formed = true;
+            outcome.quorum = Some(QC {
+                blk_hash: vote.blk_hash,
+                payload_root: vote.payload_root,
+                kind: vote.kind,
+                round: vote.round,
+                block: None,
+                availability_shards: Vec::new(),
+                votes: (self.pk_bit_vec.clone(), SignatureShareG1::default()),
+            });
+        }
+
+        Ok(outcome)
     }
 
     fn is_valid(&self, vote: &Vote) -> bool {
@@ -182,6 +233,7 @@ impl QCMaker {
             let ready_threshold = committee.n - committee.f;
             if vote.kind == VoteType::Normal && self.weight >= ready_threshold
                 || vote.kind == VoteType::Commit && self.weight >= ready_threshold
+                || vote.kind == VoteType::Decide && self.weight >= ready_threshold
             {
                 self.weight = 0; // Ensures QC of this type is only made once.
                 self.is_qc_formed = true;
@@ -235,71 +287,5 @@ impl QCMaker {
         }
 
         Ok(None)
-    }
-}
-
-struct TCMaker {
-    high_qc: QC,
-    used: HashSet<PublicKey>,
-    votes: Vec<(PublicKey, Signature, Round)>,
-    weight: Stake,
-}
-
-impl TCMaker {
-    pub fn new() -> Self {
-        Self {
-            high_qc: QC::genesis(),
-            used: HashSet::new(),
-            votes: Vec::new(),
-            weight: 0,
-        }
-    }
-
-    /// Try to append a signature to a (partial) quorum.
-    pub fn append(
-        &mut self,
-        timeout: Timeout,
-        committee: &Committee,
-    ) -> ConsensusResult<(Stake, Option<TC>)> {
-        let author = timeout.author;
-
-        if !self.used.contains(&author) {
-            // Verify the signature and voting rights before storing to prevent DoS
-            // by unauthorised nodes. Verification is done after membership check on
-            // self.used to prevent authorised but Byzantine nodes from draining compute
-            // by sending duplicate Timeouts (HashMap membership checks are cheap, sig
-            // verification is more expensive).
-            timeout.is_well_formed(committee)?;
-            // Ensure we ignore duplicates.
-            self.used.insert(author);
-
-            // Add the timeout to the accumulator.
-            self.votes
-                .push((author, timeout.signature, timeout.high_qc.round));
-            self.weight += committee.stake(&author);
-
-            // Update high QC.
-            if timeout.high_qc.round > self.high_qc.round {
-                self.high_qc = timeout.high_qc;
-            }
-
-            if self.weight >= committee.view_change_threshold() {
-                // We do not reset the weight after creating the TC because we might
-                // still need to send Timeout messages for this round to our honest
-                // peers in case they either were censored by the Byzantine nodes or
-                // the network dropped some of the honest Timeouts en-route to them.
-
-                return Ok((
-                    self.weight,
-                    Some(TC {
-                        high_qc: self.high_qc.clone(),
-                        round: timeout.round,
-                        votes: self.votes.clone(),
-                    }),
-                ));
-            }
-        }
-
-        Ok((self.weight, None))
     }
 }
