@@ -994,6 +994,20 @@ impl Core {
         Ok(())
     }
 
+    async fn request_header_from_author(&mut self, header_id: Digest, round: Round, origin: PublicKey) -> DagResult<()> {
+        if origin == self.name {
+            warn!(
+                "Missing locally authored header while syncing reconstruction: round={} digest={:?}",
+                round,
+                header_id
+            );
+            return Ok(());
+        }
+
+        let message = PrimaryMessage::CertificatesRequest(vec![header_id], self.name);
+        self.send_primary_message(message, &origin).await
+    }
+
     async fn request_availability_shards(
         &mut self,
         id: Digest,
@@ -1040,6 +1054,13 @@ impl Core {
         let Some((round, origin)) = self.ready_quorums.get(&key).copied() else {
             return Ok(());
         };
+        if !self.processing_header_proofs.contains_key(&id) {
+            if !self.pending_reconstructions.contains_key(&id) {
+                self.pending_reconstructions.insert(id, root);
+                self.request_header_from_author(id, round, origin).await?;
+            }
+            return Ok(());
+        }
         if !self.formed_certificates.insert(key) {
             return Ok(());
         }
