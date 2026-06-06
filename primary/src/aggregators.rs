@@ -29,7 +29,7 @@ impl EchoAggregator {
         }
     }
 
-    pub fn append(&mut self, author: PublicKey, proof: Proof, committee: &Committee) -> DagResult<Option<(Digest, Vec<Option<Box<[u8]>>>)>> {
+    pub fn append(&mut self, author: PublicKey, proof: Proof, committee: &Committee) -> DagResult<Option<(Digest, Vec<Option<Box<[u8]>>>, Stake, usize)>> {
         // Ensure it is the first time this authority votes.
         ensure!(self.used.insert(author), DagError::AuthorityReuse(author));
 
@@ -43,15 +43,17 @@ impl EchoAggregator {
         *w += committee.stake(&author);
         // If this particular root reached quorum, build the ordered leaf vector
         if *w >= committee.optimistic_threshold() {
+            let collected_weight = *w;
             self.weights.remove(&root);
             let author_map = self.echos.remove(&root).expect("author_map exists");
+            let collected_count = author_map.len();
             let mut owned_map = author_map;
             let leaf_values: Vec<Option<Box<[u8]>>> = committee
                 .sorted_keys
                 .iter()
                 .map(|pk| owned_map.remove(pk).map(|p| p.into_value()))
                 .collect();
-            return Ok(Some((root.clone(), leaf_values)));
+            return Ok(Some((root.clone(), leaf_values, collected_weight, collected_count)));
         }
         Ok(None)
     }

@@ -46,6 +46,8 @@ struct OwnHeaderComputeResult {
 /// Result from background echo reconstruction.
 struct ReconstructionResult {
     id: Digest,
+    round: Round,
+    origin: PublicKey,
     root: Digest,
     success: bool,
 }
@@ -672,6 +674,16 @@ impl Core {
     /// Performs network sends and state updates inline.
     async fn handle_own_header_result(&mut self, result: OwnHeaderComputeResult) -> DagResult<()> {
         let start = Instant::now();
+        let recipient_count = self.committee.sorted_keys.len().saturating_sub(1);
+
+        info!(
+            "BENCH event=own_header_ready node={:?} round={} digest={:?} build_total_ms={} recipients={}",
+            self.name,
+            result.round,
+            result.header_info.id,
+            result.build_total_ms,
+            recipient_count
+        );
 
         // Store header_info in processing map
         self.processing_header_infos
@@ -682,7 +694,7 @@ impl Core {
         for (index, pk) in sorted_keys.iter().enumerate() {
             match &result.messages[index] {
                 (Some(hiwp), _) => {
-                    self.process_header_proof_optimized(hiwp)
+                    self.process_header_proof_optimized_with_source(hiwp, "self")
                         .await
                         .expect("Failed to process our own proof");
                 }
@@ -701,13 +713,14 @@ impl Core {
                 _ => unreachable!(),
             }
         }
-        debug!(
-            "BENCH event=own_header_sent node={:?} round={} digest={:?} build_total_ms={} send_ms={}",
+        info!(
+            "BENCH event=own_header_sent node={:?} round={} digest={:?} build_total_ms={} send_ms={} recipients={}",
             self.name,
             result.round,
             result.header_info.id,
             result.build_total_ms,
-            start.elapsed().as_millis()
+            start.elapsed().as_millis(),
+            recipient_count
         );
         Ok(())
     }
@@ -756,12 +769,28 @@ impl Core {
     /// - Uses or_insert_with for lazy clone in processing_header_proofs cache
     
     async fn process_header_proof_optimized(&mut self, header_info_with_proof: &HeaderInfoWithProof) -> DagResult<()> {
+        self.process_header_proof_optimized_with_source(header_info_with_proof, "unknown").await
+    }
+
+    async fn process_header_proof_optimized_with_source(&mut self, header_info_with_proof: &HeaderInfoWithProof, source: &'static str) -> DagResult<()> {
         self.parent_info.entry(header_info_with_proof.id).or_insert((header_info_with_proof.round, header_info_with_proof.parent));
 
-        // 2c: Use or_insert_with for lazy clone — only clones on cache miss.
-        self.processing_header_proofs
-             .entry(header_info_with_proof.id)
-             .or_insert_with(|| header_info_with_proof.clone());
+        let first_seen = !self.processing_header_proofs.contains_key(&header_info_with_proof.id);
+        if first_seen {
+            self.processing_header_proofs
+                .insert(header_info_with_proof.id, header_info_with_proof.clone());
+            info!(
+                "BENCH event=header_first_seen node={:?} round={} digest={:?} origin={:?} parent={:?} source={} proof_index={} payload_bytes={}",
+                self.name,
+                header_info_with_proof.round,
+                header_info_with_proof.id,
+                header_info_with_proof.author,
+                header_info_with_proof.parent,
+                source,
+                header_info_with_proof.proof.index(),
+                header_info_with_proof.payload_len
+            );
+        }
 
         if header_info_with_proof.round != 1 {
             // 2b: Pass header_info_with_proof directly — no unnecessary .clone().
@@ -784,7 +813,15 @@ impl Core {
         self.store.write(hid.to_vec(), bytes).await;
 
         // If a reconstruction was waiting for this header's info, resume it now.
-        if let Some(_root) = self.pending_reconstructions.remove(&header_info_with_proof.id) {
+        if let Some(root) = self.pending_reconstructions.remove(&header_info_with_proof.id) {
+            info!(
+                "BENCH event=header_unblocks_reconstruction node={:?} round={} digest={:?} origin={:?} root={:?}",
+                self.name,
+                header_info_with_proof.round,
+                header_info_with_proof.id,
+                header_info_with_proof.author,
+                root
+            );
             // 3b: pass only the small fields needed by finalize_reconstruction_optimized.
             if let Err(e) = self.finalize_reconstruction_optimized(
                 header_info_with_proof.id,
@@ -925,6 +962,39 @@ impl Core {
         Ok(())
     }
 
+    async fn request_header_from_author(&mut self, header_id: Digest, round: Round, origin: PublicKey) -> DagResult<()> {
+        if origin == self.name {
+            warn!(
+                "Missing locally authored header while syncing reconstruction: round={} digest={:?}",
+                round,
+                header_id
+            );
+            return Ok(());
+        }
+
+        let address = self
+            .committee
+            .primary(&origin)
+            .expect("Author of valid header not in the committee")
+            .primary_to_primary;
+        let message = PrimaryMessage::CertificatesRequest(vec![header_id], self.name);
+        let bytes = bincode::serialize(&message).expect("Failed to serialize header sync request");
+        let handler = self.network.send(address, Bytes::from(bytes)).await;
+        self.cancel_handlers
+            .entry(round)
+            .or_insert_with(Vec::new)
+            .push(handler);
+        info!(
+            "BENCH event=header_sync_request node={:?} round={} digest={:?} origin={:?} target={:?} source=reconstruction_pending_header",
+            self.name,
+            round,
+            header_id,
+            origin,
+            origin
+        );
+        Ok(())
+    }
+
     async fn send_echo(&mut self, header_info_with_proof: &HeaderInfoWithProof) -> DagResult<()> {
         let round = header_info_with_proof.round;
 
@@ -940,7 +1010,8 @@ impl Core {
                 .others_primaries(&self.name)
                 .iter()
                 .map(|(_, x)| x.primary_to_primary)
-                .collect();
+                .collect::<Vec<_>>();
+            let recipient_count = addresses.len();
 
             let bytes = bincode::serialize(&PrimaryMessageRef::Echo(&echo))
                 .expect("Failed to serialize our own echo");
@@ -949,6 +1020,15 @@ impl Core {
                 .entry(round)
                 .or_insert_with(Vec::new)
                 .extend(handlers);
+            info!(
+                "BENCH event=echo_sent node={:?} round={} digest={:?} origin={:?} proof_index={} recipients={}",
+                self.name,
+                round,
+                header_info_with_proof.id,
+                header_info_with_proof.author,
+                header_info_with_proof.proof.index(),
+                recipient_count
+            );
 
             self.process_echo_optimized(echo)
                 .await
@@ -1020,6 +1100,8 @@ impl Core {
         let proof = echo.proof;
         let author = echo.author;
         let id = echo.id;
+        let round = echo.round;
+        let origin = echo.origin;
         // Validate the proof
         let t_validate = Instant::now();
         if self.committee.index_of(&author) == Some(proof.index()) && proof.validate(self.committee.total_stake() as usize) {
@@ -1031,8 +1113,21 @@ impl Core {
             }
             if let Some(echo_aggregator) = self.processing_echo_aggregators.get_mut(&id) {
                 let t_agg = Instant::now();
-                if let Some((root, mut leaf_values)) = echo_aggregator.append(author, proof, &self.committee)? {
+                if let Some((root, mut leaf_values, collected_weight, collected_count)) = echo_aggregator.append(author, proof, &self.committee)? {
                     let d_agg = t_agg.elapsed();
+                    let header_seen = self.processing_header_proofs.contains_key(&id);
+                    info!(
+                        "BENCH event=echo_quorum node={:?} round={} digest={:?} origin={:?} root={:?} collected={} weight={} threshold={} header_seen={}",
+                        self.name,
+                        round,
+                        id,
+                        origin,
+                        root,
+                        collected_count,
+                        collected_weight,
+                        self.committee.optimistic_threshold(),
+                        header_seen
+                    );
                     // Store the collected leaf values for this root so we can reconstruct later
                     // key by (round, root_hash)
                     let t_reconstruct = Instant::now();
@@ -1092,7 +1187,15 @@ impl Core {
                         Some(h) => h.clone(),
                         None => {
                             // Store pending reconstruction to be resumed when HeaderInfoWithProof arrives.
-                            debug!("Missing HeaderInfoWithProof for echo id {:?}, storing pending reconstruction", rid);
+                            info!(
+                                "BENCH event=reconstruction_pending_header node={:?} round={} digest={:?} origin={:?} root={:?}",
+                                self.name,
+                                round,
+                                rid,
+                                origin,
+                                root
+                            );
+                            self.request_header_from_author(rid, round, origin).await?;
                             self.pending_reconstructions.insert(rid, root);
                             return Ok(());
                         }
@@ -1161,6 +1264,8 @@ impl Core {
         let proof = echo.proof;
         let author = echo.author;
         let id = echo.id;
+        let round = echo.round;
+        let origin = echo.origin;
 
         let valid = self.committee.index_of(&author) == Some(proof.index()) && proof.validate(self.committee.total_stake() as usize);
 
@@ -1173,19 +1278,36 @@ impl Core {
             if let Some(echo_aggregator) = self.processing_echo_aggregators.get_mut(&id) {
                 let agg_result = echo_aggregator.append(author, proof, &self.committee)?;
 
-                if let Some((root, mut leaf_values)) = agg_result {
+                if let Some((root, mut leaf_values, collected_weight, collected_count)) = agg_result {
+                    let header_seen = self.processing_header_proofs.contains_key(&id);
+                    info!(
+                        "BENCH event=echo_quorum node={:?} round={} digest={:?} origin={:?} root={:?} collected={} weight={} threshold={} header_seen={}",
+                        self.name,
+                        round,
+                        id,
+                        origin,
+                        root,
+                        collected_count,
+                        collected_weight,
+                        self.committee.optimistic_threshold(),
+                        header_seen
+                    );
                     // Dispatch reconstruction to background so the event loop stays responsive.
                     let coding = Arc::clone(&self.coding);
-	                    let rs_block_size = self.rs_block_size;
-	                    let rs_block_threads = self.rs_block_threads;
-	                    let tx = self.tx_reconstruction_result.clone();
-	                    let recon_id = id;
+                    let rs_block_size = self.rs_block_size;
+                    let rs_block_threads = self.rs_block_threads;
+                    let tx = self.tx_reconstruction_result.clone();
+                    let recon_id = id;
+                    let recon_round = round;
+                    let recon_origin = origin;
 
 	                    tokio::task::spawn_blocking(move || {
 	                        if let Err(e) = coding.reconstruct_shards(&mut leaf_values[..], rs_block_size, rs_block_threads) {
 	                            warn!("Reconstruction failed: {:?}", e);
 	                            let _ = tx.blocking_send(ReconstructionResult {
 	                                id: recon_id,
+                                    round: recon_round,
+                                    origin: recon_origin,
 	                                root,
 	                                success: false,
 	                            });
@@ -1206,6 +1328,8 @@ impl Core {
 
                         let _ = tx.blocking_send(ReconstructionResult {
 	                            id: recon_id,
+                            round: recon_round,
+                            origin: recon_origin,
 	                            root,
 	                            success,
 	                        });
@@ -1249,7 +1373,16 @@ impl Core {
         let (header_id, round, origin) = match self.processing_header_proofs.get(&result.id) {
             Some(h) => (h.id, h.round, h.author),
             None => {
-                debug!("Missing HeaderInfoWithProof for reconstruction result {:?}, storing pending", result.id);
+                info!(
+                    "BENCH event=reconstruction_pending_header node={:?} round={} digest={:?} origin={:?} root={:?}",
+                    self.name,
+                    result.round,
+                    result.id,
+                    result.origin,
+                    result.root
+                );
+                self.request_header_from_author(result.id, result.round, result.origin)
+                    .await?;
                 self.pending_reconstructions.insert(result.id, result.root);
                 return Ok(());
             }
@@ -1488,7 +1621,12 @@ impl Core {
                         },
                         PrimaryMessage::HeaderInfoWithProof(header_info_with_proof) => {
                             match self.sanitize_header_proof(&header_info_with_proof) {
-                                Ok(()) => self.process_header_proof_optimized(&header_info_with_proof).await,
+                                Ok(()) => self
+                                    .process_header_proof_optimized_with_source(
+                                        &header_info_with_proof,
+                                        "primary_channel",
+                                    )
+                                    .await,
                                 error => error
                             }
                         },
@@ -1498,7 +1636,9 @@ impl Core {
 
                 // We receive here loopback headers from the `HeaderWaiter`. Those are headers for which we interrupted
                 // execution (we were missing some of their dependencies) and we are now ready to resume processing.
-                Some(header_info_with_proof) = self.rx_header_waiter.recv() => self.process_header_proof_optimized(&header_info_with_proof).await,
+                Some(header_info_with_proof) = self.rx_header_waiter.recv() => self
+                    .process_header_proof_optimized_with_source(&header_info_with_proof, "header_waiter")
+                    .await,
 
                 // We receive here loopback certificates from the `CertificateWaiter`. Those are certificates for which
                 // we interrupted execution (we were missing some of their ancestors) and we are now ready to resume
