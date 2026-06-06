@@ -2,7 +2,7 @@
 #![allow(unused_variables)]
 // Copyright(C) Facebook, Inc. and its affiliates.
 use crate::error::{DagError, DagResult, ConsensusError};
-use crate::messages::{Certificate, Header, Vote, QC, Timeout, TC, CutVote, CutCertificate, Decide};
+use crate::messages::{Certificate, Header, Vote, QC, Timeout, TC, CutVote, CutReady, CutCertificate, Decide};
 use config::{Committee, Stake};
 use crypto::{PublicKey, Signature, Digest};
 use std::collections::HashSet;
@@ -54,7 +54,14 @@ impl VoteAggregator {
 pub struct CutVoteAggregator {
     weight: Stake,
     used: HashSet<PublicKey>,
+}
+
+pub struct CutReadyAggregator {
+    weight: Stake,
+    used: HashSet<PublicKey>,
     voters: Vec<PublicKey>,
+    round: Option<u64>,
+    cut_id: Option<Digest>,
 }
 
 pub struct DecideAggregator {
@@ -109,7 +116,6 @@ impl CutVoteAggregator {
         Self {
             weight: 0,
             used: HashSet::new(),
-            voters: Vec::new(),
         }
     }
 
@@ -117,19 +123,60 @@ impl CutVoteAggregator {
         &mut self,
         vote: &CutVote,
         committee: &Committee,
-    ) -> DagResult<Option<CutCertificate>> {
+    ) -> DagResult<bool> {
         let author = vote.author;
+        ensure!(self.used.insert(author), DagError::AuthorityReuse(author));
+        self.weight += committee.stake(&author);
+        if self.weight >= committee.quorum_threshold() {
+            self.weight = 0;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+}
+
+impl CutReadyAggregator {
+    pub fn new() -> Self {
+        Self {
+            weight: 0,
+            used: HashSet::new(),
+            voters: Vec::new(),
+            round: None,
+            cut_id: None,
+        }
+    }
+
+    pub fn append(
+        &mut self,
+        ready: &CutReady,
+        committee: &Committee,
+    ) -> DagResult<Option<CutCertificate>> {
+        if let Some(round) = self.round {
+            ensure!(round == ready.round, DagError::InvalidHeaderId);
+        } else {
+            self.round = Some(ready.round);
+        }
+
+        if let Some(cut_id) = &self.cut_id {
+            ensure!(*cut_id == ready.cut_id, DagError::InvalidHeaderId);
+        } else {
+            self.cut_id = Some(ready.cut_id.clone());
+        }
+
+        let author = ready.author;
         ensure!(self.used.insert(author), DagError::AuthorityReuse(author));
         self.voters.push(author);
         self.weight += committee.stake(&author);
-        if self.weight >= committee.optimistic_threshold() {
+
+        if self.weight >= committee.quorum_threshold() {
             self.weight = 0;
             return Ok(Some(CutCertificate {
-                round: vote.round,
-                cut_id: vote.cut_id.clone(),
+                round: ready.round,
+                cut_id: ready.cut_id.clone(),
                 votes: self.voters.clone(),
             }));
         }
+
         Ok(None)
     }
 }

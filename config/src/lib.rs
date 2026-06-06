@@ -235,12 +235,14 @@ impl Committee {
             .collect()
     }
 
-    /// Returns the stake required to reach a quorum (2f+1).
+    /// Returns the stake required to reach a quorum (n-f).
     pub fn quorum_threshold(&self) -> Stake {
-        // If N = 3f + 1 + k (0 <= k < 3)
-        // then (2 N + 3) / 3 = 2f + 1 + (2k + 2)/3 = 2f + 1 + k = N - f
-        let total_votes: Stake = self.authorities.values().map(|x| x.stake).sum();
-        2 * total_votes / 3 + 1
+        let total_votes = self.total_stake();
+        if self.f_num >= total_votes {
+            total_votes + 1
+        } else {
+            total_votes - self.f_num
+        }
     }
 
     /// Returns the stake required to reach availability (f+1).

@@ -10,7 +10,7 @@ use crate::garbage_collector::GarbageCollector;
 use crate::header_waiter::HeaderWaiter;
 use crate::helper::Helper;
 use crate::leader::LeaderElector;
-use crate::messages::{Certificate, Header, HeaderInfo, Vote, Timeout, TC, Proposal, ConsensusMessage, ConsensusVote, ConsensusRequest, CutProposal, CutVote, CutCertificate, Decide};
+use crate::messages::{Certificate, Header, HeaderInfo, Vote, Timeout, TC, Proposal, ConsensusMessage, ConsensusVote, ConsensusRequest, CutProposal, CutVote, CutReady, CutCertificate, Decide};
 use crate::payload_receiver::PayloadReceiver;
 use crate::proposer::Proposer;
 use crate::synchronizer::Synchronizer;
@@ -46,6 +46,7 @@ pub enum PrimaryMessage {
     Certificate(Certificate),
     CutProposal(CutProposal),
     CutVote(CutVote),
+    CutReady(CutReady),
     CutCertificate(CutCertificate),
     Decide(Decide),
     Timeout(Timeout),

@@ -1,12 +1,12 @@
 #![allow(dead_code)]
 #![allow(unused_variables)]
 // Copyright(C) Facebook, Inc. and its affiliates.
-use crate::aggregators::{CutVoteAggregator, DecideAggregator, QCMaker, TCMaker, VoteAggregator};
+use crate::aggregators::{CutReadyAggregator, CutVoteAggregator, DecideAggregator, QCMaker, TCMaker, VoteAggregator};
 //use crate::common::special_header;
 use crate::error::{DagError, DagResult};
 use crate::leader::LeaderElector;
 use crate::messages::{
-    Certificate, ConsensusMessage, Header, Proposal, Timeout, Vote, TC, CommitQC, ConsensusRequest, ConsensusVote, Cut, CutProposal, CutCertificate, CutVote, Decide,
+    Certificate, ConsensusMessage, Header, Proposal, Timeout, Vote, TC, CommitQC, ConsensusRequest, ConsensusVote, Cut, CutProposal, CutCertificate, CutVote, CutReady, Decide,
 };
 use crate::primary::{Height, PrimaryMessage, PrimaryMessageRef, Slot, View};
 use crate::synchronizer::Synchronizer;
@@ -101,6 +101,7 @@ pub struct Core {
     current_proposal_tips: HashMap<PublicKey, Proposal>,
     current_certified_tips: HashMap<PublicKey, Proposal>,
     cut_vote_aggregators: HashMap<Digest, CutVoteAggregator>,
+    cut_ready_aggregators: HashMap<(u64, Digest), CutReadyAggregator>,
     cut_proposals: HashMap<Digest, CutProposal>,
     pending_cut_children: HashMap<Digest, Vec<CutProposal>>,
     cut_parents: HashMap<Digest, Digest>,
@@ -111,6 +112,7 @@ pub struct Core {
     decides_by_round: HashMap<u64, Decide>,
     voted_cut_rounds: HashSet<u64>,
     proposed_cut_rounds: HashSet<u64>,
+    sent_ready_rounds: HashSet<u64>,
     sent_decide_rounds: HashSet<u64>,
     sent_commit_rounds: HashSet<u64>,
     cut_round: u64,
@@ -234,6 +236,7 @@ impl Core {
                 current_proposal_tips: HashMap::with_capacity(2 * gc_depth as usize),
                 current_certified_tips: HashMap::with_capacity(2 * gc_depth as usize),
                 cut_vote_aggregators: HashMap::with_capacity(2 * gc_depth as usize),
+                cut_ready_aggregators: HashMap::with_capacity(2 * gc_depth as usize),
                 cut_proposals: HashMap::with_capacity(2 * gc_depth as usize),
                 pending_cut_children: HashMap::with_capacity(2 * gc_depth as usize),
                 cut_parents: HashMap::with_capacity(2 * gc_depth as usize),
@@ -244,6 +247,7 @@ impl Core {
                 decides_by_round: HashMap::with_capacity(2 * gc_depth as usize),
                 voted_cut_rounds: HashSet::with_capacity(2 * gc_depth as usize),
                 proposed_cut_rounds: HashSet::with_capacity(2 * gc_depth as usize),
+                sent_ready_rounds: HashSet::with_capacity(2 * gc_depth as usize),
                 sent_decide_rounds: HashSet::with_capacity(2 * gc_depth as usize),
                 sent_commit_rounds: HashSet::with_capacity(2 * gc_depth as usize),
                 cut_round: 1,
@@ -420,25 +424,38 @@ impl Core {
         }
 
         if let Some(aggregator) = self.cut_vote_aggregators.get_mut(&vote.cut_id) {
-            if let Some(certificate) = aggregator.append(&vote, &self.committee)? {
-                let addresses = self
-                    .committee
-                    .others_primaries(&self.name)
-                    .iter()
-                    .map(|(_, x)| x.primary_to_primary)
-                    .collect();
-                let bytes = bincode::serialize(&PrimaryMessage::CutCertificate(certificate.clone()))
-                    .expect("Failed to serialize cut certificate");
-                let handlers = self.network.broadcast(addresses, Bytes::from(bytes)).await;
-                self.consensus_cancel_handlers
-                    .entry(vote.round)
-                    .or_default()
-                    .extend(handlers);
-                self.process_cut_certificate(certificate).await?;
+            if aggregator.append(&vote, &self.committee)? {
+                self.broadcast_cut_ready(vote.round, vote.cut_id.clone()).await?;
             }
         }
 
         Ok(())
+    }
+
+    async fn broadcast_cut_ready(&mut self, round: u64, cut_id: Digest) -> DagResult<()> {
+        if !self.sent_ready_rounds.insert(round) {
+            return Ok(());
+        }
+
+        let ready = CutReady {
+            round,
+            cut_id,
+            author: self.name,
+        };
+        let addresses = self
+            .committee
+            .others_primaries(&self.name)
+            .iter()
+            .map(|(_, x)| x.primary_to_primary)
+            .collect();
+        let bytes = bincode::serialize(&PrimaryMessage::CutReady(ready.clone()))
+            .expect("Failed to serialize cut ready");
+        let handlers = self.network.broadcast(addresses, Bytes::from(bytes)).await;
+        self.consensus_cancel_handlers
+            .entry(round)
+            .or_default()
+            .extend(handlers);
+        self.process_cut_ready(ready).await
     }
 
     #[async_recursion]
@@ -614,23 +631,7 @@ impl Core {
         }
         self.cut_round = self.cut_round.max(round + 1);
 
-        if self.sent_decide_rounds.insert(round) {
-            let decide = Decide::new(cut_id.clone(), round, &self.name, &self.name).await;
-            let addresses = self
-                .committee
-                .others_primaries(&self.name)
-                .iter()
-                .map(|(_, x)| x.primary_to_primary)
-                .collect();
-            let bytes = bincode::serialize(&PrimaryMessage::Decide(decide.clone()))
-                .expect("Failed to serialize decide");
-            let handlers = self.network.broadcast(addresses, Bytes::from(bytes)).await;
-            self.consensus_cancel_handlers
-                .entry(round)
-                .or_default()
-                .extend(handlers);
-            self.process_decide(decide).await?;
-        }
+        self.broadcast_decide(round, cut_id.clone()).await?;
 
         if let Some(children) = self.pending_cut_children.remove(&cut_id) {
             for child in children {
@@ -640,6 +641,63 @@ impl Core {
 
         self.try_propose_cut_for_current_round().await?;
         Ok(())
+    }
+
+    async fn process_cut_ready(&mut self, ready: CutReady) -> DagResult<()> {
+        ready.verify(&self.committee)?;
+
+        if self.cut_certificates.contains_key(&ready.round) {
+            return Ok(());
+        }
+
+        let key = (ready.round, ready.cut_id.clone());
+        if !self.cut_ready_aggregators.contains_key(&key) {
+            self.cut_ready_aggregators
+                .insert(key.clone(), CutReadyAggregator::new());
+        }
+
+        if let Some(aggregator) = self.cut_ready_aggregators.get_mut(&key) {
+            if let Some(certificate) = aggregator.append(&ready, &self.committee)? {
+                let addresses = self
+                    .committee
+                    .others_primaries(&self.name)
+                    .iter()
+                    .map(|(_, x)| x.primary_to_primary)
+                    .collect();
+                let bytes = bincode::serialize(&PrimaryMessage::CutCertificate(certificate.clone()))
+                    .expect("Failed to serialize cut certificate");
+                let handlers = self.network.broadcast(addresses, Bytes::from(bytes)).await;
+                self.consensus_cancel_handlers
+                    .entry(certificate.round)
+                    .or_default()
+                    .extend(handlers);
+                self.process_cut_certificate(certificate).await?;
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn broadcast_decide(&mut self, round: u64, cut_id: Digest) -> DagResult<()> {
+        if !self.sent_decide_rounds.insert(round) {
+            return Ok(());
+        }
+
+        let decide = Decide::new(cut_id, round, &self.name, &self.name).await;
+        let addresses = self
+            .committee
+            .others_primaries(&self.name)
+            .iter()
+            .map(|(_, x)| x.primary_to_primary)
+            .collect();
+        let bytes = bincode::serialize(&PrimaryMessage::Decide(decide.clone()))
+            .expect("Failed to serialize decide");
+        let handlers = self.network.broadcast(addresses, Bytes::from(bytes)).await;
+        self.consensus_cancel_handlers
+            .entry(round)
+            .or_default()
+            .extend(handlers);
+        self.process_decide(decide).await
     }
 
     async fn process_decide(&mut self, decide: Decide) -> DagResult<()> {
@@ -873,6 +931,7 @@ impl Core {
                         },
                         PrimaryMessage::CutProposal(proposal) => self.process_cut_proposal(proposal).await,
                         PrimaryMessage::CutVote(vote) => self.process_cut_vote(vote).await,
+                        PrimaryMessage::CutReady(ready) => self.process_cut_ready(ready).await,
                         PrimaryMessage::CutCertificate(certificate) => self.process_cut_certificate(certificate).await,
                         PrimaryMessage::Decide(decide) => self.process_decide(decide).await,
                         PrimaryMessage::Timeout(timeout) => self.handle_timeout(&timeout).await,

@@ -778,6 +778,33 @@ impl Hash for CutVote {
 }
 
 #[derive(Clone, Serialize, Deserialize, Default, Debug)]
+pub struct CutReady {
+    pub round: u64,
+    pub cut_id: Digest,
+    pub author: PublicKey,
+}
+
+impl CutReady {
+    pub fn verify(&self, committee: &Committee) -> DagResult<()> {
+        ensure!(
+            committee.stake(&self.author) > 0,
+            DagError::UnknownAuthority(self.author)
+        );
+        Ok(())
+    }
+}
+
+impl Hash for CutReady {
+    fn digest(&self) -> Digest {
+        let mut hasher = Sha512::new();
+        hasher.update(&self.round.to_le_bytes());
+        hasher.update(&self.cut_id);
+        hasher.update(&self.author);
+        Digest(hasher.finalize().as_slice()[..32].try_into().unwrap())
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, Default, Debug)]
 pub struct CutCertificate {
     pub round: u64,
     pub cut_id: Digest,
