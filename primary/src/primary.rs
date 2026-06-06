@@ -42,6 +42,7 @@ pub enum PrimaryMessage {
     HeaderInfoWithProof(HeaderInfoWithProof),
     ShardRequest(ShardRequest),
     ShardResponse(ShardResponse),
+    Certificate(Certificate),
 }
 
 /// Borrowing variant of `PrimaryMessage` for zero-copy serialization.
@@ -56,6 +57,7 @@ pub(crate) enum PrimaryMessageRef<'a> {
     HeaderInfoWithProof(&'a HeaderInfoWithProof),
     ShardRequest(&'a ShardRequest),
     ShardResponse(&'a ShardResponse),
+    Certificate(&'a Certificate),
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

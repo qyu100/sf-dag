@@ -107,7 +107,7 @@ pub struct Core {
     processing_ready_aggregators: HashMap<Digest, ReadyAggregator>,
     /// The RBC instances for which this node already broadcast Ready.
     sent_readies: HashSet<(Round, PublicKey)>,
-    /// Ready quorums that are waiting for local availability verification.
+    /// Ready quorums that can form certificates immediately.
     ready_quorums: HashMap<AvailabilityKey, (Round, PublicKey, Vec<u128>, SignatureShareG1)>,
     /// RBC payload roots that passed local erasure-code reconstruction.
     reconstruction_ok: HashSet<AvailabilityKey>,
@@ -119,8 +119,8 @@ pub struct Core {
     requested_shards: HashSet<(Digest, Digest, usize)>,
     /// Certificates already emitted for an RBC instance.
     formed_certificates: HashSet<AvailabilityKey>,
-    /// For storing info of processed certificates
-    processed_certs: HashMap<Round, HashSet<PublicKey>>,
+    /// Certificates already forwarded to peers, keyed by (round, certificate digest).
+    forwarded_certificates: HashSet<(Round, Digest)>,
     /// Rounds pending commit because a certificate or ancestor chain is incomplete.
     pending_commit_rounds: HashSet<Round>,
     /// A network sender to send the batches to the other workers.
@@ -217,7 +217,7 @@ impl Core {
                 availability_proofs: HashMap::new(),
                 requested_shards: HashSet::new(),
                 formed_certificates: HashSet::new(),
-                processed_certs: HashMap::with_capacity(2 * gc_depth as usize),
+                forwarded_certificates: HashSet::new(),
                 network: ReliableSender::new(),
                 cancel_handlers: HashMap::with_capacity(2 * gc_depth as usize),
                 timeouts_aggregators: HashMap::with_capacity(2 * gc_depth as usize),
@@ -310,7 +310,7 @@ impl Core {
             availability_proofs: HashMap::new(),
             requested_shards: HashSet::new(),
             formed_certificates: HashSet::new(),
-            processed_certs: HashMap::with_capacity(2 * gc_depth as usize),
+            forwarded_certificates: HashSet::new(),
             network: ReliableSender::new(),
             cancel_handlers: HashMap::with_capacity(2 * gc_depth as usize),
             timeouts_aggregators: HashMap::with_capacity(2 * gc_depth as usize),
@@ -701,7 +701,7 @@ impl Core {
             let d_proofs = t_proofs.elapsed();
 
             let round = header_info.round;
-            println!("    [dispatch_own_header bg] setup={:?} serialize={:?} pad={:?} encode={:?} merkle={:?} proofs={:?} total={:?}",
+            debug!("dispatch_own_header bg setup={:?} serialize={:?} pad={:?} encode={:?} merkle={:?} proofs={:?} total={:?}",
                 d_setup, d_ser, d_pad, d_encode, d_mtree, d_proofs, start_total.elapsed());
 
             let _ = tx.blocking_send(OwnHeaderComputeResult {
@@ -746,13 +746,28 @@ impl Core {
                 _ => unreachable!(),
             }
         }
-        println!("    [handle_own_header_result] send={:?}", start.elapsed());
+        debug!("handle_own_header_result send={:?}", start.elapsed());
+        Ok(())
+    }
+
+    fn ensure_leader_author(&self, round: Round, origin: PublicKey) -> DagResult<()> {
+        if round == 0 {
+            return Ok(());
+        }
+        ensure!(
+            self.committee.leader(round as usize) == origin,
+            DagError::UnexpectedLeader(origin, round)
+        );
         Ok(())
     }
 
     async fn process_header_proof(&mut self, header_info_with_proof: &HeaderInfoWithProof) -> DagResult<()> {
         let start = Instant::now();
         header_info_with_proof.verify(&self.committee)?;
+        self.ensure_leader_author(
+            header_info_with_proof.round,
+            header_info_with_proof.author,
+        )?;
         // debug!("Processing proof: {:?}", header_info_with_proof);
         debug!(
             "Header info with proof payload len: {}",
@@ -789,8 +804,8 @@ impl Core {
         // Store the header.
         self.store.write(hid.to_vec(), bytes).await;
 
-        // If a reconstruction was waiting for this header's info, keep the
-        // certificate path gated by the Ready quorum.
+        // If a reconstruction completed before the header info was stored,
+        // remember the availability result. Certificates are gated by Ready quorum.
         if let Some(root) = self.pending_reconstructions.remove(&header_info_with_proof.id) {
             self.reconstruction_ok.insert((header_info_with_proof.id, root));
             self.maybe_form_certificate(header_info_with_proof.id, root)
@@ -810,6 +825,10 @@ impl Core {
     async fn process_header_proof_optimized(&mut self, header_info_with_proof: &HeaderInfoWithProof) -> DagResult<()> {
         let start = Instant::now();
         header_info_with_proof.verify(&self.committee)?;
+        self.ensure_leader_author(
+            header_info_with_proof.round,
+            header_info_with_proof.author,
+        )?;
         debug!(
             "Header info with proof payload len: {}",
             header_info_with_proof.proof.value().len()
@@ -847,8 +866,8 @@ impl Core {
         // Store the header.
         self.store.write(hid.to_vec(), bytes).await;
 
-        // If a reconstruction was waiting for this header's info, keep the
-        // certificate path gated by the Ready quorum.
+        // If a reconstruction completed before the header info was stored,
+        // remember the availability result. Certificates are gated by Ready quorum.
         if let Some(root) = self.pending_reconstructions.remove(&header_info_with_proof.id) {
             self.reconstruction_ok.insert((header_info_with_proof.id, root));
             self.maybe_form_certificate(header_info_with_proof.id, root)
@@ -910,6 +929,16 @@ impl Core {
             DagError::ProofConstructionFailed
         );
 
+        self.store_availability_proof(id, root, proof);
+        Ok(())
+    }
+
+    fn store_availability_proof(
+        &mut self,
+        id: Digest,
+        root: Digest,
+        proof: Proof,
+    ) {
         let index = proof.index();
         let committee_size = self.committee.size();
         let proofs = self
@@ -919,7 +948,6 @@ impl Core {
         if proofs[index].is_none() {
             proofs[index] = Some(proof);
         }
-        Ok(())
     }
 
     fn collected_shards(&self, id: Digest, root: Digest) -> Vec<Option<Box<[u8]>>> {
@@ -1002,6 +1030,28 @@ impl Core {
         Ok(())
     }
 
+    async fn broadcast_certificate(&mut self, certificate: &Certificate) -> DagResult<()> {
+        let key = (certificate.round, certificate.digest());
+        if !self.forwarded_certificates.insert(key) {
+            return Ok(());
+        }
+
+        let addresses = self
+            .committee
+            .others_primaries(&self.name)
+            .iter()
+            .map(|(_, x)| x.primary_to_primary)
+            .collect();
+        let bytes = bincode::serialize(&PrimaryMessageRef::Certificate(certificate))
+            .expect("Failed to serialize certificate");
+        let handlers = self.network.broadcast(addresses, Bytes::from(bytes)).await;
+        self.cancel_handlers
+            .entry(certificate.round)
+            .or_insert_with(Vec::new)
+            .extend(handlers);
+        Ok(())
+    }
+
     async fn request_availability_shards(
         &mut self,
         id: Digest,
@@ -1042,9 +1092,6 @@ impl Core {
     #[async_recursion]
     async fn maybe_form_certificate(&mut self, id: Digest, root: Digest) -> DagResult<()> {
         let key = (id, root);
-        if !self.reconstruction_ok.contains(&key) {
-            return Ok(());
-        }
         let Some((round, origin, signer_bits, aggregate_signature)) =
             self.ready_quorums.get(&key).cloned()
         else {
@@ -1247,14 +1294,15 @@ impl Core {
         let round = echo.round;
         let origin = echo.origin;
         let root = *proof.root_hash();
+        self.ensure_leader_author(round, origin)?;
 
         let t_validate = Instant::now();
         let valid = self.committee.index_of(&author) == Some(proof.index())
-            && proof.validate(self.committee.total_stake() as usize);
+            && proof.validate(self.committee.size());
         let d_validate = t_validate.elapsed();
 
         if valid {
-            self.record_availability_proof(id, root, proof.clone())?;
+            self.store_availability_proof(id, root, proof.clone());
             self.processing_echo_aggregators
                 .entry(id)
                 .or_insert(EchoAggregator::new());
@@ -1282,6 +1330,7 @@ impl Core {
     #[async_recursion]
     async fn process_ready(&mut self, ready: &Ready) -> DagResult<()> {
         ready.verify(&self.committee)?;
+        self.ensure_leader_author(ready.round, ready.origin)?;
         self.processing_ready_aggregators
             .entry(ready.id)
             .or_insert(ReadyAggregator::new());
@@ -1422,6 +1471,8 @@ impl Core {
     async fn process_certificate_optimized(&mut self, certificate: Certificate) -> DagResult<()> {
         debug!("Processing cert (optimized) {:?}", certificate);
         certificate.verify(&self.committee)?;
+        self.ensure_leader_author(certificate.round, certificate.origin)?;
+        self.broadcast_certificate(&certificate).await?;
 
         // Look up parent from in-memory map to avoid store read+deserialize.
         let parent = self.parent_info.get(&certificate.header_id).map(|(_, p)| *p);
@@ -1548,10 +1599,15 @@ impl Core {
             self.gc_round <= header_info_with_proof.round,
             DagError::TooOld(header_info_with_proof.id, header_info_with_proof.round)
         );
+        self.ensure_leader_author(
+            header_info_with_proof.round,
+            header_info_with_proof.author,
+        )?;
         header_info_with_proof.verify(&self.committee)
     }
 
     fn sanitize_echo(&mut self, echo: &Echo) -> DagResult<()> {
+        self.ensure_leader_author(echo.round, echo.origin)?;
         if let Some(header_info_with_proof) = self.processing_header_proofs.get(&echo.id) {
             ensure!(
                 header_info_with_proof.round <= echo.round,
@@ -1575,6 +1631,7 @@ impl Core {
             DagError::TooOld(ready.id, ready.round)
         );
         ready.verify(&self.committee)?;
+        self.ensure_leader_author(ready.round, ready.origin)?;
         if let Some(header_info_with_proof) = self.processing_header_proofs.get(&ready.id) {
             ensure!(
                 ready.origin == header_info_with_proof.author
@@ -1622,6 +1679,9 @@ impl Core {
                                 Ok(()) => self.process_header_proof_optimized(&header_info_with_proof).await,
                                 error => error
                             }
+                        },
+                        PrimaryMessage::Certificate(certificate) => {
+                            self.process_certificate_optimized(certificate).await
                         },
                         _ => panic!("Unexpected core message")
                     }
@@ -1700,6 +1760,8 @@ impl Core {
                 self.formed_certificates.retain(|key| {
                     live_header_ids.contains(&key.0) || live_ready_keys.contains(key)
                 });
+                self.forwarded_certificates
+                    .retain(|(cert_round, _)| cert_round >= &gc_round);
                 self.cancel_handlers.retain(|k, _| k >= &gc_round);
                 // let _ = self.synchronizer.garbage_collect(gc_round).await;
                 self.gc_round = gc_round;

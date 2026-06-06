@@ -51,6 +51,9 @@ pub enum DagError {
     #[error("Received unexpected vote fo header {0}")]
     UnexpectedVote(Digest),
 
+    #[error("Authority {0} is not the leader for round {1}")]
+    UnexpectedLeader(PublicKey, Round),
+
     #[error("Received certificate without a quorum")]
     CertificateRequiresQuorum,
 

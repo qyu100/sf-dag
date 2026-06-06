@@ -401,16 +401,6 @@ impl Echo {
             committee.stake(&self.author) > 0,
             DagError::UnknownAuthority(self.author)
         );
-        ensure!(
-            self.proof.validate(committee.total_stake() as usize),
-            DagError::ProofConstructionFailed
-        );
-        SignatureShareG1::verify_batch(
-            &self.digest().0,
-            &committee.get_bls_public_g2(&self.author),
-            &self.signature,
-        )
-        .map_err(|_| DagError::InvalidBlsSignature)?;
         Ok(())
     }
 }
@@ -536,12 +526,6 @@ impl Ready {
             committee.stake(&self.author) > 0,
             DagError::UnknownAuthority(self.author)
         );
-        SignatureShareG1::verify_batch(
-            &self.digest().0,
-            &committee.get_bls_public_g2(&self.author),
-            &self.signature,
-        )
-        .map_err(|_| DagError::InvalidBlsSignature)?;
         Ok(())
     }
 }
