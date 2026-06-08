@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use config::{Committee, Parameters, WorkerId};
 use crypto::{Digest, PublicKey};
-use log::info;
+use log::debug;
 use network::{MessageHandler, Receiver, Writer};
 use serde::{Deserialize, Serialize};
 use std::error::Error;
@@ -56,8 +56,7 @@ impl Worker {
         // let (tx_primary, rx_primary) = channel(CHANNEL_CAPACITY);
         worker.handle_clients_transactions();
 
-        // NOTE: This log entry is used to compute performance.
-        info!(
+        debug!(
             "Worker {} successfully booted on {}",
             id,
             worker
@@ -95,7 +94,7 @@ impl Worker {
             self.tx_txns.clone(),
         );
 
-        info!(
+        debug!(
             "Worker {} listening to client transactions on {}",
             self.id, address
         );

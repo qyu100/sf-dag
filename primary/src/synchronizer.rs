@@ -104,7 +104,10 @@ impl Synchronizer {
     }
 
     /// Returns the parent digest if we have it. If we don't, send a request to the `HeaderWaiter` to synchronize the missing parent and return None.
-    pub async fn get_parent(&mut self, header_info_with_proof: &HeaderInfoWithProof) -> DagResult<Option<Digest>> {
+    pub async fn get_parent(
+        &mut self,
+        header_info_with_proof: &HeaderInfoWithProof,
+    ) -> DagResult<Option<Digest>> {
         let parent_digest = header_info_with_proof.parent;
         let round = header_info_with_proof.round;
 
@@ -135,7 +138,10 @@ impl Synchronizer {
                 let missing = vec![parent_digest];
                 // Construct a minimal HeaderInfo to send to the waiter.
                 self.tx_header_waiter
-                    .send(WaiterMessage::SyncParents(missing, header_info_with_proof.clone()))
+                    .send(WaiterMessage::SyncParents(
+                        missing,
+                        header_info_with_proof.clone(),
+                    ))
                     .await
                     .expect("Failed to send sync parents request");
                 Ok(None)

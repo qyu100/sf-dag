@@ -17,7 +17,7 @@ use bytes::Bytes;
 use config::{Committee, KeyPair, Parameters, WorkerId};
 use crypto::{Digest, PublicKey, SignatureService};
 use futures::sink::SinkExt as _;
-use log::info;
+use log::{debug, info};
 use network::{MessageHandler, Receiver as NetworkReceiver, Writer};
 use serde::{Deserialize, Serialize};
 use std::error::Error;
@@ -144,7 +144,7 @@ impl Primary {
                 tx_cert_requests,
             },
         );
-        info!(
+        debug!(
             "Primary {} listening to primary messages on {}",
             name, address
         );
@@ -226,7 +226,7 @@ impl Primary {
             name,
             committee.clone(),
             store.clone(),
-            consensus_round,
+            consensus_round.clone(),
             parameters.gc_depth,
             parameters.sync_retry_delay,
             parameters.sync_retry_nodes,
@@ -237,7 +237,13 @@ impl Primary {
         // The `CertificateWaiter` waits to receive all the ancestors of a certificate before looping it back to the
         // `Core` for further processing.
         CertificateWaiter::spawn(
+            name,
+            committee.clone(),
             store.clone(),
+            consensus_round.clone(),
+            parameters.gc_depth,
+            parameters.sync_retry_delay,
+            parameters.sync_retry_nodes,
             /* rx_synchronizer */ rx_sync_certificates,
             /* tx_core */ tx_certificates_loopback,
         );
@@ -252,6 +258,9 @@ impl Primary {
             parameters.tx_size,
             parameters.max_header_delay,
             parameters.consensus_only,
+            parameters.crash_author,
+            parameters.crash_on_proposal,
+            parameters.crash_duration,
             /* rx_core */ rx_parents,
             /* rx_workers */ rx_our_digests,
             /* tx_core */ tx_headers,

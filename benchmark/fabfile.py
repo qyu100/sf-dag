@@ -3,14 +3,18 @@ from fabric import task
 
 from benchmark.local import LocalBench
 from benchmark.logs import ParseError, LogParser
+from benchmark.recovery import RecoveryCsvPlotter, RecoveryError, RecoveryPlotter
 from benchmark.utils import Print
 from benchmark.plot import Ploter, PlotError
 from benchmark.instance import InstanceManager
 from benchmark.remote import Bench, BenchError
 
 
+DEFAULT_RECOVERY_WINDOW = 2.4
+
+
 @task
-def local(ctx, debug=True, consensus_only=True, header_size=5120):
+def local(ctx, debug=False, consensus_only=True, header_size=10_000_000, crash_on_proposal=4):
     ''' Run benchmarks on localhost '''
     bench_params = {
         'faults': 1,
@@ -24,7 +28,7 @@ def local(ctx, debug=True, consensus_only=True, header_size=5120):
     node_params = {
         'consensus_only': consensus_only,
         'header_size': header_size,  # bytes
-        'max_header_delay': 5_000,  # ms
+        'max_header_delay': 2_400,  # ms
         'gc_depth': 50,  # rounds
         'sync_retry_delay': 10_000,  # ms
         'sync_retry_nodes': 3,  # number of nodes
@@ -32,8 +36,10 @@ def local(ctx, debug=True, consensus_only=True, header_size=5120):
         'tx_size': bench_params['tx_size'],
         'max_batch_delay': 200,  # ms
         'f_num': 3,
-        'rs_block_size': 4 * 1024,  # bytes
-        'rs_block_threads': 4
+        'rs_block_size': 16 * 1024,  # bytes
+        'rs_block_threads': 8,
+        'crash_node_id': 0,
+        'crash_on_proposal': int(crash_on_proposal),
     }
     try:
         ret = LocalBench(bench_params, node_params).run(debug, consensus_only)
@@ -97,7 +103,7 @@ def install(ctx):
 
 
 @task
-def remote(ctx, burst = 50, debug=False, consensus_only=False, header_size=512):
+def remote(ctx, burst = 50, debug=False, consensus_only=False, header_size=512, crash_on_proposal=4):
     ''' Run benchmarks on GCP '''
     bench_params = {
         'faults': 1,
@@ -118,7 +124,7 @@ def remote(ctx, burst = 50, debug=False, consensus_only=False, header_size=512):
     node_params = {
         'consensus_only': consensus_only,
         'header_size': header_size,  # bytes
-        'max_header_delay': 5_000,  # ms
+        'max_header_delay': 2_400,  # ms
         'gc_depth': 50,  # rounds
         'sync_retry_delay': 10_000,  # ms
         'sync_retry_nodes': 3,  # number of nodes
@@ -127,8 +133,10 @@ def remote(ctx, burst = 50, debug=False, consensus_only=False, header_size=512):
         'max_batch_delay': 200,  # ms
         'leaders_per_round': 67,
         'f_num': 3,
-        'rs_block_size': 4 * 1024,  # bytes
-        'rs_block_threads': 4
+        'rs_block_size': 16 * 1024,  # bytes
+        'rs_block_threads': 8,
+        'crash_node_id': 0,
+        'crash_on_proposal': int(crash_on_proposal),
     }
     try:
         Bench(ctx).run(bench_params, node_params, debug, consensus_only)
@@ -151,6 +159,45 @@ def plot(ctx):
         Ploter.plot(plot_params)
     except PlotError as e:
         Print.error(BenchError('Failed to plot performance', e))
+
+
+@task
+def recovery(ctx, directory='logs', committee='.committee.json', window=DEFAULT_RECOVERY_WINDOW, step=0.2, before=10.0, after=20.0, output='recovery-tps', label='Throughput'):
+    ''' Plot sliding-window TPS around the crash point. '''
+    try:
+        result = RecoveryPlotter(
+            logs_dir=directory,
+            committee_file=committee,
+            window=float(window),
+            step=float(step),
+            before=float(before),
+            after=float(after),
+            output=output,
+            label=label,
+        ).run()
+        Print.info(
+            f"Recovery plot anchored at crash round {result['anchor_round']} "
+            f"for crashed node {result['faulty_author']}"
+        )
+        Print.info(f"CSV: {result['csv']}")
+        Print.info(f"Plots: {', '.join(result['plots'])}")
+    except RecoveryError as e:
+        Print.error(BenchError('Failed to plot recovery TPS', e))
+
+
+@task
+def recovery_compare(ctx, csvs, labels='', colors='', output='recovery-tps-compare'):
+    ''' Plot multiple recovery CSV files in one figure. '''
+    try:
+        plots = RecoveryCsvPlotter(
+            csv_files=csvs.split(','),
+            labels=labels.split(',') if labels else None,
+            colors=colors.split(',') if colors else None,
+            output=output,
+        ).run()
+        Print.info(f"Plots: {', '.join(plots)}")
+    except RecoveryError as e:
+        Print.error(BenchError('Failed to plot recovery comparison', e))
 
 
 @task

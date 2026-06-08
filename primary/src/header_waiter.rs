@@ -43,9 +43,6 @@ pub struct HeaderWaiter {
     gc_depth: Round,
     /// The delay to wait before re-trying sync requests.
     sync_retry_delay: u64,
-    /// Determine with how many nodes to sync when re-trying to send sync-request.
-    sync_retry_nodes: usize,
-
     /// Receives sync commands from the `Synchronizer`.
     rx_synchronizer: Receiver<WaiterMessage>,
     /// Loops back to the core headers for which we got all parents and batches.
@@ -55,7 +52,7 @@ pub struct HeaderWaiter {
     network: SimpleSender,
     /// Keeps the digests of the all certificates for which we sent a sync request,
     /// along with a timestamp (`u128`) indicating when we sent the request.
-    parent_requests: HashMap<Digest, (Round, u128)>,
+    parent_requests: HashMap<Digest, (Round, u128, PublicKey)>,
     /// Keeps the digests of the all tx batches for which we sent a sync request,
     /// similarly to `header_requests`.
     // payload_requests: HashMap<Digest, Round>,
@@ -73,7 +70,7 @@ impl HeaderWaiter {
         consensus_round: Arc<AtomicU64>,
         gc_depth: Round,
         sync_retry_delay: u64,
-        sync_retry_nodes: usize,
+        _sync_retry_nodes: usize,
         rx_synchronizer: Receiver<WaiterMessage>,
         tx_core: Sender<HeaderInfoWithProof>,
     ) {
@@ -85,7 +82,6 @@ impl HeaderWaiter {
                 consensus_round,
                 gc_depth,
                 sync_retry_delay,
-                sync_retry_nodes,
                 rx_synchronizer,
                 tx_core,
                 network: SimpleSender::new(),
@@ -155,8 +151,8 @@ impl HeaderWaiter {
                             waiting.push(fut);
 
                             // Ensure we didn't already sent a sync request for these parents.
-                            // Optimistically send the sync request to the node that created the certificate.
-                            // If this fails (after a timeout), we broadcast the sync request.
+                            // Send sync requests only to the header's original author. Retrying
+                            // arbitrary peers can return metadata that is not author-originated.
                             let now = SystemTime::now()
                                 .duration_since(UNIX_EPOCH)
                                 .expect("Failed to measure time")
@@ -165,7 +161,7 @@ impl HeaderWaiter {
                             for missing in missing {
                                 self.parent_requests.entry(missing.clone()).or_insert_with(|| {
                                     requires_sync.push(missing);
-                                    (round, now)
+                                    (round, now, author)
                                 });
                             }
                             if !requires_sync.is_empty() {
@@ -200,30 +196,34 @@ impl HeaderWaiter {
                 },
 
                 () = &mut timer => {
-                    // We optimistically sent sync requests to a single node. If this timer triggers,
-                    // it means we were wrong to trust it. We are done waiting for a reply and we now
-                    // broadcast the request to all nodes.
+                    // Retry the same original author only. Do not ask arbitrary peers for
+                    // HeaderInfoWithProof metadata.
                     let now = SystemTime::now()
                         .duration_since(UNIX_EPOCH)
                         .expect("Failed to measure time")
                         .as_millis();
 
-                    let mut retry = Vec::new();
-                    for (digest, (_, timestamp)) in &self.parent_requests {
-                        if timestamp + (self.sync_retry_delay as u128) < now {
+                    let mut retry_by_author: HashMap<PublicKey, Vec<Digest>> = HashMap::new();
+                    for (digest, (_, timestamp, author)) in self.parent_requests.iter_mut() {
+                        if *timestamp + (self.sync_retry_delay as u128) < now {
                             debug!("Requesting sync for certificate {} (retry)", digest);
-                            retry.push(digest.clone());
+                            retry_by_author
+                                .entry(*author)
+                                .or_insert_with(Vec::new)
+                                .push(digest.clone());
+                            *timestamp = now;
                         }
                     }
 
-                    let addresses = self.committee
-                        .others_primaries(&self.name)
-                        .iter()
-                        .map(|(_, x)| x.primary_to_primary)
-                        .collect();
-                    let message = PrimaryMessage::CertificatesRequest(retry, self.name);
-                    let bytes = bincode::serialize(&message).expect("Failed to serialize cert request");
-                    self.network.lucky_broadcast(addresses, Bytes::from(bytes), self.sync_retry_nodes).await;
+                    for (author, retry) in retry_by_author {
+                        let address = self.committee
+                            .primary(&author)
+                            .expect("Author of valid header not in the committee")
+                            .primary_to_primary;
+                        let message = PrimaryMessage::CertificatesRequest(retry, self.name);
+                        let bytes = bincode::serialize(&message).expect("Failed to serialize cert request");
+                        self.network.send(address, Bytes::from(bytes)).await;
+                    }
 
                     // Reschedule the timer.
                     timer.as_mut().reset(Instant::now() + Duration::from_millis(TIMER_RESOLUTION));
@@ -242,7 +242,8 @@ impl HeaderWaiter {
                 }
                 self.pending.retain(|_, (r, _)| r > &mut gc_round);
                 // self.payload_requests.retain(|_, r| r > &mut gc_round);
-                self.parent_requests.retain(|_, (r, _)| r > &mut gc_round);
+                self.parent_requests
+                    .retain(|_, (r, _, _)| r > &mut gc_round);
             }
         }
     }

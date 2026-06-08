@@ -163,6 +163,20 @@ impl fmt::Debug for HeaderInfoWithProof {
     }
 }
 
+/// Parent hint sent from Core to Proposer for speculative proposals.
+#[derive(Clone, Serialize, Deserialize, Default, PartialEq, Eq, Hash, Debug)]
+pub struct ProposerParent {
+    pub header_id: Digest,
+    pub round: Round,
+    pub origin: PublicKey,
+}
+
+impl ProposerParent {
+    pub fn round(&self) -> Round {
+        self.round
+    }
+}
+
 impl fmt::Display for HeaderInfoWithProof {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         write!(f, "B{}({})", self.round, self.author)

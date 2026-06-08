@@ -6,9 +6,11 @@ use crate::coding::Coding;
 use crate::error::{DagError, DagResult};
 use crate::merkle::MerkleTree;
 use crate::messages::{
-    Certificate, Decide, Echo, Header, HeaderInfoWithProof, Timeout, TimeoutAccept, TimeoutCert,
+    Certificate, Decide, Echo, Header, HeaderInfoWithProof, ProposerParent, Timeout, TimeoutAccept,
+    TimeoutCert,
 };
 use crate::primary::{PrimaryMessage, PrimaryMessageRef, Round};
+use crate::proposer::ProposerCommand;
 use crate::synchronizer::Synchronizer;
 use crate::{ConsensusMessage, HeaderInfo};
 use async_recursion::async_recursion;
@@ -74,8 +76,8 @@ pub struct Core {
     rx_timeout: Receiver<Timeout>,
     /// Output all certificates to the consensus layer.
     tx_consensus: Sender<Certificate>,
-    /// Send valid certificates to the `Proposer`.
-    tx_proposer: Sender<Certificate>,
+    /// Send normal and speculative parent signals to the `Proposer`.
+    tx_proposer: Sender<ProposerCommand>,
     /// Send a valid TimeoutCertificate along with the round to the `Proposer`.
     tx_timeout_cert: Sender<(TimeoutCert, Round)>,
     /// Send a the header that has voted for the prev leader to the `Consensus` logic.
@@ -98,6 +100,8 @@ pub struct Core {
     processed_certs: HashMap<Round, HashSet<PublicKey>>,
     /// Rounds pending commit because certificate was missing at commit time
     pending_commit_rounds: HashSet<Round>,
+    /// Speculative parent hints waiting for the required r-2 certificate.
+    pending_speculative_parents: HashMap<Round, HashMap<ProposerParent, Instant>>,
     /// A network sender to send the batches to the other workers.
     network: ReliableSender,
     /// Keeps the cancel handlers of the messages we sent.
@@ -151,7 +155,7 @@ impl Core {
         rx_proposer: Receiver<Header>,
         rx_timeout: Receiver<Timeout>,
         tx_consensus: Sender<Certificate>,
-        tx_proposer: Sender<Certificate>,
+        tx_proposer: Sender<ProposerCommand>,
         tx_timeout_cert: Sender<(TimeoutCert, Round)>,
         tx_consensus_header_msg: Sender<ConsensusMessage>,
         rs_block_size: usize,
@@ -209,6 +213,7 @@ impl Core {
                 echo_shards: HashMap::new(),
                 pending_reconstructions: HashMap::new(),
                 pending_commit_rounds: HashSet::new(),
+                pending_speculative_parents: HashMap::new(),
                 certificates: HashMap::new(),
                 last_committed_round: 0,
                 parent_info: HashMap::new(),
@@ -244,7 +249,7 @@ impl Core {
         rx_proposer: Receiver<Header>,
         rx_timeout: Receiver<Timeout>,
         tx_consensus: Sender<Certificate>,
-        tx_proposer: Sender<Certificate>,
+        tx_proposer: Sender<ProposerCommand>,
         tx_timeout_cert: Sender<(TimeoutCert, Round)>,
         tx_consensus_header_msg: Sender<ConsensusMessage>,
         rs_block_size: usize,
@@ -299,6 +304,7 @@ impl Core {
             echo_shards: HashMap::new(),
             pending_reconstructions: HashMap::new(),
             pending_commit_rounds: HashSet::new(),
+            pending_speculative_parents: HashMap::new(),
             certificates: HashMap::new(),
             last_committed_round: 0,
             parent_info: HashMap::new(),
@@ -430,6 +436,11 @@ impl Core {
         if let Some(timeout_cert) = timeout_cert {
             if self.certified_timed_out.insert(round) {
                 debug!("Created timeout certificate for round {}", round);
+                #[cfg(feature = "benchmark")]
+                debug!(
+                    "BENCH event=timeout_cert round={} node={:?}",
+                    round, self.name
+                );
                 self.tx_timeout_cert
                     .send((timeout_cert, round))
                     .await
@@ -615,6 +626,9 @@ impl Core {
             }
         }
 
+        self.maybe_notify_speculative_proposer(header_info_with_proof)
+            .await?;
+
         self.echo_header(header_info_with_proof).await?;
 
         let hid = header_info_with_proof.id;
@@ -654,10 +668,101 @@ impl Core {
         Ok(())
     }
 
-    async fn echo_header(
+    async fn maybe_notify_speculative_proposer(
         &mut self,
         header_info_with_proof: &HeaderInfoWithProof,
     ) -> DagResult<()> {
+        let parent_round = header_info_with_proof.round;
+        if parent_round == 0
+            || self.committee.leader(parent_round as usize) != header_info_with_proof.author
+        {
+            return Ok(());
+        }
+
+        let propose_round = parent_round + 1;
+        if self.committee.leader(propose_round as usize) != self.name {
+            return Ok(());
+        }
+
+        let parent = ProposerParent {
+            header_id: header_info_with_proof.id,
+            round: parent_round,
+            origin: header_info_with_proof.author,
+        };
+
+        if parent_round <= 1 {
+            self.notify_speculative_proposer(parent).await?;
+            return Ok(());
+        }
+
+        let required_cert_round = parent_round - 1;
+        if self.certificates.contains_key(&required_cert_round) {
+            self.notify_speculative_proposer(parent).await?;
+            return Ok(());
+        }
+
+        let pending = self
+            .pending_speculative_parents
+            .entry(required_cert_round)
+            .or_insert_with(HashMap::new);
+        if !pending.contains_key(&parent) {
+            #[cfg(feature = "benchmark")]
+            debug!(
+                "BENCH event=speculative_propose_deferred node={:?} propose_round={} parent_round={} parent_digest={:?} wait_cert_round={}",
+                self.name,
+                propose_round,
+                parent_round,
+                parent.header_id,
+                required_cert_round
+            );
+            pending.insert(parent, Instant::now());
+        }
+
+        Ok(())
+    }
+
+    async fn notify_speculative_proposer(&mut self, parent: ProposerParent) -> DagResult<()> {
+        #[cfg(feature = "benchmark")]
+        debug!(
+            "BENCH event=speculative_parent_ready node={:?} propose_round={} parent_round={} parent_digest={:?}",
+            self.name,
+            parent.round + 1,
+            parent.round,
+            parent.header_id
+        );
+        self.tx_proposer
+            .send(ProposerCommand::SpeculativeParent(parent))
+            .await
+            .expect("Failed to send speculative parent to proposer");
+        Ok(())
+    }
+
+    async fn release_pending_speculative_parents(
+        &mut self,
+        certified_round: Round,
+    ) -> DagResult<()> {
+        let Some(parents) = self.pending_speculative_parents.remove(&certified_round) else {
+            return Ok(());
+        };
+
+        for (parent, started_at) in parents {
+            #[cfg(feature = "benchmark")]
+            debug!(
+                "BENCH event=speculative_parent_released node={:?} propose_round={} parent_round={} parent_digest={:?} wait_cert_round={} wait_ms={}",
+                self.name,
+                parent.round + 1,
+                parent.round,
+                parent.header_id,
+                certified_round,
+                started_at.elapsed().as_millis()
+            );
+            self.notify_speculative_proposer(parent).await?;
+        }
+
+        Ok(())
+    }
+
+    async fn echo_header(&mut self, header_info_with_proof: &HeaderInfoWithProof) -> DagResult<()> {
         let round = header_info_with_proof.round;
 
         if self
@@ -870,9 +975,10 @@ impl Core {
         // Store in local map — move certificate in (no extra clone).
         self.certificates.entry(round).or_insert(certificate);
         self.tx_proposer
-            .send(proposer_certificate)
+            .send(ProposerCommand::NormalCertificate(proposer_certificate))
             .await
             .expect("Failed to send certificate to proposer");
+        self.release_pending_speculative_parents(round).await?;
 
         // 4a: Build decide from the extracted small fields.
         let decide = Decide::new(header_id, round, &origin, &self.name).await;
@@ -1086,6 +1192,8 @@ impl Core {
                     .retain(|_, h| &h.round >= &gc_round);
                 self.processing_header_proofs
                     .retain(|_, h| &h.round >= &gc_round);
+                self.pending_speculative_parents
+                    .retain(|k, _| k >= &gc_round);
                 self.cancel_handlers.retain(|k, _| k >= &gc_round);
                 self.timeouts_aggregators.retain(|k, _| k >= &gc_round);
                 self.timeout_accept_aggregators

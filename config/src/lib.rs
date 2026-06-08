@@ -1,7 +1,7 @@
 // Copyright(C) Facebook, Inc. and its affiliates.
 use blsttc::{PublicKeyShareG2, SecretKeyShare};
 use crypto::{generate_production_keypair, PublicKey, SecretKey};
-use log::info;
+use log::{debug, info};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
@@ -86,6 +86,12 @@ pub struct Parameters {
     pub f_num: u32,
     pub rs_block_size: usize,
     pub rs_block_threads: usize,
+    #[serde(default)]
+    pub crash_author: Option<PublicKey>,
+    #[serde(default)]
+    pub crash_on_proposal: u64,
+    #[serde(default)]
+    pub crash_duration: u64,
 }
 
 impl Default for Parameters {
@@ -103,6 +109,9 @@ impl Default for Parameters {
             f_num: 3,
             rs_block_size: 16 * 1024,
             rs_block_threads: 4,
+            crash_author: None,
+            crash_on_proposal: 0,
+            crash_duration: 0,
         }
     }
 }
@@ -112,7 +121,7 @@ impl Import for Parameters {}
 impl Parameters {
     pub fn log(&self) {
         if self.consensus_only {
-            info!("Running consensus in isolation");
+            debug!("Running consensus in isolation");
         }
         info!("Header size set to {} B", self.header_size);
         info!("Max header delay set to {} ms", self.max_header_delay);
@@ -122,9 +131,20 @@ impl Parameters {
         info!("Batch size set to {} B", self.batch_size);
         info!("Max batch delay set to {} ms", self.max_batch_delay);
         info!("Transaction size set to {} B", self.tx_size);
-        info!("F  set to {} B", self.f_num);
-        info!("Reed-Solomon block size set to {} B", self.rs_block_size);
-        info!("Reed-Solomon block threads set to {}", self.rs_block_threads);
+        debug!("F set to {}", self.f_num);
+        debug!("Reed-Solomon block size set to {} B", self.rs_block_size);
+        debug!(
+            "Reed-Solomon block threads set to {}",
+            self.rs_block_threads
+        );
+        if let Some(author) = self.crash_author {
+            if self.crash_on_proposal > 0 {
+                debug!(
+                    "Permanent crash configured for {:?} at proposal {}",
+                    author, self.crash_on_proposal
+                );
+            }
+        }
     }
 }
 
