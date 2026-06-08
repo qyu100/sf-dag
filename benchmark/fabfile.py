@@ -162,8 +162,8 @@ def plot(ctx):
 
 
 @task
-def recovery(ctx, directory='logs', committee='.committee.json', window=DEFAULT_RECOVERY_WINDOW, step=0.2, before=10.0, after=20.0, output='recovery-tps', label='Throughput'):
-    ''' Plot sliding-window TPS around the crash point. '''
+def recovery(ctx, directory='logs', committee='.committee.json', window=DEFAULT_RECOVERY_WINDOW, step=0.2, before=10.0, after=20.0, full=True, output='recovery-tps', label='Throughput'):
+    ''' Plot sliding-window TPS over the full experiment by default. '''
     try:
         result = RecoveryPlotter(
             logs_dir=directory,
@@ -172,6 +172,7 @@ def recovery(ctx, directory='logs', committee='.committee.json', window=DEFAULT_
             step=float(step),
             before=float(before),
             after=float(after),
+            full=full,
             output=output,
             label=label,
         ).run()

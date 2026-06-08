@@ -79,21 +79,41 @@ class Bench:
         
     async def _try_connect(self, host):
         failures = 0
-        retries = 5
+        retries = 12
+        retry_delay = 10
+        last_error = None
 
         while failures < retries:
             try:
                 return host, await asyncssh.connect(host, **self.connect_options)
             except Exception as e:
-                if isinstance(e, Exception):
-                    failures += 1
-                else:
-                    return host, e
-        return host, Exception("Failed to connect to host")
+                last_error = e
+                failures += 1
+                if failures < retries:
+                    print(
+                        f"SSH connection to {host} failed "
+                        f"({failures}/{retries}): {e}. Retrying in {retry_delay}s..."
+                    )
+                    await asyncio.sleep(retry_delay)
+
+        return host, Exception(
+            f"Failed to connect to host after {retries} attempts: {last_error}"
+        )
     
-    async def _try_connect_all(self, hosts):
+    async def _try_connect_all(self, hosts, tolerate_failures=False):
         tasks = [self._try_connect(host) for host in hosts]
-        return await self._gather_and_parse(tasks, 'Connect')
+        hosts_and_results = await asyncio.gather(*tasks, return_exceptions=True)
+        if tolerate_failures:
+            reachable = []
+            for host, result in hosts_and_results:
+                if isinstance(result, Exception):
+                    Print.warn(f'Skipping unreachable host {host}: {result}')
+                else:
+                    reachable.append((host, result))
+            return reachable
+
+        self._parse_task_results('Connect', hosts_and_results, False)
+        return hosts_and_results
 
     async def _install_one(self, host, connection, cmd) -> None:
         try:
@@ -201,7 +221,10 @@ class Bench:
 
         if not hosts_to_connections:
             hosts = self.manager.hosts(flat=True)
-            hosts_and_connections = await self._try_connect_all(hosts)
+            hosts_and_connections = await self._try_connect_all(hosts, tolerate_failures=True)
+            if not hosts_and_connections:
+                Print.warn('No reachable hosts to kill')
+                return
             hosts_to_connections = { h: c for h, c in hosts_and_connections }
 
         delete_logs = CommandMaker.clean_logs() if delete_logs else 'true'

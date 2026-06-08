@@ -64,6 +64,7 @@ class RecoveryPlotter:
         step=0.2,
         before=10.0,
         after=20.0,
+        full=True,
         output='recovery-tps',
         label='Throughput',
     ):
@@ -74,6 +75,7 @@ class RecoveryPlotter:
         self.step = float(step)
         self.before = float(before)
         self.after = float(after)
+        self.full = bool(full)
         self.output = output
         self.label = label
 
@@ -201,6 +203,7 @@ class RecoveryPlotter:
             'timeout_sents': timeout_sents,
             'crash_starts': crash_starts,
             'start_time': min(log_times),
+            'end_time': max(log_times),
             'tx_size': tx_size,
             'max_header_delay': max_header_delay,
         }
@@ -245,8 +248,12 @@ class RecoveryPlotter:
             prefix.append(prefix[-1] + txns)
 
         experiment_start = parsed['start_time']
-        start = max(experiment_start, anchor_time - self.before)
-        end = anchor_time + self.after
+        if self.full:
+            start = experiment_start
+            end = parsed['end_time']
+        else:
+            start = max(experiment_start, anchor_time - self.before)
+            end = anchor_time + self.after
         points = []
         t = start
         while t <= end + 1e-9:
