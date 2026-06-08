@@ -1,5 +1,6 @@
 # Copyright(C) Facebook, Inc. and its affiliates.
-from os.path import join
+from os.path import exists, join
+from platform import system
 
 from benchmark.utils import PathMaker
 
@@ -18,12 +19,9 @@ class CommandMaker:
 
     @staticmethod
     def compile():
-        return (
-            "cargo "
-            "--config 'source.crates-io.replace-with=\"ustc\"' "
-            "--config 'source.ustc.registry=\"sparse+https://mirrors.ustc.edu.cn/crates.io-index/\"' "
-            "build --quiet --release --features benchmark"
-        )
+        sdk = '/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk'
+        sdk_prefix = f'SDKROOT={sdk} ' if system() == 'Darwin' and exists(sdk) else ''
+        return f'{sdk_prefix}cargo build --quiet --release --features benchmark' 
 
     @staticmethod
     def generate_key(filename):
@@ -41,7 +39,8 @@ class CommandMaker:
         assert isinstance(parameters, str)
         assert isinstance(debug, bool)
         v = '-vvv' if debug else '-vv'
-        return (f'./node {v} run --edkeys {ed_keys} --committee {committee} '
+        log_level = 'debug' if debug else 'info'
+        return (f'RUST_LOG={log_level} ./node {v} run --edkeys {ed_keys} --committee {committee} '
                 f'--store {store} --parameters {parameters} primary')
 
     @staticmethod
@@ -51,7 +50,8 @@ class CommandMaker:
         assert isinstance(parameters, str)
         assert isinstance(debug, bool)
         v = '-vvv' if debug else '-vv'
-        return (f'./node {v} run --edkeys {ed_keys} --committee {committee} '
+        log_level = 'debug' if debug else 'info'
+        return (f'RUST_LOG={log_level} ./node {v} run --edkeys {ed_keys} --committee {committee} '
                 f'--store {store} --parameters {parameters} worker --id {id}')
 
     @staticmethod

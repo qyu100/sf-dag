@@ -79,7 +79,9 @@ class LocalBench:
                 keys += [EdKey.from_file(filename)]
 
             names = [x.name for x in keys]
-            committee = LocalCommittee(names, self.BASE_PORT, self.workers, self.bench_parameters.faults, [])
+            self.node_parameters.set_crash_author(names)
+            committee_faults = 0 if self.node_parameters.has_runtime_crash() else self.bench_parameters.faults
+            committee = LocalCommittee(names, self.BASE_PORT, self.workers, committee_faults, [])
             committee.print(PathMaker.committee_file())
 
             self.node_parameters.print(PathMaker.parameters_file())
@@ -87,7 +89,7 @@ class LocalBench:
 
             if not consensus_only:
                 # Run the clients (they will wait for the nodes to be ready).
-                workers_addresses = committee.workers_addresses(self.faults)
+                workers_addresses = committee.workers_addresses(committee_faults)
                 rate_share = ceil(rate / committee.workers())
                 for i, addresses in enumerate(workers_addresses):
                     for (id, address) in addresses:
@@ -102,7 +104,7 @@ class LocalBench:
                         self._background_run(cmd, log_file)
 
             # Run the primaries (except the faulty ones).
-            for node_id, address in committee.primary_addresses_with_ids(self.faults):
+            for node_id, address in committee.primary_addresses_with_ids(committee_faults):
                 cmd = CommandMaker.run_primary(
                     PathMaker.ed_key_file(node_id),
                     PathMaker.committee_file(),
@@ -124,7 +126,7 @@ class LocalBench:
                 return LogParser.process(
                     PathMaker.logs_path(),
                     burst,
-                    faults=self.faults,
+                    faults=committee_faults,
                     consensus_only=consensus_only,
                 )
             except ParseError as e:

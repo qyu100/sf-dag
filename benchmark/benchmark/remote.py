@@ -332,6 +332,7 @@ class Bench:
             keys += [EdKey.from_file(filename)]
 
         names = [x.name for x in keys]
+        node_parameters.set_crash_author(names)
 
         if bench_parameters.collocate:
             workers = bench_parameters.workers
@@ -342,14 +343,15 @@ class Bench:
             addresses = OrderedDict(
                 (x, y) for x, y in zip(names, hosts)
             )
-        committee = Committee.from_address_list(addresses, self.settings.base_port, bench_parameters.faults)
+        committee_faults = 0 if node_parameters.has_runtime_crash() else bench_parameters.faults
+        committee = Committee.from_address_list(addresses, self.settings.base_port, committee_faults)
         committee.print(PathMaker.committee_file())
         node_parameters.print(PathMaker.parameters_file())
         return (committee, names)
 
     async def _run_clients(self, rate, burst, committee, bench_parameters, connections):
         Print.info('Booting clients...')
-        workers_addresses = committee.workers_addresses(bench_parameters.faults)
+        workers_addresses = committee.workers_addresses(committee.faults())
         rate_share = ceil(rate / len(workers_addresses))
         tasks = []
         
@@ -424,8 +426,8 @@ class Bench:
         # hosts = committee.ips()
         await self._kill(hosts_to_connections=hosts_to_connections, delete_logs=True)
 
-        # Run the primaries (except the faulty ones).
-        primaries = self._run_primaries(committee, hosts_to_connections, bench_parameters.faults, debug)
+        # Run all primaries. Runtime-crash experiments start the faulty node and let it exit later.
+        primaries = self._run_primaries(committee, hosts_to_connections, committee.faults(), debug)
         await primaries
         
         if not consensus_only:
@@ -596,10 +598,10 @@ class Bench:
                             rate, burst, committee_copy, bench_parameters, self.hosts_to_connections, debug, consensus_only
                         )
 
-                        faults = bench_parameters.faults
+                        faults = committee.faults()
                         await self._download_logs(consensus_only, committee=committee)
                         Print.info('Parsing logs and computing performance...')
-                        logger = LogParser.process(PathMaker.logs_path(), burst, consensus_only=consensus_only)
+                        logger = LogParser.process(PathMaker.logs_path(), burst, faults=faults, consensus_only=consensus_only)
                         logger.print(PathMaker.result_file(
                             faults,
                             n,

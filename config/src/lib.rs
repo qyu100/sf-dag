@@ -1,6 +1,6 @@
 // Copyright(C) Facebook, Inc. and its affiliates.
 use crypto::{generate_production_keypair, PublicKey, SecretKey};
-use log::info;
+use log::{debug, info};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
@@ -83,12 +83,12 @@ pub struct Parameters {
     pub max_batch_delay: u64,
 
     //Autobahn protocol config parameters
-    pub use_optimistic_tips: bool,     //default = true (TODO: implement non optimistic tip option)
-    
-    pub use_parallel_proposals: bool,  //default = true (TODO: implement sequential slot option)
-    pub k: u64, //Max open conensus instances at a time.
+    pub use_optimistic_tips: bool, //default = true (TODO: implement non optimistic tip option)
 
-    pub use_fast_path: bool,           //default = false
+    pub use_parallel_proposals: bool, //default = true (TODO: implement sequential slot option)
+    pub k: u64,                       //Max open conensus instances at a time.
+
+    pub use_fast_path: bool, //default = false
     pub fast_path_timeout: u64,
 
     pub use_ride_share: bool,
@@ -98,8 +98,14 @@ pub struct Parameters {
     pub simulate_asynchrony: bool,
     pub asynchrony_start: u64,
     pub asynchrony_duration: u64,
-    pub f_num: u32, 
+    pub f_num: u32,
     pub tx_size: usize, //size of each transaction in bytes, used for asynchrony simulation
+    #[serde(default)]
+    pub crash_author: Option<PublicKey>,
+    #[serde(default)]
+    pub crash_on_proposal: u64,
+    #[serde(default)]
+    pub crash_duration: u64,
 }
 
 impl Default for Parameters {
@@ -125,11 +131,13 @@ impl Default for Parameters {
 
             //Async simulation:
             simulate_asynchrony: false,
-            asynchrony_start: 20_000, //20 second in
+            asynchrony_start: 20_000,    //20 second in
             asynchrony_duration: 10_000, //10 seconds
-            f_num:3,
-            tx_size: 512 //1 KB per transaction
-
+            f_num: 3,
+            tx_size: 512, //1 KB per transaction
+            crash_author: None,
+            crash_on_proposal: 0,
+            crash_duration: 0,
         }
     }
 }
@@ -149,10 +157,27 @@ impl Parameters {
         info!("Max batch delay set to {} ms", self.max_batch_delay);
         info!("Transaction size set to {} B", self.tx_size);
 
-        info!("Fast path enabled? {}. Fast timeout: {}", self.use_fast_path, self.fast_path_timeout);
-        info!("Optimistic tips enabled? {}", self.use_optimistic_tips);
-        info!("Parallel Proposals enabled? {}. K: {}", self.use_parallel_proposals, self.k);
-        info!("Ride share enabled? {}. Car timeout: {}", self.use_ride_share, self.car_timeout);
+        debug!(
+            "Fast path enabled? {}. Fast timeout: {}",
+            self.use_fast_path, self.fast_path_timeout
+        );
+        debug!("Optimistic tips enabled? {}", self.use_optimistic_tips);
+        debug!(
+            "Parallel Proposals enabled? {}. K: {}",
+            self.use_parallel_proposals, self.k
+        );
+        debug!(
+            "Ride share enabled? {}. Car timeout: {}",
+            self.use_ride_share, self.car_timeout
+        );
+        if let Some(author) = self.crash_author {
+            if self.crash_on_proposal > 0 {
+                debug!(
+                    "Permanent crash configured for {:?} at proposal {}",
+                    author, self.crash_on_proposal
+                );
+            }
+        }
     }
 }
 
@@ -198,11 +223,10 @@ pub struct Comm {
 }
 impl Import for Comm {}
 
-
 #[derive(Clone, Deserialize)]
 pub struct Committee {
     pub authorities: BTreeMap<PublicKey, Authority>,
-    //pub id_map: HashMap<PublicKey, u64>, //position 
+    //pub id_map: HashMap<PublicKey, u64>, //position
     pub f_num: u32,
 }
 
@@ -210,10 +234,7 @@ impl Import for Committee {}
 
 impl Committee {
     pub fn new(authorities: BTreeMap<PublicKey, Authority>, f_num: u32) -> Committee {
-        Self {
-            authorities,
-            f_num,
-        }
+        Self { authorities, f_num }
     }
 
     /// Returns the number of authorities.
@@ -255,7 +276,7 @@ impl Committee {
         let total_votes: Stake = self.authorities.values().map(|x| x.stake).sum();
         total_votes
     }
-    
+
     pub fn block_threshold(&self) -> Stake {
         let total_votes: Stake = self.authorities.values().map(|x| x.stake).sum();
         total_votes / 3 + 1
@@ -355,7 +376,9 @@ impl Committee {
     }
 
     pub fn address(&self, name: &PublicKey) -> Option<SocketAddr> {
-        self.authorities.get(name).map(|x| x.consensus.consensus_to_consensus)
+        self.authorities
+            .get(name)
+            .map(|x| x.consensus.consensus_to_consensus)
     }
 
     pub fn broadcast_addresses(&self, myself: &PublicKey) -> Vec<(PublicKey, SocketAddr)> {

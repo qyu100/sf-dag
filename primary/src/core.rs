@@ -23,11 +23,12 @@ use crypto::{Digest, PublicKey, SignatureService};
 use futures::stream::FuturesUnordered;
 use futures::Future;
 use futures::StreamExt;
-use log::{debug, error, warn};
+use log::{debug, error, info, warn};
 use network::{CancelHandler, ReliableSender};
 //use tokio::time::error::Elapsed;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::pin::Pin;
+use std::process;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -122,6 +123,11 @@ pub struct Core {
     sent_commit_rounds: HashSet<u64>,
     sent_timeouts: HashSet<u64>,
     sent_timeout_accepts: HashSet<u64>,
+    crash_author: Option<PublicKey>,
+    crash_on_proposal: u64,
+    crash_duration: u64,
+    cut_proposal_count: u64,
+    crash_triggered: bool,
     certified_timed_out: HashSet<u64>,
     scheduled_cut_timers: HashSet<u64>,
     cut_timer_futures: FuturesUnordered<Pin<Box<dyn Future<Output = u64> + Send>>>,
@@ -207,6 +213,9 @@ impl Core {
         fast_path_timeout: u64,
         use_ride_share: bool,
         car_timeout: u64,
+        crash_author: Option<PublicKey>,
+        crash_on_proposal: u64,
+        crash_duration: u64,
 
         simulate_asynchrony: bool,
         asynchrony_start: u64,
@@ -261,6 +270,11 @@ impl Core {
                 sent_commit_rounds: HashSet::with_capacity(2 * gc_depth as usize),
                 sent_timeouts: HashSet::new(),
                 sent_timeout_accepts: HashSet::new(),
+                crash_author,
+                crash_on_proposal,
+                crash_duration,
+                cut_proposal_count: 0,
+                crash_triggered: false,
                 certified_timed_out: HashSet::new(),
                 scheduled_cut_timers: HashSet::new(),
                 cut_timer_futures: FuturesUnordered::new(),
@@ -745,6 +759,9 @@ impl Core {
         if !self.proposed_cut_rounds.insert(round) {
             return Ok(());
         }
+        self.cut_proposal_count += 1;
+        self.maybe_permanent_crash(round, "cut");
+
         debug!("Proposing cut for round {}", round);
         let proposal = self.make_cut_proposal(round, self.highest_certified_cut.clone());
 
@@ -766,8 +783,32 @@ impl Core {
         Ok(())
     }
 
+    fn maybe_permanent_crash(&mut self, round: u64, source: &'static str) {
+        if self.crash_triggered
+            || self.crash_on_proposal == 0
+            || self.crash_author != Some(self.name)
+            || self.cut_proposal_count != self.crash_on_proposal
+        {
+            return;
+        }
+
+        self.crash_triggered = true;
+        info!(
+            "BENCH event=crash_start node={:?} round={} proposal_index={} duration_ms={} source={} permanent=true",
+            self.name, round, self.cut_proposal_count, self.crash_duration, source
+        );
+        log::logger().flush();
+        process::exit(0);
+    }
+
     fn schedule_cut_timer(&mut self, round: u64) {
         if self.scheduled_cut_timers.insert(round) {
+            info!(
+                "BENCH event=round_start round={} leader={:?} node={:?}",
+                round,
+                self.leader_elector.get_leader(round),
+                self.name
+            );
             let delay = Duration::from_millis(self.timeout_delay);
             self.cut_timer_futures.push(Box::pin(async move {
                 sleep(delay).await;
@@ -812,6 +853,10 @@ impl Core {
             return Ok(());
         }
 
+        info!(
+            "BENCH event=timeout_sent round={} node={:?}",
+            round, self.name
+        );
         let timeout = Timeout::new(round, self.name).await;
         let addresses = self
             .committee
@@ -924,6 +969,10 @@ impl Core {
             timeout_cert.verify(&self.committee)?;
             if self.certified_timed_out.insert(round) {
                 debug!("Certified timeout for cut round {}", round);
+                debug!(
+                    "BENCH event=timeout_cert round={} node={:?}",
+                    round, self.name
+                );
                 if self.advance_timed_out_cut_rounds() {
                     self.try_propose_cut_for_current_round().await?;
                     self.schedule_cut_timer(self.cut_round);

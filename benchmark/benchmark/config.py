@@ -238,10 +238,33 @@ class NodeParameters:
         except KeyError as e:
             raise ConfigError(f'Malformed parameters: missing key {e}')
 
+        optional_ints = [
+            json.get('crash_node_id', 0),
+            json.get('crash_on_proposal', 0),
+            json.get('crash_duration', 0),
+        ]
+        inputs += optional_ints
+
         if not all(isinstance(x, int) for x in inputs):
             raise ConfigError('Invalid parameters type')
+        if 'crash_author' in json and json['crash_author'] is not None and not isinstance(json['crash_author'], str):
+            raise ConfigError('Invalid crash author type')
 
         self.json = json
+
+    def has_runtime_crash(self):
+        return int(self.json.get('crash_on_proposal', 0)) > 0
+
+    def has_transient_crash(self):
+        return self.has_runtime_crash()
+
+    def set_crash_author(self, names):
+        if not self.has_runtime_crash() or self.json.get('crash_author'):
+            return
+        crash_node_id = int(self.json.get('crash_node_id', 0))
+        if crash_node_id < 0 or crash_node_id >= len(names):
+            raise ConfigError('Crash node id out of range')
+        self.json['crash_author'] = names[crash_node_id]
 
     def print(self, filename):
         assert isinstance(filename, str)
