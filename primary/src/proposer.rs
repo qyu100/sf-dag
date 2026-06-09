@@ -218,7 +218,7 @@ impl Proposer {
                 }
             }
             // NOTE: This log entry is used to compute performance.
-            debug!(
+            info!(
                 "BENCH event=proposal_sent source={} round={} parent={:?} node={:?}",
                 source, header.round, header.parent, header.author
             );
@@ -318,8 +318,9 @@ impl Proposer {
         tokio::pin!(timer);
 
         loop {
+            let failure_fallback_enabled = self.crash_on_proposal > 0;
             let timer_expired = timer.is_elapsed();
-            if timer_expired && !timeout_sent {
+            if failure_fallback_enabled && timer_expired && !timeout_sent {
                 self.make_timeout_msg().await;
                 timeout_sent = true;
             }
@@ -357,6 +358,13 @@ impl Proposer {
                 Some(command) = self.rx_core.recv() => {
                     match command {
                         ProposerCommand::NormalCertificate(certificate) => {
+                            if self.crash_on_proposal == 0 {
+                                debug!(
+                                    "Ignoring normal certificate for round {} because failure fallback is disabled",
+                                    certificate.round()
+                                );
+                                continue;
+                            }
                             let certificate_round = certificate.round();
                             debug!(
                                 "Received certificate {:?} for round {}",
@@ -381,12 +389,19 @@ impl Proposer {
                             self.arm_pending_timeout(&mut pending_timeout_cert, &mut advance);
                         }
                         ProposerCommand::SpeculativeParent(parent) => {
+                            let propose_round = parent.round() + 1;
                             debug!(
                                 "Received speculative parent for round {} while at round {}",
                                 parent.round(),
                                 self.round
                             );
                             self.try_speculative_propose(parent).await;
+                            if propose_round > self.round {
+                                self.round = propose_round;
+                            }
+                            let deadline = Instant::now() + Duration::from_millis(self.max_header_delay);
+                            timer.as_mut().reset(deadline);
+                            timeout_sent = false;
                         }
                     }
                 }
@@ -395,6 +410,13 @@ impl Proposer {
                     self.txns.extend(txns);
                 }
                 Some((timeout_cert, round)) = self.rx_timeout_cert.recv() => {
+                    if !failure_fallback_enabled {
+                        debug!(
+                            "Ignoring timeout certificate for round {} because failure fallback is disabled",
+                            timeout_cert.round
+                        );
+                        continue;
+                    }
                     timeout_cert.verify(&self.committee).expect("Invalid timeout certificate");
                     let timeout_round = timeout_cert.round;
                     if timeout_round != round {
@@ -438,7 +460,7 @@ impl Proposer {
                         }
                     }
                 }
-                () = &mut timer, if !timeout_sent => {
+                () = &mut timer, if failure_fallback_enabled && !timeout_sent => {
                     self.make_timeout_msg().await;
                     timeout_sent = true;
                 }

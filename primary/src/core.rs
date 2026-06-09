@@ -38,6 +38,7 @@ struct OwnHeaderComputeResult {
     header_info: HeaderInfo,
     messages: Vec<(Option<HeaderInfoWithProof>, Option<Bytes>)>,
     round: Round,
+    build_total_ms: u128,
 }
 
 /// Result from background echo reconstruction.
@@ -104,6 +105,8 @@ pub struct Core {
     pending_speculative_parents: HashMap<Round, HashMap<ProposerParent, Instant>>,
     /// Rounds for which speculative proposing already requested local cert reprocessing.
     syncing_speculative_certificates: HashSet<Round>,
+    /// Certificates waiting for the previous round certificate before being processed.
+    pending_certificates: HashMap<Round, Vec<Certificate>>,
     /// A network sender to send the batches to the other workers.
     network: ReliableSender,
     /// Keeps the cancel handlers of the messages we sent.
@@ -217,6 +220,7 @@ impl Core {
                 pending_commit_rounds: HashSet::new(),
                 pending_speculative_parents: HashMap::new(),
                 syncing_speculative_certificates: HashSet::new(),
+                pending_certificates: HashMap::new(),
                 certificates: HashMap::new(),
                 last_committed_round: 0,
                 parent_info: HashMap::new(),
@@ -309,6 +313,7 @@ impl Core {
             pending_commit_rounds: HashSet::new(),
             pending_speculative_parents: HashMap::new(),
             syncing_speculative_certificates: HashSet::new(),
+            pending_certificates: HashMap::new(),
             certificates: HashMap::new(),
             last_committed_round: 0,
             parent_info: HashMap::new(),
@@ -549,13 +554,15 @@ impl Core {
             let d_proofs = t_proofs.elapsed();
 
             let round = header_info.round;
-            println!("    [dispatch_own_header bg] setup={:?} serialize={:?} pad={:?} encode={:?} merkle={:?} proofs={:?} total={:?}",
-                d_setup, d_ser, d_pad, d_encode, d_mtree, d_proofs, start_total.elapsed());
+            let build_total = start_total.elapsed();
+            debug!("dispatch_own_header bg setup={:?} serialize={:?} pad={:?} encode={:?} merkle={:?} proofs={:?} total={:?}",
+                d_setup, d_ser, d_pad, d_encode, d_mtree, d_proofs, build_total);
 
             let _ = tx.blocking_send(OwnHeaderComputeResult {
                 header_info,
                 messages,
                 round,
+                build_total_ms: build_total.as_millis(),
             });
         });
         Ok(())
@@ -594,7 +601,16 @@ impl Core {
                 _ => unreachable!(),
             }
         }
-        println!("    [handle_own_header_result] send={:?}", start.elapsed());
+        #[cfg(feature = "benchmark")]
+        info!(
+            "BENCH event=own_header_ready node={:?} round={} digest={:?} build_total_ms={} send_ms={} recipients={}",
+            self.name,
+            result.round,
+            result.header_info.id,
+            result.build_total_ms,
+            start.elapsed().as_millis(),
+            self.committee.sorted_keys.len().saturating_sub(1)
+        );
         Ok(())
     }
 
@@ -849,6 +865,40 @@ impl Core {
         Ok(())
     }
 
+    fn defer_certificate_until_previous(&mut self, certificate: Certificate) -> bool {
+        if certificate.round <= 1 || self.certificates.contains_key(&(certificate.round - 1)) {
+            return false;
+        }
+
+        let wait_round = certificate.round - 1;
+        let pending = self
+            .pending_certificates
+            .entry(wait_round)
+            .or_insert_with(Vec::new);
+
+        if !pending.iter().any(|x| {
+            x.round == certificate.round
+                && x.header_id == certificate.header_id
+                && x.origin == certificate.origin
+        }) {
+            pending.push(certificate);
+        }
+
+        true
+    }
+
+    async fn release_deferred_certificates(&mut self, certified_round: Round) -> DagResult<()> {
+        let Some(certificates) = self.pending_certificates.remove(&certified_round) else {
+            return Ok(());
+        };
+
+        for certificate in certificates {
+            self.process_certificate_optimized(certificate).await?;
+        }
+
+        Ok(())
+    }
+
     async fn echo_header(&mut self, header_info_with_proof: &HeaderInfoWithProof) -> DagResult<()> {
         let round = header_info_with_proof.round;
 
@@ -949,7 +999,7 @@ impl Core {
 
                         let success = *mtree.root_hash() == root;
 
-                        println!("    [reconstruction bg] reconstruct={:?} hash={:?} tree={:?} success={} total={:?}",
+                        debug!("reconstruction bg reconstruct={:?} hash={:?} tree={:?} success={} total={:?}",
                             d_reconstruct, d_hash, d_tree, success, t_total.elapsed());
 
                         let _ = tx.blocking_send(ReconstructionResult {
@@ -1023,8 +1073,8 @@ impl Core {
         let t_finalize = Instant::now();
         self.finalize_reconstruction_optimized(header_id, round, origin)
             .await?;
-        println!(
-            "    [handle_reconstruction_result] finalize={:?}",
+        debug!(
+            "handle_reconstruction_result finalize={:?}",
             t_finalize.elapsed()
         );
         Ok(())
@@ -1045,6 +1095,10 @@ impl Core {
             .await?
         {
             debug!("Processing of {:?} suspended: missing parent", certificate);
+            return Ok(());
+        }
+
+        if self.defer_certificate_until_previous(certificate.clone()) {
             return Ok(());
         }
 
@@ -1087,6 +1141,8 @@ impl Core {
             .extend(handlers);
 
         self.process_decide(&decide).await?;
+
+        self.release_deferred_certificates(round).await?;
 
         Ok(())
     }
@@ -1284,6 +1340,7 @@ impl Core {
                     .retain(|k, _| k >= &gc_round);
                 self.syncing_speculative_certificates
                     .retain(|r| r >= &gc_round);
+                self.pending_certificates.retain(|k, _| k >= &gc_round);
                 self.cancel_handlers.retain(|k, _| k >= &gc_round);
                 self.timeouts_aggregators.retain(|k, _| k >= &gc_round);
                 self.timeout_accept_aggregators
