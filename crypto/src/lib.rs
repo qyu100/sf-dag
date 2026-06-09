@@ -1,11 +1,11 @@
 // Copyright(C) Facebook, Inc. and its affiliates.
-use blsttc::{
-    G1Affine, G1Projective, G2Affine, G2Projective, PublicKeyG2, PublicKeyShareG2, SecretKeySet,
-    SecretKeyShare, SignatureG1, SignatureShareG1,
-};
 use ed25519_dalek as dalek;
 use ed25519_dalek::ed25519;
 use ed25519_dalek::Signer as _;
+use ml_dsa::{
+    KeyExport, KeyInit, Keypair, MlDsa65, Signature as MlDsaSignature, Signer as MlDsaSigner,
+    SigningKey as MlDsaSigningKey, Verifier as MlDsaVerifier, VerifyingKey as MlDsaVerifyingKey,
+};
 use rand::rngs::OsRng;
 use rand::{CryptoRng, RngCore};
 use serde::{de, ser, Deserialize, Serialize};
@@ -20,7 +20,6 @@ use tokio::sync::oneshot;
 pub mod crypto_tests;
 
 pub type CryptoError = ed25519::Error;
-pub type BlsError = blsttc::Error;
 
 /// Represents a hash digest (32 bytes).
 #[derive(Hash, PartialEq, Default, Eq, Copy, Clone, Deserialize, Serialize, Ord, PartialOrd)]
@@ -255,32 +254,146 @@ impl SignatureService {
 }
 
 // #######################################################################
-// BLS implementation
+// Post-quantum ML-DSA quorum-signature primitives.
 
 #[derive(Serialize, Deserialize)]
 pub struct NodeKeyInfo {
-    /// The node's public key (and identifier).
+    /// The node's public key. The legacy JSON field name is kept for benchmark compatibility.
     pub nameg2: String,
-    /// The node's secret key
+    /// The node's secret seed.
     pub secret: String,
 }
 
-pub fn create_bls_key_pairs(nodes: usize, threshold: usize, path: String) {
-    let mut rng = blsttc::rand::rngs::OsRng;
-    // Generate a set of secret key shares
-    let sk_set = SecretKeySet::random(threshold, &mut rng);
+pub const PQ_SECRET_KEY_LENGTH: usize = 32;
 
-    // Get the corresponding public key set
-    let pk_set_g2 = sk_set.public_keys_g2();
+#[derive(Clone, Eq, PartialEq, Hash, Default, Debug)]
+pub struct PqPublicKey(pub Vec<u8>);
 
+impl PqPublicKey {
+    pub fn encode_base64(&self) -> String {
+        base64::encode(&self.0)
+    }
+
+    pub fn decode_base64(s: &str) -> Result<Self, base64::DecodeError> {
+        Ok(Self(base64::decode(s)?))
+    }
+}
+
+impl Serialize for PqPublicKey {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: ser::Serializer,
+    {
+        serializer.serialize_str(&self.encode_base64())
+    }
+}
+
+impl<'de> Deserialize<'de> for PqPublicKey {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: de::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        let value = Self::decode_base64(&s).map_err(|e| de::Error::custom(e.to_string()))?;
+        Ok(value)
+    }
+}
+
+#[derive(Clone)]
+pub struct PqSecretKey(pub [u8; PQ_SECRET_KEY_LENGTH]);
+
+impl PqSecretKey {
+    pub fn encode_base64(&self) -> String {
+        base64::encode(&self.0[..])
+    }
+
+    pub fn decode_base64(s: &str) -> Result<Self, base64::DecodeError> {
+        let bytes = base64::decode(s)?;
+        let array = bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| base64::DecodeError::InvalidLength)?;
+        Ok(Self(array))
+    }
+}
+
+impl Default for PqSecretKey {
+    fn default() -> Self {
+        Self([0u8; PQ_SECRET_KEY_LENGTH])
+    }
+}
+
+impl Serialize for PqSecretKey {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: ser::Serializer,
+    {
+        serializer.serialize_str(&self.encode_base64())
+    }
+}
+
+impl<'de> Deserialize<'de> for PqSecretKey {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: de::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        let value = Self::decode_base64(&s).map_err(|e| de::Error::custom(e.to_string()))?;
+        Ok(value)
+    }
+}
+
+impl Drop for PqSecretKey {
+    fn drop(&mut self) {
+        self.0.iter_mut().for_each(|x| *x = 0);
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Default, Debug, PartialEq, Eq)]
+pub struct PqSignature(pub Vec<u8>);
+
+impl PqSignature {
+    pub fn new(digest: &Digest, secret: &PqSecretKey) -> Self {
+        let signing_key = MlDsaSigningKey::<MlDsa65>::new_from_slice(&secret.0)
+            .expect("Unable to load ML-DSA secret key");
+        let signature: MlDsaSignature<MlDsa65> = signing_key.sign(&digest.0);
+        Self(signature.encode().as_slice().to_vec())
+    }
+
+    pub fn verify(&self, digest: &Digest, public_key: &PqPublicKey) -> bool {
+        let Ok(verifying_key) = MlDsaVerifyingKey::<MlDsa65>::new_from_slice(&public_key.0) else {
+            return false;
+        };
+        let Ok(signature) = MlDsaSignature::<MlDsa65>::try_from(self.0.as_slice()) else {
+            return false;
+        };
+        verifying_key.verify(&digest.0, &signature).is_ok()
+    }
+}
+
+pub fn generate_pq_keypair<R>(csprng: &mut R) -> (PqPublicKey, PqSecretKey)
+where
+    R: CryptoRng + RngCore,
+{
+    let mut seed = [0u8; PQ_SECRET_KEY_LENGTH];
+    csprng.fill_bytes(&mut seed);
+    let signing_key =
+        MlDsaSigningKey::<MlDsa65>::new_from_slice(&seed).expect("Invalid ML-DSA seed length");
+    let public = PqPublicKey(signing_key.verifying_key().to_bytes().as_slice().to_vec());
+    (public, PqSecretKey(seed))
+}
+
+pub fn generate_production_pq_keypair() -> (PqPublicKey, PqSecretKey) {
+    generate_pq_keypair(&mut OsRng)
+}
+
+pub fn create_pq_key_pairs(nodes: usize, path: String) {
     for node_id in 0..nodes {
-        let sk_share = sk_set.secret_key_share(node_id);
-        let pk_share_g2 = pk_set_g2.public_key_share(node_id);
+        let (public, secret) = generate_production_pq_keypair();
 
-        // Create a NodeInfo struct for the current nodes
         let node_info = NodeKeyInfo {
-            nameg2: pk_share_g2.encode_base64(),
-            secret: sk_share.encode_base64(),
+            nameg2: public.encode_base64(),
+            secret: secret.encode_base64(),
         };
 
         let id = node_id.to_string();
@@ -290,89 +403,28 @@ pub fn create_bls_key_pairs(nodes: usize, threshold: usize, path: String) {
     }
 }
 
-pub fn aggregate_sign(agg_sig: &SignatureShareG1, new_sign: &SignatureShareG1) -> SignatureShareG1 {
-    let agg_sign = G1Affine::from(agg_sig.0 .0 + G1Projective::from(new_sign.0 .0));
-    let sign = SignatureShareG1(SignatureG1(agg_sign));
-    sign
-}
-
-pub fn aggregate_pubkey(
-    agg_key: &PublicKeyShareG2,
-    new_key: &PublicKeyShareG2,
-) -> PublicKeyShareG2 {
-    let agg_key = G2Affine::from(agg_key.0 .0 + G2Projective::from(new_key.0 .0));
-    let key = PublicKeyShareG2(PublicKeyG2(agg_key));
-    key
-}
-
-pub fn remove_pubkeys(
-    agg_key: &PublicKeyShareG2,
-    ids: Vec<usize>,
-    sorted_keys: &Vec<PublicKeyShareG2>,
-) -> PublicKeyShareG2 {
-    let mut agg_pub_key = agg_key.clone();
-    for i in ids {
-        let new_key = G2Affine::from(agg_pub_key.0 .0 - G2Projective::from(sorted_keys[i].0 .0));
-        agg_pub_key = PublicKeyShareG2(PublicKeyG2(new_key));
-    }
-    agg_pub_key
-}
-
-pub fn combine_keys(keys: &Vec<PublicKeyShareG2>) -> PublicKeyShareG2 {
-    if keys.len() == 1 {
-        keys[0]
-    } else {
-        let mut agg_key = keys[0];
-        for i in 1..keys.len() {
-            let new_key = G2Affine::from(agg_key.0 .0 + G2Projective::from(keys[i].0 .0));
-            agg_key = PublicKeyShareG2(PublicKeyG2(new_key));
-        }
-        agg_key
-    }
-}
-
-pub fn combine_key_from_ids(
-    ids: Vec<usize>,
-    sorted_keys: &Vec<PublicKeyShareG2>,
-) -> PublicKeyShareG2 {
-    if ids.len() == 1 {
-        sorted_keys[ids[0]]
-    } else {
-        let mut agg_key = sorted_keys[ids[0]];
-        for i in 1..ids.len() {
-            let new_key =
-                G2Affine::from(agg_key.0 .0 + G2Projective::from(sorted_keys[ids[i]].0 .0));
-            agg_key = PublicKeyShareG2(PublicKeyG2(new_key));
-        }
-        agg_key
-    }
-}
-
 /// This service holds the node's private key. It takes digests as input and returns a signature
 /// over the digest (through a oneshot channel).
 #[derive(Clone)]
-pub struct BlsSignatureService {
-    channel: Sender<([u8; 32], oneshot::Sender<SignatureShareG1>)>,
+pub struct PqSignatureService {
+    channel: Sender<(Digest, oneshot::Sender<PqSignature>)>,
 }
 
-impl BlsSignatureService {
-    pub fn new(secret: SecretKeyShare) -> Self {
+impl PqSignatureService {
+    pub fn new(secret: PqSecretKey) -> Self {
         let (tx, mut rx): (Sender<(_, oneshot::Sender<_>)>, _) = channel(100);
         tokio::spawn(async move {
             while let Some((digest, sender)) = rx.recv().await {
-                let signature = SignatureShareG1::new(&digest, &secret);
+                let signature = PqSignature::new(&digest, &secret);
                 let _ = sender.send(signature);
             }
         });
         Self { channel: tx }
     }
 
-    pub async fn request_signature(&mut self, digest: Digest) -> SignatureShareG1 {
-        let (sender, receiver): (
-            oneshot::Sender<SignatureShareG1>,
-            oneshot::Receiver<SignatureShareG1>,
-        ) = oneshot::channel();
-        if let Err(e) = self.channel.send((digest.0, sender)).await {
+    pub async fn request_signature(&mut self, digest: Digest) -> PqSignature {
+        let (sender, receiver): (oneshot::Sender<_>, oneshot::Receiver<_>) = oneshot::channel();
+        if let Err(e) = self.channel.send((digest, sender)).await {
             panic!("Failed to send message Signature Service: {}", e);
         }
         receiver

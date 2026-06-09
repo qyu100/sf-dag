@@ -15,11 +15,10 @@ use crate::primary::{HeaderType, PrimaryMessage, PrimaryMessageRef, Round};
 use crate::synchronizer::Synchronizer;
 use crate::{ConsensusMessage, HeaderInfo, HeaderMessage};
 use async_recursion::async_recursion;
-use blsttc::SignatureShareG1;
 use bytes::Bytes;
 use config::Committee;
 use crypto::Hash as _;
-use crypto::{BlsSignatureService, Digest, PublicKey, SignatureService};
+use crypto::{Digest, PqSignatureService, PublicKey, SignatureService};
 use log::{debug, error, info, warn};
 use network::{CancelHandler, ReliableSender};
 use std::collections::{HashMap, HashSet};
@@ -64,7 +63,7 @@ pub struct Core {
     /// Service to sign headers.
     signature_service: SignatureService,
     /// Service to sign Echo and Ready vote shares.
-    bls_signature_service: BlsSignatureService,
+    pq_signature_service: PqSignatureService,
     /// The current consensus round (used for cleanup).
     consensus_round: Arc<AtomicU64>,
     /// The depth of the garbage collector.
@@ -108,7 +107,7 @@ pub struct Core {
     /// The RBC instances for which this node already broadcast Ready.
     sent_readies: HashSet<(Round, PublicKey)>,
     /// Ready quorums that can form certificates immediately.
-    ready_quorums: HashMap<AvailabilityKey, (Round, PublicKey, Vec<u128>, SignatureShareG1)>,
+    ready_quorums: HashMap<AvailabilityKey, (Round, PublicKey, crate::messages::QuorumCertificate)>,
     /// RBC payload roots that passed local erasure-code reconstruction.
     reconstruction_ok: HashSet<AvailabilityKey>,
     /// RBC payload roots with an in-flight reconstruction task.
@@ -161,7 +160,7 @@ impl Core {
         store: Store,
         synchronizer: Synchronizer,
         signature_service: SignatureService,
-        bls_signature_service: BlsSignatureService,
+        pq_signature_service: PqSignatureService,
         consensus_round: Arc<AtomicU64>,
         gc_depth: Round,
         tx_primary: Sender<PrimaryMessage>,
@@ -189,7 +188,7 @@ impl Core {
                 store,
                 synchronizer,
                 signature_service,
-                bls_signature_service,
+                pq_signature_service,
                 consensus_round,
                 gc_depth,
                 tx_primary,
@@ -256,7 +255,7 @@ impl Core {
         store: Store,
         synchronizer: Synchronizer,
         signature_service: SignatureService,
-        bls_signature_service: BlsSignatureService,
+        pq_signature_service: PqSignatureService,
         consensus_round: Arc<AtomicU64>,
         gc_depth: Round,
         tx_primary: Sender<PrimaryMessage>,
@@ -282,7 +281,7 @@ impl Core {
             store,
             synchronizer,
             signature_service,
-            bls_signature_service,
+            pq_signature_service,
             consensus_round,
             gc_depth,
             tx_primary,
@@ -1092,8 +1091,7 @@ impl Core {
     #[async_recursion]
     async fn maybe_form_certificate(&mut self, id: Digest, root: Digest) -> DagResult<()> {
         let key = (id, root);
-        let Some((round, origin, signer_bits, aggregate_signature)) =
-            self.ready_quorums.get(&key).cloned()
+        let Some((round, origin, quorum_certificate)) = self.ready_quorums.get(&key).cloned()
         else {
             return Ok(());
         };
@@ -1106,7 +1104,7 @@ impl Core {
             root_hash: root,
             round,
             origin,
-            votes: (signer_bits, aggregate_signature),
+            votes: quorum_certificate,
         };
         self.process_certificate_optimized(certificate).await
     }
@@ -1129,7 +1127,7 @@ impl Core {
             &origin,
             &self.name,
             root,
-            &mut self.bls_signature_service,
+            &mut self.pq_signature_service,
         )
         .await;
         let addresses = self
@@ -1161,7 +1159,7 @@ impl Core {
             let echo = Echo::new(
                 header_info_with_proof,
                 &self.name,
-                &mut self.bls_signature_service,
+                &mut self.pq_signature_service,
             )
             .await;
             let addresses = self
@@ -1271,7 +1269,7 @@ impl Core {
             root_hash: *header_info_with_proof.proof.root_hash(),
             round: header_info_with_proof.round,
             origin: header_info_with_proof.author,
-            votes: (Vec::new(), SignatureShareG1::default()),
+            votes: crate::messages::QuorumCertificate::default(),
         };
 
         self.process_certificate(certificate).await?;
@@ -1345,7 +1343,7 @@ impl Core {
             Some(ReadyThreshold::Relay(root)) => {
                 self.send_ready(ready.id, ready.round, ready.origin, root).await?;
             }
-            Some(ReadyThreshold::Quorum(root, signer_bits, aggregate_signature)) => {
+            Some(ReadyThreshold::Quorum(root, quorum_certificate)) => {
                 self.send_ready(ready.id, ready.round, ready.origin, root).await?;
                 let (round, origin) = self
                     .processing_header_proofs
@@ -1354,7 +1352,7 @@ impl Core {
                     .unwrap_or((ready.round, ready.origin));
                 self.ready_quorums
                     .entry((ready.id, root))
-                    .or_insert((round, origin, signer_bits, aggregate_signature));
+                    .or_insert((round, origin, quorum_certificate));
                 self.request_availability_shards(ready.id, root).await?;
                 self.try_start_reconstruction(ready.id, root);
                 self.maybe_form_certificate(ready.id, root).await?;
@@ -1437,7 +1435,7 @@ impl Core {
             root_hash: Digest::default(),
             round,
             origin: author,
-            votes: (Vec::new(), SignatureShareG1::default()),
+            votes: crate::messages::QuorumCertificate::default(),
         };
 
         self.process_certificate_optimized(certificate).await?;
@@ -1731,7 +1729,7 @@ impl Core {
                 self.pending_proposer_parents.retain(|k, _| k >= &gc_round);
                 self.pending_certificates.retain(|k, _| k >= &gc_round);
                 self.sent_readies.retain(|(r, _)| r >= &gc_round);
-                self.ready_quorums.retain(|_, (r, _, _, _)| *r >= gc_round);
+                self.ready_quorums.retain(|_, (r, _, _)| *r >= gc_round);
                 let live_header_ids: HashSet<Digest> = self
                     .processing_header_proofs
                     .keys()
@@ -1781,8 +1779,10 @@ mod core_bench {
     use crate::primary::{PrimaryMessage, Round};
     use crate::synchronizer::Synchronizer;
     use config::{Authority, Committee, PrimaryAddresses};
-    use crypto::{generate_production_keypair, BlsSignatureService, Digest, PublicKey, SignatureService};
-    use blsttc::{PublicKeyShareG2, SignatureShareG1};
+    use crypto::{
+        generate_production_keypair, generate_production_pq_keypair, Digest, PqSecretKey,
+        PqSignature, PqSignatureService, PublicKey, SignatureService,
+    };
     use rand::RngCore;
     use std::collections::{BTreeMap, HashMap};
     use std::sync::atomic::AtomicU64;
@@ -1794,20 +1794,33 @@ mod core_bench {
     /// Build a Committee of `n` authorities with f = `f_num`, each with stake 1.
     /// Returns (committee, vec of PublicKeys, vec of SecretKeys).
     /// SecretKeys are returned separately since they don't implement Clone.
-    fn make_committee(n: usize, f_num: u32) -> (Committee, Vec<PublicKey>, Vec<crypto::SecretKey>) {
+    fn make_committee(
+        n: usize,
+        f_num: u32,
+    ) -> (
+        Committee,
+        Vec<PublicKey>,
+        Vec<crypto::SecretKey>,
+        Vec<PqSecretKey>,
+    ) {
         let mut pks = Vec::with_capacity(n);
         let mut sks = Vec::with_capacity(n);
+        let mut pq_pks = Vec::with_capacity(n);
+        let mut pq_sks = Vec::with_capacity(n);
         for _ in 0..n {
             let (pk, sk) = generate_production_keypair();
+            let (pq_pk, pq_sk) = generate_production_pq_keypair();
             pks.push(pk);
             sks.push(sk);
+            pq_pks.push(pq_pk);
+            pq_sks.push(pq_sk);
         }
         let mut authorities = BTreeMap::new();
         let base_port = 10_000u16;
         for (i, pk) in pks.iter().enumerate() {
             let port = base_port + (i as u16) * 10;
             let authority = Authority {
-                bls_pubkey_g2: PublicKeyShareG2::default(),
+                bls_pubkey_g2: pq_pks[i].clone(),
                 stake: 1,
                 primary: PrimaryAddresses {
                     primary_to_primary: format!("127.0.0.1:{}", port).parse().unwrap(),
@@ -1818,7 +1831,7 @@ mod core_bench {
             authorities.insert(*pk, authority);
         }
         let committee = Committee::new(authorities, f_num);
-        (committee, pks, sks)
+        (committee, pks, sks, pq_sks)
     }
 
     /// Holds the receiver halves of all channels created for a test Core.
@@ -1835,6 +1848,7 @@ mod core_bench {
     /// Returns (Core, CoreSinks) — the sinks must be kept alive for the Core to function.
     fn make_core(
         name: PublicKey,
+        pq_secret: PqSecretKey,
         committee: Arc<Committee>,
         store_path: &str,
         rs_block_size: usize,
@@ -1854,7 +1868,7 @@ mod core_bench {
         // Generate a fresh keypair just for the signature service.
         let (_, dummy_sk) = generate_production_keypair();
         let signature_service = SignatureService::new(dummy_sk);
-        let bls_signature_service = BlsSignatureService::new(blsttc::SecretKeyShare::default());
+        let pq_signature_service = PqSignatureService::new(pq_secret);
         let (tx_primary, rx_primaries) = channel(1);
         let (_tx_header_waiter2, rx_header_waiter) = channel(1);
         let (_tx_certificate_waiter2, rx_certificate_waiter) = channel(1);
@@ -1871,7 +1885,7 @@ mod core_bench {
             store,
             synchronizer,
             signature_service,
-            bls_signature_service,
+            pq_signature_service,
             Arc::new(AtomicU64::new(0)),
             50, // gc_depth
             tx_primary,
@@ -1927,7 +1941,7 @@ mod core_bench {
         println!("N={}, f={}", n, f_num);
         println!("======================================");
 
-        let (committee, pks, mut sks) = make_committee(n, f_num);
+        let (committee, pks, mut sks, pq_sks) = make_committee(n, f_num);
         let committee = Arc::new(committee);
         let my_pk = pks[0];
         let mut signature_service = SignatureService::new(sks.remove(0));
@@ -1942,7 +1956,7 @@ mod core_bench {
             for i in 0..iterations {
                 let store_path1 = format!("/tmp/claude/bench_own_header_orig_{}_{}_{}", threads, i, std::process::id());
                 let (mut core1, _sinks1) = make_core(
-                    my_pk, committee.clone(), &store_path1, rs_block_size, threads,
+                    my_pk, pq_sks[0].clone(), committee.clone(), &store_path1, rs_block_size, threads,
                 );
                 let t1 = Instant::now();
                 core1.process_own_header(header.clone()).await.expect("original failed");
@@ -1950,7 +1964,7 @@ mod core_bench {
 
                 let store_path2 = format!("/tmp/claude/bench_own_header_opt_{}_{}_{}", threads, i, std::process::id());
                 let (mut core2, _sinks2) = make_core(
-                    my_pk, committee.clone(), &store_path2, rs_block_size, threads,
+                    my_pk, pq_sks[0].clone(), committee.clone(), &store_path2, rs_block_size, threads,
                 );
                 let t2 = Instant::now();
                 core2.process_own_header_optimized(header.clone()).await.expect("optimized failed");
@@ -1996,7 +2010,7 @@ mod core_bench {
         println!("N={}, f={}", n, f_num);
         println!("======================================");
 
-        let (committee, pks, mut sks) = make_committee(n, f_num);
+        let (committee, pks, mut sks, pq_sks) = make_committee(n, f_num);
         let committee = Arc::new(committee);
 
         let data_shard_num = committee.data_shard_num() as usize;
@@ -2059,14 +2073,16 @@ mod core_bench {
                 let pk = sorted_keys[idx];
                 let leaf = &*shards_vec[idx];
                 let proof = mtree.proof_with_leaf(idx, leaf).unwrap();
-                Echo {
+                let mut echo = Echo {
                     id: header_info.id,
                     round: header_info.round,
                     origin: proposer_pk,
                     author: pk,
                     proof,
-                    signature: SignatureShareG1::default(),
-                }
+                    signature: PqSignature::default(),
+                };
+                echo.signature = PqSignature::new(&echo.digest(), &pq_sks[idx]);
+                echo
             })
             .collect();
         let iterations = 10;
@@ -2082,7 +2098,7 @@ mod core_bench {
                 let echoes_clone1: Vec<Echo> = echoes.iter().cloned().collect();
                 let store_path1 = format!("/tmp/claude/bench_recv_orig_{}_{}_{}", threads, i, std::process::id());
                 let (mut core1, _sinks1) = make_core(
-                    receiver_pk, committee.clone(), &store_path1, rs_block_size, threads,
+                    receiver_pk, pq_sks[1].clone(), committee.clone(), &store_path1, rs_block_size, threads,
                 );
                 let t1 = Instant::now();
                 core1.process_header_proof(&hiwp_clone1).await.expect("process_header_proof failed");
@@ -2096,7 +2112,7 @@ mod core_bench {
                 let echoes_clone2: Vec<Echo> = echoes.iter().cloned().collect();
                 let store_path2 = format!("/tmp/claude/bench_recv_opt_{}_{}_{}", threads, i, std::process::id());
                 let (mut core2, _sinks2) = make_core(
-                    receiver_pk, committee.clone(), &store_path2, rs_block_size, threads,
+                    receiver_pk, pq_sks[1].clone(), committee.clone(), &store_path2, rs_block_size, threads,
                 );
                 let t2 = Instant::now();
                 core2.process_header_proof_optimized(&hiwp_clone2).await.expect("process_header_proof_optimized failed");
@@ -2144,7 +2160,7 @@ mod core_bench {
 
         let n = 50usize;
         let f_num = 16u32;
-        let (committee, pks, _sks) = make_committee(n, f_num);
+        let (committee, pks, _sks, _pq_sks) = make_committee(n, f_num);
         let committee = Arc::new(committee);
 
         // Build a small HeaderInfoWithProof to create a realistic Echo.
@@ -2175,7 +2191,7 @@ mod core_bench {
             origin: pks[0],
             author: pks[1],
             proof,
-            signature: SignatureShareG1::default(),
+            signature: PqSignature::default(),
         };
 
         // Serialize with owning enum.
@@ -2205,7 +2221,7 @@ mod core_bench {
 
         let n = 50usize;
         let f_num = 16u32;
-        let (committee, pks, _sks) = make_committee(n, f_num);
+        let (committee, pks, _sks, _pq_sks) = make_committee(n, f_num);
         let committee = Arc::new(committee);
 
         let payload: Vec<Vec<u8>> = vec![vec![1u8; 64]; 10];

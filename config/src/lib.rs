@@ -1,6 +1,5 @@
 // Copyright(C) Facebook, Inc. and its affiliates.
-use blsttc::{PublicKeyShareG2, SecretKeyShare};
-use crypto::{generate_production_keypair, PublicKey, SecretKey};
+use crypto::{generate_production_keypair, PqPublicKey, PqSecretKey, PublicKey, SecretKey};
 use log::info;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -148,7 +147,7 @@ pub struct WorkerAddresses {
 
 #[derive(Clone, Deserialize)]
 pub struct Authority {
-    pub bls_pubkey_g2: PublicKeyShareG2,
+    pub bls_pubkey_g2: PqPublicKey,
     /// The voting power of this authority.
     pub stake: Stake,
     /// The network addresses of the primary.
@@ -352,15 +351,18 @@ impl Committee {
             .map(|(name, _)| (name.clone()))
             .collect()
     }
-    pub fn get_bls_public_keys(&self) -> Vec<PublicKeyShareG2> {
+    pub fn get_bls_public_keys(&self) -> Vec<PqPublicKey> {
         self.authorities
             .iter()
-            .map(|(_, x)| x.bls_pubkey_g2)
+            .map(|(_, x)| x.bls_pubkey_g2.clone())
             .collect()
     }
 
-    pub fn get_bls_public_g2(&self, name: &PublicKey) -> PublicKeyShareG2 {
-        self.authorities.get(name).map(|x| x.bls_pubkey_g2).unwrap()
+    pub fn get_bls_public_g2(&self, name: &PublicKey) -> PqPublicKey {
+        self.authorities
+            .get(name)
+            .map(|x| x.bls_pubkey_g2.clone())
+            .unwrap()
     }
 }
 
@@ -393,25 +395,25 @@ impl Default for KeyPair {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct BlsKeyPair {
     /// The node's public key (and identifier).
-    pub nameg2: PublicKeyShareG2,
+    pub nameg2: PqPublicKey,
     /// The node's secret key.
-    pub secret: SecretKeyShare,
+    pub secret: PqSecretKey,
 }
 
 impl Import for BlsKeyPair {}
 impl Export for BlsKeyPair {}
 
 impl BlsKeyPair {
-    pub fn new(nodes: usize, threshold: usize, path: String) {
-        crypto::create_bls_key_pairs(nodes, threshold, path);
+    pub fn new(nodes: usize, _threshold: usize, path: String) {
+        crypto::create_pq_key_pairs(nodes, path);
     }
 }
 
 impl Default for BlsKeyPair {
     fn default() -> BlsKeyPair {
         Self {
-            nameg2: PublicKeyShareG2::default(),
-            secret: SecretKeyShare::default(),
+            nameg2: PqPublicKey::default(),
+            secret: PqSecretKey::default(),
         }
     }
 }

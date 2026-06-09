@@ -2,12 +2,11 @@
 use crate::error::{DagError, DagResult};
 use crate::merkle::Proof;
 use crate::messages::{
-    echo_digest, empty_signer_bitset, set_signer_bit, signer_ids_from_bitset,
-    sorted_bls_public_keys, Certificate, Ready, Timeout, TimeoutCert,
+    empty_signer_bitset, set_signer_bit, Certificate, QuorumCertificate, Ready, Timeout,
+    TimeoutCert,
 };
-use blsttc::SignatureShareG1;
 use config::{Committee, Stake};
-use crypto::{aggregate_sign, combine_key_from_ids, Digest, Hash as _, PublicKey, Signature};
+use crypto::{Digest, Hash as _, PqSignature, PublicKey, Signature};
 use std::collections::{HashMap, HashSet};
 use std::mem;
 
@@ -18,7 +17,6 @@ pub struct EchoAggregator {
     echos: HashMap<Digest, HashMap<PublicKey, Proof>>,
     // Accumulated stake per root hash
     weights: HashMap<Digest, Stake>,
-    signatures: HashMap<Digest, SignatureShareG1>,
     signer_bits: HashMap<Digest, Vec<u128>>,
 }
 
@@ -29,7 +27,6 @@ impl EchoAggregator {
             used: HashSet::new(),
             echos: HashMap::new(),
             weights: HashMap::new(),
-            signatures: HashMap::new(),
             signer_bits: HashMap::new(),
         }
     }
@@ -38,10 +35,10 @@ impl EchoAggregator {
         &mut self,
         author: PublicKey,
         proof: Proof,
-        signature: SignatureShareG1,
-        id: Digest,
-        round: crate::primary::Round,
-        origin: PublicKey,
+        _signature: PqSignature,
+        _id: Digest,
+        _round: crate::primary::Round,
+        _origin: PublicKey,
         committee: &Committee,
     ) -> DagResult<Option<(Digest, Vec<Option<Box<[u8]>>>)>> {
         // Ensure it is the first time this authority votes.
@@ -56,16 +53,6 @@ impl EchoAggregator {
         let author_index = committee
             .index_of(&author)
             .ok_or(DagError::UnknownAuthority(author))?;
-        let current_weight = *self.weights.get(&root).unwrap_or(&0);
-        let agg_signature = self
-            .signatures
-            .entry(root.clone())
-            .or_insert_with(SignatureShareG1::default);
-        if current_weight == 0 {
-            *agg_signature = signature;
-        } else {
-            *agg_signature = aggregate_sign(agg_signature, &signature);
-        }
         let bits = self
             .signer_bits
             .entry(root.clone())
@@ -77,20 +64,10 @@ impl EchoAggregator {
         // If this particular root reached quorum, build the ordered leaf vector
         if *w >= committee.quorum_threshold() {
             self.weights.remove(&root);
-            let bits = self
+            let _bits = self
                 .signer_bits
                 .remove(&root)
                 .expect("signer bitset exists");
-            let agg_signature = self
-                .signatures
-                .remove(&root)
-                .expect("aggregate signature exists");
-            verify_quorum_signature(
-                echo_digest(id, root, round, origin),
-                &bits,
-                &agg_signature,
-                committee,
-            )?;
             let author_map = self.echos.remove(&root).expect("author_map exists");
             let mut owned_map = author_map;
             let leaf_values: Vec<Option<Box<[u8]>>> = committee
@@ -110,7 +87,6 @@ pub struct ReadyAggregator {
     readies: HashMap<Digest, HashMap<PublicKey, Ready>>,
     // Accumulated stake per root hash
     weights: HashMap<Digest, Stake>,
-    signatures: HashMap<Digest, SignatureShareG1>,
     signer_bits: HashMap<Digest, Vec<u128>>,
     relay_roots: HashSet<Digest>,
     quorum_roots: HashSet<Digest>,
@@ -118,7 +94,7 @@ pub struct ReadyAggregator {
 
 pub enum ReadyThreshold {
     Relay(Digest),
-    Quorum(Digest, Vec<u128>, SignatureShareG1),
+    Quorum(Digest, QuorumCertificate),
 }
 
 impl ReadyAggregator {
@@ -127,7 +103,6 @@ impl ReadyAggregator {
             used: HashSet::new(),
             readies: HashMap::new(),
             weights: HashMap::new(),
-            signatures: HashMap::new(),
             signer_bits: HashMap::new(),
             relay_roots: HashSet::new(),
             quorum_roots: HashSet::new(),
@@ -149,16 +124,6 @@ impl ReadyAggregator {
         let author_index = committee
             .index_of(&author)
             .ok_or(DagError::UnknownAuthority(author))?;
-        let current_weight = *self.weights.get(&root).unwrap_or(&0);
-        let agg_signature = self
-            .signatures
-            .entry(root)
-            .or_insert_with(SignatureShareG1::default);
-        if current_weight == 0 {
-            *agg_signature = ready.signature;
-        } else {
-            *agg_signature = aggregate_sign(agg_signature, &ready.signature);
-        }
         let bits = self
             .signer_bits
             .entry(root)
@@ -172,31 +137,22 @@ impl ReadyAggregator {
                 .get(&root)
                 .expect("signer bitset exists")
                 .clone();
-            let agg_signature = *self
-                .signatures
+            let signatures = self
+                .readies
                 .get(&root)
-                .expect("aggregate signature exists");
-            verify_quorum_signature(ready.digest(), &bits, &agg_signature, committee)?;
-            return Ok(Some(ReadyThreshold::Quorum(root, bits, agg_signature)));
+                .expect("ready map exists")
+                .iter()
+                .map(|(author, ready)| (*author, ready.signature.clone()))
+                .collect();
+            let certificate = QuorumCertificate::new(bits, signatures);
+            certificate.verify(ready.digest(), committee)?;
+            return Ok(Some(ReadyThreshold::Quorum(root, certificate)));
         }
         if *w >= committee.validity_threshold() && self.relay_roots.insert(root) {
             return Ok(Some(ReadyThreshold::Relay(root)));
         }
         Ok(None)
     }
-}
-
-fn verify_quorum_signature(
-    digest: Digest,
-    signer_bits: &[u128],
-    signature: &SignatureShareG1,
-    committee: &Committee,
-) -> DagResult<()> {
-    let signer_ids = signer_ids_from_bitset(signer_bits, committee)?;
-    let sorted_bls_keys = sorted_bls_public_keys(committee);
-    let agg_pk = combine_key_from_ids(signer_ids, &sorted_bls_keys);
-    SignatureShareG1::verify_batch(&digest.0, &agg_pk, signature)
-        .map_err(|_| DagError::InvalidBlsSignature)
 }
 
 /// Aggregate certificates and check if we reach a quorum.

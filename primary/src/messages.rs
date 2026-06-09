@@ -3,10 +3,9 @@ use crate::batch_maker::Transaction;
 use crate::error::{DagError, DagResult};
 use crate::merkle::Proof;
 use crate::primary::Round;
-use blsttc::{PublicKeyShareG2, SignatureShareG1};
 use config::Committee;
 use crypto::{
-    combine_key_from_ids, BlsSignatureService, Digest, Hash, PublicKey, Signature, SignatureService,
+    Digest, Hash, PqSignature, PqSignatureService, PublicKey, Signature, SignatureService,
 };
 use ed25519_dalek::Digest as _;
 use ed25519_dalek::Sha512;
@@ -374,14 +373,14 @@ pub struct Echo {
     pub origin: PublicKey,
     pub author: PublicKey,
     pub proof: Proof,
-    pub signature: SignatureShareG1,
+    pub signature: PqSignature,
 }
 
 impl Echo {
     pub async fn new(
         header_info_with_proof: &HeaderInfoWithProof,
         author: &PublicKey,
-        bls_signature_service: &mut BlsSignatureService,
+        pq_signature_service: &mut PqSignatureService,
     ) -> Self {
         let echo = Self {
             id: header_info_with_proof.id.clone(),
@@ -389,9 +388,9 @@ impl Echo {
             origin: header_info_with_proof.author,
             author: *author,
             proof: header_info_with_proof.proof.clone(),
-            signature: SignatureShareG1::default(),
+            signature: PqSignature::default(),
         };
-        let signature = bls_signature_service.request_signature(echo.digest()).await;
+        let signature = pq_signature_service.request_signature(echo.digest()).await;
         Self { signature, ..echo }
     }
 
@@ -400,6 +399,11 @@ impl Echo {
         ensure!(
             committee.stake(&self.author) > 0,
             DagError::UnknownAuthority(self.author)
+        );
+        ensure!(
+            self.signature
+                .verify(&self.digest(), &committee.get_bls_public_g2(&self.author)),
+            DagError::InvalidPqSignature
         );
         Ok(())
     }
@@ -494,7 +498,7 @@ pub struct Ready {
     pub origin: PublicKey,
     pub author: PublicKey,
     pub root_hash: Digest,
-    pub signature: SignatureShareG1,
+    pub signature: PqSignature,
 }
 
 impl Ready {
@@ -504,7 +508,7 @@ impl Ready {
         origin: &PublicKey,
         author: &PublicKey,
         root_hash: Digest,
-        bls_signature_service: &mut BlsSignatureService,
+        pq_signature_service: &mut PqSignatureService,
     ) -> Self {
         let ready = Self {
             id: header_id,
@@ -512,11 +516,9 @@ impl Ready {
             origin: *origin,
             author: *author,
             root_hash,
-            signature: SignatureShareG1::default(),
+            signature: PqSignature::default(),
         };
-        let signature = bls_signature_service
-            .request_signature(ready.digest())
-            .await;
+        let signature = pq_signature_service.request_signature(ready.digest()).await;
         Self { signature, ..ready }
     }
 
@@ -525,6 +527,11 @@ impl Ready {
         ensure!(
             committee.stake(&self.author) > 0,
             DagError::UnknownAuthority(self.author)
+        );
+        ensure!(
+            self.signature
+                .verify(&self.digest(), &committee.get_bls_public_g2(&self.author)),
+            DagError::InvalidPqSignature
         );
         Ok(())
     }
@@ -628,12 +635,56 @@ impl TimeoutCert {
 }
 
 #[derive(Clone, Serialize, Deserialize, Default)]
+pub struct QuorumCertificate {
+    pub signer_bits: Vec<u128>,
+    pub signatures: Vec<(PublicKey, PqSignature)>,
+}
+
+impl QuorumCertificate {
+    pub fn new(signer_bits: Vec<u128>, signatures: Vec<(PublicKey, PqSignature)>) -> Self {
+        Self {
+            signer_bits,
+            signatures,
+        }
+    }
+
+    pub fn verify(&self, digest: Digest, committee: &Committee) -> DagResult<()> {
+        let signer_ids = signer_ids_from_bitset(&self.signer_bits, committee)?;
+        let expected_signers: HashSet<PublicKey> = signer_ids
+            .into_iter()
+            .map(|id| committee.sorted_keys[id])
+            .collect();
+
+        let mut used = HashSet::new();
+        let mut weight = 0;
+        for (author, signature) in &self.signatures {
+            ensure!(
+                expected_signers.contains(author),
+                DagError::CertificateRequiresQuorum
+            );
+            ensure!(used.insert(*author), DagError::AuthorityReuse(*author));
+            ensure!(
+                signature.verify(&digest, &committee.get_bls_public_g2(author)),
+                DagError::InvalidPqSignature
+            );
+            weight += committee.stake(author);
+        }
+
+        ensure!(
+            used.len() == expected_signers.len() && weight >= committee.quorum_threshold(),
+            DagError::CertificateRequiresQuorum
+        );
+        Ok(())
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, Default)]
 pub struct Certificate {
     pub header_id: Digest,
     pub root_hash: Digest,
     pub round: Round,
     pub origin: PublicKey,
-    pub votes: (Vec<u128>, SignatureShareG1),
+    pub votes: QuorumCertificate,
 }
 
 impl Certificate {
@@ -651,11 +702,7 @@ impl Certificate {
             return Ok(());
         }
 
-        let signer_ids = signer_ids_from_bitset(&self.votes.0, committee)?;
-        let sorted_bls_keys = sorted_bls_public_keys(committee);
-        let agg_pk = combine_key_from_ids(signer_ids, &sorted_bls_keys);
-        SignatureShareG1::verify_batch(&self.digest().0, &agg_pk, &self.votes.1)
-            .map_err(|_| DagError::InvalidBlsSignature)
+        self.votes.verify(self.digest(), committee)
     }
 
     pub fn round(&self) -> Round {
@@ -732,12 +779,4 @@ pub(crate) fn signer_ids_from_bitset(
         DagError::CertificateRequiresQuorum
     );
     Ok(ids)
-}
-
-pub(crate) fn sorted_bls_public_keys(committee: &Committee) -> Vec<PublicKeyShareG2> {
-    committee
-        .sorted_keys
-        .iter()
-        .map(|key| committee.get_bls_public_g2(key))
-        .collect()
 }

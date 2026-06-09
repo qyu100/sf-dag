@@ -15,7 +15,7 @@ use crate::worker::Worker;
 use async_trait::async_trait;
 use bytes::Bytes;
 use config::{BlsKeyPair, Committee, KeyPair, Parameters, WorkerId};
-use crypto::{BlsSignatureService, Digest, PublicKey, SignatureService};
+use crypto::{Digest, PqSignatureService, PublicKey, SignatureService};
 use futures::sink::SinkExt as _;
 use log::info;
 use network::{MessageHandler, Receiver as NetworkReceiver, Writer};
@@ -128,7 +128,7 @@ impl Primary {
         // Parse the public and secret key of this authority.
         let name = keypair.name;
         let secret = keypair.secret;
-        let bls_secret = bls_keypair.secret;
+        let pq_secret = bls_keypair.secret;
 
         // Atomic variable use to synchronizer all tasks with the latest consensus round. This is only
         // used for cleanup. The only tasks that write into this variable is `GarbageCollector`.
@@ -194,7 +194,7 @@ impl Primary {
 
         // The `SignatureService` is used to require signatures on specific digests.
         let signature_service = SignatureService::new(secret);
-        let bls_signature_service = BlsSignatureService::new(bls_secret);
+        let pq_signature_service = PqSignatureService::new(pq_secret);
         // The `Core` receives and handles headers, votes, and certificates from the other primaries.
         Core::spawn(
             name,
@@ -202,7 +202,7 @@ impl Primary {
             store.clone(),
             synchronizer,
             signature_service.clone(),
-            bls_signature_service,
+            pq_signature_service,
             consensus_round.clone(),
             parameters.gc_depth,
             tx_primary_messages,
