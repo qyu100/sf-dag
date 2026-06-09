@@ -845,7 +845,6 @@ impl Core {
 
     async fn process_cut_timer(&mut self, round: u64) -> DagResult<()> {
         if round != self.cut_round
-            || self.voted_cut_rounds.contains(&round)
             || self.cut_certificates.contains_key(&round)
             || self.certified_timed_out.contains(&round)
             || !self.sent_timeouts.insert(round)

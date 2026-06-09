@@ -1,16 +1,18 @@
 # Copyright(C) Facebook, Inc. and its affiliates.
 from collections import OrderedDict
+from datetime import datetime
 from fabric import Connection, ThreadingGroup as Group
 from fabric.exceptions import GroupException
 from paramiko import RSAKey
 from paramiko.ssh_exception import PasswordRequiredException, SSHException
-from os.path import basename, splitext
+from os.path import basename, exists, join, splitext
 from time import sleep
 from math import ceil
 from copy import deepcopy
 import subprocess
 from subprocess import SubprocessError
-from os import chmod
+from os import chmod, listdir, makedirs
+from shutil import copy2, move
 import traceback
 from benchmark.config import Committee, EdKey, NodeParameters, BenchParameters, ConfigError
 from benchmark.utils import BenchError, Print, PathMaker, progress_bar
@@ -46,6 +48,29 @@ class Bench:
             self.keep_alive = 5
         except (IOError, PasswordRequiredException, SSHException) as e:
             raise BenchError('Failed to load SSH key', e)
+
+    def _backup_logs(self, nodes, burst, run):
+        log_path = PathMaker.logs_path()
+        if not exists(log_path):
+            Print.warn(f'Skipping log backup: {log_path} does not exist')
+            return
+
+        timestamp = datetime.now().strftime('%Y-%m-%d-%H-%M-%S')
+        branch_name = str(self.settings.branch).replace('/', '_')
+        backup_dir = join(
+            'backup_logs',
+            f'{timestamp}-{branch_name}-{nodes}nodes-burst{burst}-run{run}',
+        )
+
+        makedirs(backup_dir, exist_ok=True)
+        for filename in listdir(log_path):
+            move(join(log_path, filename), join(backup_dir, filename))
+
+        for filename in (PathMaker.committee_file(), PathMaker.parameters_file()):
+            if exists(filename):
+                copy2(filename, join(backup_dir, filename))
+
+        Print.info(f'Saved logs to {backup_dir}')
         
     def _check_stderr(self, output):
         if isinstance(output, dict):
@@ -610,6 +635,7 @@ class Bench:
                             rate,
                             bench_parameters.tx_size,
                         ))
+                        self._backup_logs(n, burst, i + 1)
                 
                     except (subprocess.SubprocessError, ParseError) as e:
                         self._kill(hosts_to_connections=self.hosts_to_connections)
