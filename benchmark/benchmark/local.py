@@ -105,7 +105,7 @@ class LocalBench:
                         self._background_run(cmd, log_file)
 
             # Run the primaries (except the faulty ones).
-            for _, (node_id, address) in enumerate(committee.primary_addresses(committee_faults)):
+            for node_id, address in committee.primary_addresses_with_ids(committee_faults):
                 cmd = CommandMaker.run_primary(
                     PathMaker.ed_key_file(node_id),
                     PathMaker.bls_key_file(node_id),

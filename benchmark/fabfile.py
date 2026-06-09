@@ -10,19 +10,22 @@ from benchmark.instance import InstanceManager
 from benchmark.remote import Bench, BenchError
 
 
-DEFAULT_RECOVERY_WINDOW = 2.4
+DEFAULT_RECOVERY_WINDOW = 1
 
 
 @task
-def local(ctx, debug=False, consensus_only=True, header_size=10_000_000, crash_on_proposal=4):
+def local(ctx, debug=False, consensus_only=True, header_size=10_000_000, faults=0, f_num=3, crash_on_proposal=4):
     ''' Run benchmarks on localhost '''
+    faults = int(faults)
+    f_num = int(f_num)
+    crash_on_proposal = int(crash_on_proposal) if faults > 0 else 0
     bench_params = {
-        'faults': 1,
+        'faults': faults,
         'nodes': 10,
         'workers': 1,
         'rate': 100_000,
         'tx_size': 512,
-        'duration': 30,
+        'duration': 60,
         "burst" : 50
     }
     node_params = {
@@ -35,11 +38,11 @@ def local(ctx, debug=False, consensus_only=True, header_size=10_000_000, crash_o
         'batch_size': header_size,  # bytescd
         'tx_size': bench_params['tx_size'],
         'max_batch_delay': 200,  # ms
-        'f_num': 3,
+        'f_num': f_num,
         'rs_block_size': 16 * 1024,  # bytes
         'rs_block_threads': 8,
         'crash_node_id': 0,
-        'crash_on_proposal': int(crash_on_proposal),
+        'crash_on_proposal': crash_on_proposal,
     }
     try:
         ret = LocalBench(bench_params, node_params).run(debug, consensus_only)
@@ -103,10 +106,13 @@ def install(ctx):
 
 
 @task
-def remote(ctx, burst = 50, debug=False, consensus_only=False, header_size=512, crash_on_proposal=4):
+def remote(ctx, burst = 50, debug=False, consensus_only=False, header_size=512, faults=1, f_num=3, crash_on_proposal=4):
     ''' Run benchmarks on GCP '''
+    faults = int(faults)
+    f_num = int(f_num)
+    crash_on_proposal = int(crash_on_proposal) if faults > 0 else 0
     bench_params = {
-        'faults': 1,
+        'faults': faults,
         'nodes': 10,
         'workers': 1,
         'collocate': True,
@@ -132,11 +138,11 @@ def remote(ctx, burst = 50, debug=False, consensus_only=False, header_size=512, 
         'tx_size': bench_params['tx_size'],  # bytes
         'max_batch_delay': 200,  # ms
         'leaders_per_round': 67,
-        'f_num': 3,
+        'f_num': f_num,
         'rs_block_size': 16 * 1024,  # bytes
         'rs_block_threads': 8,
         'crash_node_id': 0,
-        'crash_on_proposal': int(crash_on_proposal),
+        'crash_on_proposal': crash_on_proposal,
     }
     try:
         Bench(ctx).run(bench_params, node_params, debug, consensus_only)
@@ -162,7 +168,7 @@ def plot(ctx):
 
 
 @task
-def recovery(ctx, directory='logs', committee='.committee.json', window=DEFAULT_RECOVERY_WINDOW, step=0.2, before=10.0, after=20.0, full=True, output='recovery-tps', label='Throughput'):
+def recovery(ctx, directory='logs', committee='.committee.json', window=DEFAULT_RECOVERY_WINDOW, step=0.2, before=10.0, after=20.0, full=True, output='recovery-tps', label='Opt-Dispersed-Simple-IT'):
     ''' Plot sliding-window TPS over the full experiment by default. '''
     try:
         result = RecoveryPlotter(
@@ -176,10 +182,13 @@ def recovery(ctx, directory='logs', committee='.committee.json', window=DEFAULT_
             output=output,
             label=label,
         ).run()
-        Print.info(
-            f"Recovery plot anchored at crash round {result['anchor_round']} "
-            f"for crashed node {result['faulty_author']}"
-        )
+        if result['anchor_time'] is None:
+            Print.info('TPS plot generated without a crash anchor')
+        else:
+            Print.info(
+                f"Recovery plot anchored at crash round {result['anchor_round']} "
+                f"for crashed node {result['faulty_author']}"
+            )
         Print.info(f"CSV: {result['csv']}")
         Print.info(f"Plots: {', '.join(result['plots'])}")
     except RecoveryError as e:

@@ -79,41 +79,21 @@ class Bench:
         
     async def _try_connect(self, host):
         failures = 0
-        retries = 12
-        retry_delay = 10
-        last_error = None
+        retries = 5
 
         while failures < retries:
             try:
                 return host, await asyncssh.connect(host, **self.connect_options)
             except Exception as e:
-                last_error = e
-                failures += 1
-                if failures < retries:
-                    print(
-                        f"SSH connection to {host} failed "
-                        f"({failures}/{retries}): {e}. Retrying in {retry_delay}s..."
-                    )
-                    await asyncio.sleep(retry_delay)
-
-        return host, Exception(
-            f"Failed to connect to host after {retries} attempts: {last_error}"
-        )
-    
-    async def _try_connect_all(self, hosts, tolerate_failures=False):
-        tasks = [self._try_connect(host) for host in hosts]
-        hosts_and_results = await asyncio.gather(*tasks, return_exceptions=True)
-        if tolerate_failures:
-            reachable = []
-            for host, result in hosts_and_results:
-                if isinstance(result, Exception):
-                    Print.warn(f'Skipping unreachable host {host}: {result}')
+                if isinstance(e, Exception):
+                    failures += 1
                 else:
-                    reachable.append((host, result))
-            return reachable
-
-        self._parse_task_results('Connect', hosts_and_results, False)
-        return hosts_and_results
+                    return host, e
+        return host, Exception("Failed to connect to host")
+    
+    async def _try_connect_all(self, hosts):
+        tasks = [self._try_connect(host) for host in hosts]
+        return await self._gather_and_parse(tasks, 'Connect')
 
     async def _install_one(self, host, connection, cmd) -> None:
         try:
@@ -221,10 +201,7 @@ class Bench:
 
         if not hosts_to_connections:
             hosts = self.manager.hosts(flat=True)
-            hosts_and_connections = await self._try_connect_all(hosts, tolerate_failures=True)
-            if not hosts_and_connections:
-                Print.warn('No reachable hosts to kill')
-                return
+            hosts_and_connections = await self._try_connect_all(hosts)
             hosts_to_connections = { h: c for h, c in hosts_and_connections }
 
         delete_logs = CommandMaker.clean_logs() if delete_logs else 'true'
@@ -410,7 +387,7 @@ class Bench:
         Print.info('Booting primaries...')
         tasks = []
 
-        for _, (node_id, address) in enumerate(committee.primary_addresses(faults)):
+        for node_id, address in committee.primary_addresses_with_ids(faults):
             host = Committee.ip(address)
             cmd = CommandMaker.run_primary(
                 PathMaker.ed_key_file(node_id),
@@ -533,11 +510,10 @@ class Bench:
     #     await self._gather_and_parse(tasks, 'Download Worker Logs')
 
     async def _download_primary_logs(self, faults, committee, hosts_to_connections):
-        primary_addresses = committee.primary_addresses(faults)
         tasks = []
 
         print('Downloading primaries logs...')
-        for _, (node_id, address) in enumerate(primary_addresses):
+        for node_id, address in committee.primary_addresses_with_ids(faults):
             host = Committee.ip(address)
             src = PathMaker.primary_log_file(node_id)
             dest = PathMaker.primary_log_file(node_id)
@@ -597,7 +573,7 @@ class Bench:
         msg = f'Uploading configuration files'
         if update:
             msg += f' and changing repository {self.settings.repo_name} to branch {self.settings.branch}'
-        Print.info(msg + f' on {len(committee.primary_addresses())} honest machines...')
+        Print.info(msg + f' on {len(committee.primary_addresses_with_ids())} honest machines...')
         
         tasks = []
         honest_hosts_and_connections = []

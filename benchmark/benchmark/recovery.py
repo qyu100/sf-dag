@@ -46,7 +46,7 @@ def finish_recovery_plot():
     plt.ylim(bottom=0)
     plt.grid(True, linestyle='--')
     plt.legend(
-        loc='lower right',
+        loc='upper right',
         prop={'weight': 'bold', 'size': 24},
         columnspacing=1.5,
         handletextpad=0.6,
@@ -108,17 +108,15 @@ class RecoveryPlotter:
         try:
             with open(self.committee_file, 'r') as f:
                 committee = load(f)
-        except OSError as e:
-            raise RecoveryError(f'Failed to read committee file: {e}')
+        except OSError:
+            return None
 
         faulty = [
             name
             for name, authority in committee['authorities'].items()
             if not authority.get('is_honest', True)
         ]
-        if not faulty:
-            raise RecoveryError('Committee has no faulty authority')
-        return faulty[0]
+        return faulty[0] if faulty else None
 
     def _load_primary_logs(self):
         filenames = sorted(glob(join(self.logs_dir, 'primary-*.log')))
@@ -142,9 +140,9 @@ class RecoveryPlotter:
         max_header_delay = None
 
         for log in logs:
-            log_times.extend(self._to_posix(ts) for ts in findall(r'\[(.*Z) ', log))
+            log_times.extend(self._to_posix(ts) for ts in findall(r'\[([^\]\s]+Z) ', log))
 
-            tmp = findall(r'\[(.*Z) .* Committed ([^ ]+)', log)
+            tmp = findall(r'\[([^\]\s]+Z) .* Committed ([^ ]+)', log)
             commits.extend((digest, self._to_posix(ts)) for ts, digest in tmp)
 
             tmp = findall(r'Header ([^ ]+) contains (\d+) B', log)
@@ -161,7 +159,7 @@ class RecoveryPlotter:
                     max_header_delay = int(match.group(1)) / 1_000
 
             tmp = findall(
-                r'\[(.*Z) .* BENCH event=round_start round=(\d+) leader=([^ ]+) node=([^ \n]+)',
+                r'\[([^\]\s]+Z) .* BENCH event=round_start round=(\d+) leader=([^ ]+) node=([^ \n]+)',
                 log,
             )
             round_starts.extend(
@@ -170,7 +168,7 @@ class RecoveryPlotter:
             )
 
             tmp = findall(
-                r'\[(.*Z) .* BENCH event=timeout_sent round=(\d+) node=([^ \n]+)',
+                r'\[([^\]\s]+Z) .* BENCH event=timeout_sent round=(\d+) node=([^ \n]+)',
                 log,
             )
             timeout_sents.extend(
@@ -179,7 +177,7 @@ class RecoveryPlotter:
             )
 
             tmp = findall(
-                r'\[(.*Z) .* BENCH event=crash_start node=([^ ]+) round=(\d+) proposal_index=(\d+) duration_ms=(\d+) source=([^ \n]+)',
+                r'\[([^\]\s]+Z) .* BENCH event=crash_start node=([^ ]+) round=(\d+) proposal_index=(\d+) duration_ms=(\d+) source=([^ \n]+)',
                 log,
             )
             crash_starts.extend(
@@ -213,22 +211,21 @@ class RecoveryPlotter:
             ts, _, round, _, _, _ = min(parsed['crash_starts'], key=lambda x: x[0])
             return ts, round
 
-        candidates = [
-            (ts, round)
-            for round, leader, ts, _ in parsed['round_starts']
-            if leader == faulty_author
-        ]
-        if candidates:
-            return min(candidates)
+        if faulty_author is not None:
+            candidates = [
+                (ts, round)
+                for round, leader, ts, _ in parsed['round_starts']
+                if leader == faulty_author
+            ]
+            if candidates:
+                return min(candidates)
 
         timeout_sents = parsed['timeout_sents']
         if timeout_sents and parsed['max_header_delay'] is not None:
             round, ts, _ = min(timeout_sents, key=lambda x: x[1])
             return ts - parsed['max_header_delay'], round
 
-        raise RecoveryError(
-            'Could not locate faulty leader round. Re-run with the new BENCH round_start logs.'
-        )
+        return None, None
 
     def _series(self, parsed, anchor_time, anchor_round):
         commits = []
@@ -248,7 +245,7 @@ class RecoveryPlotter:
             prefix.append(prefix[-1] + txns)
 
         experiment_start = parsed['start_time']
-        if self.full:
+        if self.full or anchor_time is None:
             start = experiment_start
             end = parsed['end_time']
         else:
@@ -262,7 +259,7 @@ class RecoveryPlotter:
             txns = prefix[right] - prefix[left]
             points.append({
                 'elapsed_time_sec': t - experiment_start,
-                'crash_elapsed_time_sec': anchor_time - experiment_start,
+                'crash_elapsed_time_sec': None if anchor_time is None else anchor_time - experiment_start,
                 'time_sec': t,
                 'committed_tx_window': txns,
                 'tps': txns / self.window,
@@ -287,14 +284,16 @@ class RecoveryPlotter:
                 'anchor_round',
             ])
             for point in points:
+                crash_elapsed = point['crash_elapsed_time_sec']
+                anchor_round = point['anchor_round']
                 out.writerow([
                     f"{point['elapsed_time_sec']:.3f}",
-                    f"{point['crash_elapsed_time_sec']:.3f}",
+                    '' if crash_elapsed is None else f'{crash_elapsed:.3f}',
                     f"{point['time_sec']:.3f}",
                     f"{point['committed_tx_window']:.3f}",
                     f"{point['tps']:.3f}",
                     f"{point['window_sec']:.3f}",
-                    point['anchor_round'],
+                    '' if anchor_round is None else anchor_round,
                 ])
         return filename
 
@@ -303,7 +302,6 @@ class RecoveryPlotter:
 
         xs = [x['elapsed_time_sec'] for x in points]
         ys = [x['tps'] / 1_000 for x in points]
-        crash_x = anchor_time - parsed['start_time']
 
         plt.figure(figsize=(10, 6))
         configure_recovery_plot_style()
@@ -315,13 +313,15 @@ class RecoveryPlotter:
             linewidth=4,
             color='tab:green',
         )
-        plt.axvline(
-            crash_x,
-            color='black',
-            linestyle='--',
-            linewidth=3,
-            label='Crashed leader',
-        )
+        if anchor_time is not None:
+            crash_x = anchor_time - parsed['start_time']
+            plt.axvline(
+                crash_x,
+                color='black',
+                linestyle='--',
+                linewidth=3,
+                label='Crashed leader',
+            )
 
         finish_recovery_plot()
 
