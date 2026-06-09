@@ -10,7 +10,7 @@ from benchmark.instance import InstanceManager
 from benchmark.remote import Bench, BenchError
 
 
-DEFAULT_RECOVERY_WINDOW = 1
+DEFAULT_RECOVERY_WINDOW = 5
 
 
 @task
@@ -106,7 +106,7 @@ def install(ctx):
 
 
 @task
-def remote(ctx, burst = 50, debug=False, consensus_only=False, header_size=512, faults=1, f_num=3, crash_on_proposal=4):
+def remote(ctx, burst = 50, debug=False, consensus_only=True, header_size=10_000_000, faults=1, f_num=3, crash_on_proposal=6):
     ''' Run benchmarks on GCP '''
     faults = int(faults)
     f_num = int(f_num)
@@ -130,7 +130,7 @@ def remote(ctx, burst = 50, debug=False, consensus_only=False, header_size=512, 
     node_params = {
         'consensus_only': consensus_only,
         'header_size': header_size,  # bytes
-        'max_header_delay': 2_400,  # ms
+        'max_header_delay': 5_000,  # ms
         'gc_depth': 50,  # rounds
         'sync_retry_delay': 10_000,  # ms
         'sync_retry_nodes': 3,  # number of nodes

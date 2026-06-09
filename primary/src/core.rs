@@ -102,6 +102,8 @@ pub struct Core {
     pending_commit_rounds: HashSet<Round>,
     /// Speculative parent hints waiting for the required r-2 certificate.
     pending_speculative_parents: HashMap<Round, HashMap<ProposerParent, Instant>>,
+    /// Rounds for which speculative proposing already requested local cert reprocessing.
+    syncing_speculative_certificates: HashSet<Round>,
     /// A network sender to send the batches to the other workers.
     network: ReliableSender,
     /// Keeps the cancel handlers of the messages we sent.
@@ -214,6 +216,7 @@ impl Core {
                 pending_reconstructions: HashMap::new(),
                 pending_commit_rounds: HashSet::new(),
                 pending_speculative_parents: HashMap::new(),
+                syncing_speculative_certificates: HashSet::new(),
                 certificates: HashMap::new(),
                 last_committed_round: 0,
                 parent_info: HashMap::new(),
@@ -305,6 +308,7 @@ impl Core {
             pending_reconstructions: HashMap::new(),
             pending_commit_rounds: HashSet::new(),
             pending_speculative_parents: HashMap::new(),
+            syncing_speculative_certificates: HashSet::new(),
             certificates: HashMap::new(),
             last_committed_round: 0,
             parent_info: HashMap::new(),
@@ -701,6 +705,12 @@ impl Core {
             return Ok(());
         }
 
+        self.sync_missing_speculative_certificate(
+            required_cert_round,
+            header_info_with_proof.parent,
+        )
+        .await?;
+
         let pending = self
             .pending_speculative_parents
             .entry(required_cert_round)
@@ -716,6 +726,83 @@ impl Core {
                 required_cert_round
             );
             pending.insert(parent, Instant::now());
+        }
+
+        Ok(())
+    }
+
+    async fn sync_missing_speculative_certificate(
+        &mut self,
+        required_cert_round: Round,
+        required_header_id: Digest,
+    ) -> DagResult<()> {
+        if !self
+            .syncing_speculative_certificates
+            .insert(required_cert_round)
+        {
+            return Ok(());
+        }
+
+        match self.store.read(required_header_id.to_vec()).await? {
+            Some(bytes) => match bincode::deserialize::<HeaderInfoWithProof>(&bytes) {
+                Ok(header_info_with_proof)
+                    if header_info_with_proof.round == required_cert_round
+                        && header_info_with_proof.id == required_header_id =>
+                {
+                    #[cfg(feature = "benchmark")]
+                    debug!(
+                        "BENCH event=speculative_cert_sync node={:?} wait_cert_round={} digest={:?} origin={:?} source=local_header_reprocess",
+                        self.name,
+                        required_cert_round,
+                        required_header_id,
+                        header_info_with_proof.author
+                    );
+
+                    if let Err(e) = self
+                        .tx_primary
+                        .try_send(PrimaryMessage::HeaderInfoWithProof(header_info_with_proof))
+                    {
+                        self.syncing_speculative_certificates
+                            .remove(&required_cert_round);
+                        warn!(
+                            "Failed to enqueue speculative certificate sync for round {}: {}",
+                            required_cert_round, e
+                        );
+                    }
+                }
+                Ok(header_info_with_proof) => {
+                    self.syncing_speculative_certificates
+                        .remove(&required_cert_round);
+                    warn!(
+                        "Stored header mismatch while syncing speculative certificate: expected round {} digest {:?}, got round {} digest {:?}",
+                        required_cert_round,
+                        required_header_id,
+                        header_info_with_proof.round,
+                        header_info_with_proof.id
+                    );
+                }
+                Err(e) => {
+                    self.syncing_speculative_certificates
+                        .remove(&required_cert_round);
+                    warn!(
+                        "Failed to deserialize header while syncing speculative certificate for round {} digest {:?}: {}",
+                        required_cert_round,
+                        required_header_id,
+                        e
+                    );
+                }
+            },
+            None => {
+                self.syncing_speculative_certificates
+                    .remove(&required_cert_round);
+                #[cfg(feature = "benchmark")]
+                debug!(
+                    "BENCH event=speculative_cert_sync node={:?} wait_cert_round={} digest={:?} source=missing_header",
+                    self.name,
+                    required_cert_round,
+                    required_header_id
+                );
+            }
         }
 
         Ok(())
@@ -974,6 +1061,7 @@ impl Core {
 
         // Store in local map — move certificate in (no extra clone).
         self.certificates.entry(round).or_insert(certificate);
+        self.syncing_speculative_certificates.remove(&round);
         self.tx_proposer
             .send(ProposerCommand::NormalCertificate(proposer_certificate))
             .await
@@ -1194,6 +1282,8 @@ impl Core {
                     .retain(|_, h| &h.round >= &gc_round);
                 self.pending_speculative_parents
                     .retain(|k, _| k >= &gc_round);
+                self.syncing_speculative_certificates
+                    .retain(|r| r >= &gc_round);
                 self.cancel_handlers.retain(|k, _| k >= &gc_round);
                 self.timeouts_aggregators.retain(|k, _| k >= &gc_round);
                 self.timeout_accept_aggregators
