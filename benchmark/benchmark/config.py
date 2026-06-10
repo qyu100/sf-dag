@@ -103,6 +103,7 @@ class Committee:
 
             json['authorities'][name] = {
                 # Corresponds to the determination of faulty nodes in primary_addresses.
+                'node_id': i,
                 'bls_pubkey_g2': bls_pubkeys_g2[i],
                 'is_honest': i < num_authorities - faults,
                 'stake': 1,
@@ -221,10 +222,18 @@ class NodeParameters:
         except KeyError as e:
             raise ConfigError(f'Malformed parameters: missing key {e}')
 
+        inputs += [
+            json.get('crash_node_id', 0),
+            json.get('crash_on_proposal', 0),
+        ]
+
         if not all(isinstance(x, int) for x in inputs):
             raise ConfigError('Invalid parameters type')
 
         self.json = json
+
+    def has_runtime_crash(self):
+        return int(self.json.get('crash_on_proposal', 0)) > 0
 
     def print(self, filename):
         assert isinstance(filename, str)

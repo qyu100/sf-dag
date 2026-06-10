@@ -86,6 +86,10 @@ pub struct Parameters {
     pub f_num: u32,
     pub rs_block_size: usize,
     pub rs_block_threads: usize,
+    #[serde(default)]
+    pub crash_node_id: usize,
+    #[serde(default)]
+    pub crash_on_proposal: u64,
 }
 
 impl Default for Parameters {
@@ -103,6 +107,8 @@ impl Default for Parameters {
             f_num: 3,
             rs_block_size: 16 * 1024,
             rs_block_threads: 4,
+            crash_node_id: 0,
+            crash_on_proposal: 0,
         }
     }
 }
@@ -124,7 +130,12 @@ impl Parameters {
         info!("Transaction size set to {} B", self.tx_size);
         info!("F  set to {} B", self.f_num);
         info!("Reed-Solomon block size set to {} B", self.rs_block_size);
-        info!("Reed-Solomon block threads set to {}", self.rs_block_threads);
+        info!(
+            "Reed-Solomon block threads set to {}",
+            self.rs_block_threads
+        );
+        info!("Crash node id set to {}", self.crash_node_id);
+        info!("Crash on proposal set to {}", self.crash_on_proposal);
     }
 }
 
@@ -148,6 +159,9 @@ pub struct WorkerAddresses {
 
 #[derive(Clone, Deserialize)]
 pub struct Authority {
+    /// Stable node id assigned by the benchmark configuration.
+    #[serde(default)]
+    pub node_id: Option<usize>,
     pub bls_pubkey_g2: PublicKeyShareG2,
     /// The voting power of this authority.
     pub stake: Stake,
@@ -191,6 +205,12 @@ impl Committee {
 
     pub fn index_of(&self, pk: &PublicKey) -> Option<usize> {
         self.index_map.get(pk).cloned()
+    }
+
+    pub fn node_id(&self, pk: &PublicKey) -> Option<usize> {
+        self.authorities
+            .get(pk)
+            .and_then(|authority| authority.node_id)
     }
 
     /// Returns the number of authorities.

@@ -6,15 +6,14 @@ use crate::garbage_collector::GarbageCollector;
 use crate::header_waiter::HeaderWaiter;
 use crate::helper::Helper;
 use crate::messages::{
-    Certificate, Header, HeaderInfo, HeaderInfoWithCertificate, HeaderWithCertificate,
-    Ready, Timeout, Echo, HeaderInfoWithProof, Decide
+    Certificate, Decide, Echo, HeaderInfo, HeaderInfoWithProof, Timeout, TimeoutAccept,
 };
 use crate::proposer::Proposer;
 use crate::synchronizer::Synchronizer;
 use crate::worker::Worker;
 use async_trait::async_trait;
 use bytes::Bytes;
-use config::{Committee, KeyPair, Parameters, WorkerId};
+use config::{Committee, KeyPair, Parameters};
 use crypto::{Digest, PublicKey, SignatureService};
 use futures::sink::SinkExt as _;
 use log::info;
@@ -34,62 +33,18 @@ pub type Round = u64;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum PrimaryMessage {
-    // HeaderMsg(HeaderMessage),
     Timeout(Timeout),
     Echo(Echo),
-    Ready(Ready),
     CertificatesRequest(Vec<Digest>, /* requestor */ PublicKey),
     HeaderInfoWithProof(HeaderInfoWithProof),
     Decide(Decide),
+    TimeoutAccept(TimeoutAccept),
 }
 
-/// Borrowing variant of `PrimaryMessage` for zero-copy serialization.
-/// Variant order MUST match `PrimaryMessage` exactly so that bincode produces
-/// identical wire format (same u32 variant indices).
-#[derive(Serialize)]
-pub(crate) enum PrimaryMessageRef<'a> {
-    Timeout(&'a Timeout),
-    Echo(&'a Echo),
-    Ready(&'a Ready),
-    CertificatesRequest(&'a Vec<Digest>, &'a PublicKey),
-    HeaderInfoWithProof(&'a HeaderInfoWithProof),
-    Decide(&'a Decide),
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub enum HeaderType {
-    HeaderInfoWithProof(HeaderInfoWithProof),
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub enum HeaderMessage {
-    HeaderWithCertificate(HeaderWithCertificate),
-    HeaderInfoWithCertificate(HeaderInfoWithCertificate),
-    Header(Header),
-    HeaderInfo(HeaderInfo),
-}
 pub enum ConsensusMessage {
     HeaderInfo(HeaderInfo),
     Certificate(Certificate),
     HeaderInfoWithProof(HeaderInfoWithProof),
-}
-
-/// The messages sent by the primary to its workers.
-#[derive(Debug, Serialize, Deserialize)]
-pub enum PrimaryWorkerMessage {
-    /// The primary indicates that the worker need to sync the target missing batches.
-    Synchronize(Vec<Digest>, /* target */ PublicKey),
-    /// The primary indicates a round update.
-    Cleanup(Round),
-}
-
-/// The messages sent by the workers to their primary.
-#[derive(Debug, Serialize, Deserialize)]
-pub enum WorkerPrimaryMessage {
-    /// The worker indicates it sealed a new batch.
-    OurBatch(Digest, WorkerId),
-    /// The worker indicates it received a batch's digest from another authority.
-    OthersBatch(Digest, WorkerId),
 }
 
 pub struct Primary;
@@ -104,7 +59,6 @@ impl Primary {
         rx_consensus: Receiver<Certificate>,
         tx_consensus_header_msg: Sender<ConsensusMessage>,
     ) {
-        // let (tx_others_digests, rx_others_digests) = channel(CHANNEL_CAPACITY);
         let (tx_our_digests, rx_our_digests) = channel(CHANNEL_CAPACITY);
         let (tx_parents, rx_parents) = channel(CHANNEL_CAPACITY);
         let (tx_headers, rx_headers) = channel(CHANNEL_CAPACITY);
@@ -146,25 +100,6 @@ impl Primary {
             "Primary {} listening to primary messages on {}",
             name, address
         );
-
-        // Spawn the network receiver listening to messages from our workers.
-        let mut address = committee
-            .primary(&name)
-            .expect("Our public key or worker id is not in the committee")
-            .worker_to_primary;
-        address.set_ip("0.0.0.0".parse().unwrap());
-        // NetworkReceiver::spawn(
-        //     address,
-        //     /* handler */
-        //     WorkerReceiverHandler {
-        //         tx_our_digests,
-        //         tx_others_digests,
-        //     },
-        // );
-        // info!(
-        //     "Primary {} listening to workers messages on {}",
-        //     name, address
-        // );
 
         if !parameters.consensus_only {
             Worker::spawn(
@@ -250,6 +185,8 @@ impl Primary {
             parameters.tx_size,
             parameters.max_header_delay,
             parameters.consensus_only,
+            parameters.crash_node_id,
+            parameters.crash_on_proposal,
             /* rx_core */ rx_parents,
             /* rx_workers */ rx_our_digests,
             /* tx_core */ tx_headers,
@@ -299,37 +236,6 @@ impl MessageHandler for PrimaryReceiverHandler {
                 .send(request)
                 .await
                 .expect("Failed to send certificate"),
-        }
-        Ok(())
-    }
-}
-
-/// Defines how the network receiver handles incoming workers messages.
-#[derive(Clone)]
-struct WorkerReceiverHandler {
-    tx_our_digests: Sender<(Digest, WorkerId)>,
-    tx_others_digests: Sender<(Digest, WorkerId)>,
-}
-
-#[async_trait]
-impl MessageHandler for WorkerReceiverHandler {
-    async fn dispatch(
-        &self,
-        _writer: &mut Writer,
-        serialized: Bytes,
-    ) -> Result<(), Box<dyn Error>> {
-        // Deserialize and parse the message.
-        match bincode::deserialize(&serialized).map_err(DagError::SerializationError)? {
-            WorkerPrimaryMessage::OurBatch(digest, worker_id) => self
-                .tx_our_digests
-                .send((digest, worker_id))
-                .await
-                .expect("Failed to send workers' digests"),
-            WorkerPrimaryMessage::OthersBatch(digest, worker_id) => self
-                .tx_others_digests
-                .send((digest, worker_id))
-                .await
-                .expect("Failed to send workers' digests"),
         }
         Ok(())
     }

@@ -7,13 +7,21 @@ from benchmark.utils import Print
 from benchmark.plot import Ploter, PlotError
 from benchmark.instance import InstanceManager
 from benchmark.remote import Bench, BenchError
+from benchmark.recovery import RecoveryPlotter, RecoveryError
+
+
+DEFAULT_RECOVERY_WINDOW = 2
 
 
 @task
-def local(ctx, debug=True, consensus_only=True, header_size=5120):
+def local(ctx, debug=True, consensus_only=True, header_size=10_000_000, faults=1, f_num=3, crash_node_id=0, crash_on_proposal=6):
     ''' Run benchmarks on localhost '''
+    faults = int(faults)
+    f_num = int(f_num)
+    crash_node_id = int(crash_node_id)
+    crash_on_proposal = int(crash_on_proposal) if faults > 0 else 0
     bench_params = {
-        'faults': 0,
+        'faults': faults,
         'nodes': 10,
         'workers': 1,
         'rate': 100_000,
@@ -24,16 +32,18 @@ def local(ctx, debug=True, consensus_only=True, header_size=5120):
     node_params = {
         'consensus_only': consensus_only,
         'header_size': header_size,  # bytes
-        'max_header_delay': 5_000,  # ms
+        'max_header_delay': 2_000,  # ms
         'gc_depth': 50,  # rounds
         'sync_retry_delay': 10_000,  # ms
         'sync_retry_nodes': 3,  # number of nodes
         'batch_size': header_size,  # bytescd
         'tx_size': bench_params['tx_size'],
         'max_batch_delay': 200,  # ms
-        'f_num': 3,
-        'rs_block_size': 4 * 1024,  # bytes
-        'rs_block_threads': 4
+        'f_num': f_num,
+        'rs_block_size': 16 * 1024,  # bytes
+        'rs_block_threads': 8,
+        'crash_node_id': crash_node_id,
+        'crash_on_proposal': crash_on_proposal
     }
     try:
         ret = LocalBench(bench_params, node_params).run(debug, consensus_only)
@@ -97,11 +107,11 @@ def install(ctx):
 
 
 @task
-def remote(ctx, burst = 50, debug=False, consensus_only=False, header_size=512):
+def remote(ctx, burst = 50, debug=False, consensus_only=True, header_size=10_000_000):
     ''' Run benchmarks on GCP '''
     bench_params = {
         'faults': 0,
-        'nodes': 50,
+        'nodes': 10,
         'workers': 1,
         'collocate': True,
         'rate': [100000],
@@ -126,9 +136,9 @@ def remote(ctx, burst = 50, debug=False, consensus_only=False, header_size=512):
         'tx_size': bench_params['tx_size'],  # bytes
         'max_batch_delay': 200,  # ms
         'leaders_per_round': 67,
-        'f_num': 16,
-        'rs_block_size': 4 * 1024,  # bytes
-        'rs_block_threads': 4
+        'f_num': 3,
+        'rs_block_size': 16 * 1024,  # bytes
+        'rs_block_threads': 8
     }
     try:
         Bench(ctx).run(bench_params, node_params, debug, consensus_only)
@@ -169,3 +179,19 @@ def logs(ctx):
         print(LogParser.process('./logs', faults='?').result())
     except ParseError as e:
         Print.error(BenchError('Failed to parse logs', e))
+
+
+@task
+def recovery(ctx, directory='logs', window=DEFAULT_RECOVERY_WINDOW, step=0.2, duration=60.0, label='Opt-Dispersed-Simple-IT', color='tab:green'):
+    ''' Plot recovery throughput over time from primary logs '''
+    try:
+        print(RecoveryPlotter(
+            directory=directory,
+            window=window,
+            step=step,
+            duration=duration,
+            label=label,
+            color=color,
+        ).run())
+    except RecoveryError as e:
+        Print.error(BenchError('Failed to plot recovery', e))

@@ -14,7 +14,7 @@ class ParseError(Exception):
 
 
 class LogParser:
-    def __init__(self, clients, primaries, burst, faults=0, consensus_only=False, bandwidth_logs=None):
+    def __init__(self, clients, primaries, burst, faults=0, consensus_only=False, bandwidth_logs=None, display_faults=None):
         
         inputs = [primaries]
 
@@ -27,7 +27,7 @@ class LogParser:
         
         self.consensus_only = consensus_only
         self.burst = burst
-        self.faults = faults
+        self.faults = faults if display_faults is None else display_faults
         self.bandwidth = self._parse_bandwidth_logs(bandwidth_logs or [])
         if isinstance(faults, int):
             self.committee_size = len(primaries) + int(faults)
@@ -459,7 +459,7 @@ class LogParser:
             f.write(self.result())
 
     @classmethod
-    def process(cls, directory, burst, faults=0, consensus_only=False):
+    def process(cls, directory, burst, faults=0, consensus_only=False, display_faults=None):
         assert isinstance(directory, str)
 
         primaries = []
@@ -485,6 +485,7 @@ class LogParser:
             faults=faults,
             consensus_only=consensus_only,
             bandwidth_logs=bandwidth_logs,
+            display_faults=display_faults,
         )
 
 

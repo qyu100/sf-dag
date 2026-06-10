@@ -25,7 +25,7 @@ class LocalBench:
 
     def _background_run(self, command, log_file):
         name = splitext(basename(log_file))[0]
-        cmd = f'{command} 2> {log_file}'
+        cmd = f'RUST_LOG=info {command} 2> {log_file}'
         subprocess.run(['tmux', 'new', '-d', '-s', name, cmd], check=True)
 
     def _kill_nodes(self):
@@ -80,7 +80,9 @@ class LocalBench:
 
             names = [x.name for x in keys]
             bls_pubkeys_g2 = [_.nameg2 for _ in bls_keys]
-            committee = LocalCommittee(names, self.BASE_PORT, self.workers, self.bench_parameters.faults, bls_pubkeys_g2)
+            runtime_crash = self.node_parameters.has_runtime_crash()
+            committee_faults = 0 if runtime_crash else self.bench_parameters.faults
+            committee = LocalCommittee(names, self.BASE_PORT, self.workers, committee_faults, bls_pubkeys_g2)
             committee.print(PathMaker.committee_file())
 
             self.node_parameters.print(PathMaker.parameters_file())
@@ -88,7 +90,7 @@ class LocalBench:
 
             if not consensus_only:
                 # Run the clients (they will wait for the nodes to be ready).
-                workers_addresses = committee.workers_addresses(self.faults)
+                workers_addresses = committee.workers_addresses(committee_faults)
                 rate_share = ceil(rate / committee.workers())
                 for i, addresses in enumerate(workers_addresses):
                     for (id, address) in addresses:
@@ -103,7 +105,7 @@ class LocalBench:
                         self._background_run(cmd, log_file)
 
             # Run the primaries (except the faulty ones).
-            for i, address in enumerate(committee.primary_addresses(self.faults)):
+            for i, address in enumerate(committee.primary_addresses(committee_faults)):
                 cmd = CommandMaker.run_primary(
                     PathMaker.ed_key_file(i),
                     PathMaker.bls_key_file(i),
@@ -137,7 +139,13 @@ class LocalBench:
 
             # Parse logs and return the parser.
             Print.info('Parsing logs...')
-            return LogParser.process(PathMaker.logs_path(), self.bench_parameters.burst, faults=self.faults, consensus_only=consensus_only)
+            return LogParser.process(
+                PathMaker.logs_path(),
+                self.bench_parameters.burst,
+                faults=committee_faults,
+                consensus_only=consensus_only,
+                display_faults=self.bench_parameters.faults,
+            )
 
         except (subprocess.SubprocessError, ParseError) as e:
             self._kill_nodes()

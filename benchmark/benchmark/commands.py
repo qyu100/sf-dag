@@ -18,7 +18,7 @@ class CommandMaker:
 
     @staticmethod
     def compile():
-        return "RUSTFLAGS='-C target-cpu=native' cargo build --quiet --release --features benchmark"
+        return "SDKROOT=/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk RUSTFLAGS='-C target-cpu=native' cargo build --quiet --release --features benchmark"
 
     @staticmethod
     def generate_ed_key(filename):

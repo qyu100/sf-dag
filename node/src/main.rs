@@ -116,15 +116,15 @@ async fn run(matches: &ArgMatches<'_>) -> Result<()> {
     let store = Store::new(store_path).context("Failed to create a store")?;
 
     // Channels the sequence of certificates.
-    let (tx_output, rx_output) = channel(CHANNEL_CAPACITY);
+    let (_tx_output, rx_output) = channel(CHANNEL_CAPACITY);
 
     // Check whether to run a primary, a worker, or an entire authority.
     match matches.subcommand() {
         // Spawn the primary and consensus core.
         ("primary", _) => {
-            let (tx_new_certificates, rx_new_certificates) = channel(CHANNEL_CAPACITY);
-            let (tx_feedback, rx_feedback) = channel(CHANNEL_CAPACITY);
-            let (tx_consensus_header, rx_consensus_header) = channel(CHANNEL_CAPACITY);
+            let (tx_new_certificates, _rx_new_certificates) = channel(CHANNEL_CAPACITY);
+            let (_tx_feedback, rx_feedback) = channel(CHANNEL_CAPACITY);
+            let (tx_consensus_header, _rx_consensus_header) = channel(CHANNEL_CAPACITY);
             Primary::spawn(
                 ed_keypair,
                 committee.clone(),

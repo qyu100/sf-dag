@@ -1,7 +1,7 @@
 // Copyright(C) Facebook, Inc. and its affiliates.
 use crate::error::{DagError, DagResult};
 use crate::messages::HeaderInfoWithProof;
-use crate::primary::{HeaderMessage, HeaderType, PrimaryMessage, Round};
+use crate::primary::{PrimaryMessage, Round};
 use bytes::Bytes;
 use config::Committee;
 use crypto::{Digest, PublicKey};
@@ -242,7 +242,8 @@ impl HeaderWaiter {
                 }
                 self.pending.retain(|_, (r, _)| r > &mut gc_round);
                 // self.payload_requests.retain(|_, r| r > &mut gc_round);
-                self.parent_requests.retain(|_, (r, _, _)| r > &mut gc_round);
+                self.parent_requests
+                    .retain(|_, (r, _, _)| r > &mut gc_round);
             }
         }
     }

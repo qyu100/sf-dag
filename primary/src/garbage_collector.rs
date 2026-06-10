@@ -2,8 +2,6 @@
 use crate::messages::Certificate;
 use config::Committee;
 use crypto::PublicKey;
-use network::SimpleSender;
-use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc::Receiver;
@@ -14,32 +12,19 @@ pub struct GarbageCollector {
     consensus_round: Arc<AtomicU64>,
     /// Receives the ordered certificates from consensus.
     rx_consensus: Receiver<Certificate>,
-    /// The network addresses of our workers.
-    addresses: Vec<SocketAddr>,
-    /// A network sender to notify our workers of cleanup events.
-    network: SimpleSender,
 }
 
 impl GarbageCollector {
     pub fn spawn(
-        name: &PublicKey,
-        committee: &Committee,
+        _name: &PublicKey,
+        _committee: &Committee,
         consensus_round: Arc<AtomicU64>,
         rx_consensus: Receiver<Certificate>,
     ) {
-        let addresses = committee
-            .our_workers(name)
-            .expect("Our public key or worker id is not in the committee")
-            .iter()
-            .map(|x| x.primary_to_worker)
-            .collect();
-
         tokio::spawn(async move {
             Self {
                 consensus_round,
                 rx_consensus,
-                addresses,
-                network: SimpleSender::new(),
             }
             .run()
             .await;
@@ -57,13 +42,6 @@ impl GarbageCollector {
 
                 // Trigger cleanup on the primary.
                 self.consensus_round.store(round, Ordering::Relaxed);
-
-                // Trigger cleanup on the workers..
-                // let bytes = bincode::serialize(&PrimaryWorkerMessage::Cleanup(round))
-                //     .expect("Failed to serialize our own message");
-                // self.network
-                //     .broadcast(self.addresses.clone(), Bytes::from(bytes))
-                //     .await;
             }
         }
     }

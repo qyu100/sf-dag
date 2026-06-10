@@ -1,17 +1,13 @@
 // Copyright(C) Facebook, Inc. and its affiliates.
 use crate::error::{DagError, DagResult};
 use crate::merkle::Proof;
-use crate::messages::{Certificate, Ready, Timeout, TimeoutCert, Decide};
+use crate::messages::{Decide, Timeout, TimeoutAccept, TimeoutCert};
 use config::{Committee, Stake};
-use crypto::{PublicKey, Digest};
-use crypto::Signature;
-use log::debug;
-use std::time::Instant;
-use std::collections::{HashSet, HashMap};
+use crypto::{Digest, PublicKey};
+use std::collections::{HashMap, HashSet};
 use std::mem;
 
 pub struct EchoAggregator {
-    weight: Stake,
     used: HashSet<PublicKey>,
     // Map from root_hash -> map(author -> proof)
     echos: HashMap<Digest, HashMap<PublicKey, Proof>>,
@@ -22,14 +18,18 @@ pub struct EchoAggregator {
 impl EchoAggregator {
     pub fn new() -> Self {
         Self {
-            weight: 0,
             used: HashSet::new(),
             echos: HashMap::new(),
             weights: HashMap::new(),
         }
     }
 
-    pub fn append(&mut self, author: PublicKey, proof: Proof, committee: &Committee) -> DagResult<Option<(Digest, Vec<Option<Box<[u8]>>>, Stake, usize)>> {
+    pub fn append(
+        &mut self,
+        author: PublicKey,
+        proof: Proof,
+        committee: &Committee,
+    ) -> DagResult<Option<(Digest, Vec<Option<Box<[u8]>>>, Stake, usize)>> {
         // Ensure it is the first time this authority votes.
         ensure!(self.used.insert(author), DagError::AuthorityReuse(author));
 
@@ -53,47 +53,12 @@ impl EchoAggregator {
                 .iter()
                 .map(|pk| owned_map.remove(pk).map(|p| p.into_value()))
                 .collect();
-            return Ok(Some((root.clone(), leaf_values, collected_weight, collected_count)));
-        }
-        Ok(None)
-    }
-}
-
-pub struct ReadyAggregator {
-    used: HashSet<PublicKey>,
-    // Map from root_hash -> map(author -> Ready)
-    readies: HashMap<Digest, HashMap<PublicKey, Ready>>,
-    // Accumulated stake per root hash
-    weights: HashMap<Digest, Stake>,
-}
-
-impl ReadyAggregator {
-    pub fn new() -> Self {
-        Self {
-            used: HashSet::new(),
-            readies: HashMap::new(),
-            weights: HashMap::new(),
-        }
-    }
-
-    // Return the root hash when 2f+1 Ready messages are collected for it.
-    pub fn append(
-        &mut self,
-        ready: &Ready,
-        committee: &Committee,
-    ) -> DagResult<Option<Digest>> {
-        let author = ready.author;
-        // Ensure it is the first time this authority votes.
-        ensure!(self.used.insert(author), DagError::AuthorityReuse(author));
-        let root = ready.root_hash;
-        let author_map = self.readies.entry(root).or_insert_with(HashMap::new);
-        author_map.insert(author, ready.clone());
-        let w = self.weights.entry(root).or_insert(0);
-        *w += committee.stake(&author);
-        if *w >= committee.quorum_threshold() {
-            // self.weights.remove(&root);
-            let _author_map = self.readies.remove(&root).expect("author_map exists");
-            return Ok(Some(root));
+            return Ok(Some((
+                root.clone(),
+                leaf_values,
+                collected_weight,
+                collected_count,
+            )));
         }
         Ok(None)
     }
@@ -112,11 +77,7 @@ impl DecideAggregator {
         }
     }
 
-    pub fn append(
-        &mut self,
-        decide: &Decide,
-        committee: &Committee,
-    ) -> DagResult<Option<bool>> {
+    pub fn append(&mut self, decide: &Decide, committee: &Committee) -> DagResult<Option<bool>> {
         let author = decide.author;
         ensure!(self.used.insert(author), DagError::AuthorityReuse(author));
         self.weight += committee.stake(&author);
@@ -129,56 +90,9 @@ impl DecideAggregator {
     }
 }
 
-/// Aggregate certificates and check if we reach a quorum.
-pub struct CertificatesAggregator {
-    weight: Stake,
-    certificates: Vec<Certificate>,
-    used: HashSet<PublicKey>,
-}
-
-impl CertificatesAggregator {
-    pub fn new() -> Self {
-        Self {
-            weight: 0,
-            certificates: Vec::new(),
-            used: HashSet::new(),
-        }
-    }
-
-    pub fn append(
-        &mut self,
-        certificate: &Certificate,
-        committee: &Committee,
-    ) -> DagResult<Option<Vec<Certificate>>> {
-        let origin = certificate.origin();
-
-        // Ensure it is the first time this authority votes.
-        if !self.used.insert(origin) {
-            return Ok(None);
-        }
-
-        let round = certificate.round;
-
-        self.certificates.push(certificate.clone());
-        self.weight += committee.stake(&origin);
-
-        let leader = committee.leader(round as usize);
-        if !self.used.contains(&leader) {
-            return Ok(None);
-        }
-
-        if self.weight >= committee.quorum_threshold() {
-            //self.weight = 0; // Ensures quorum is only reached once.
-            return Ok(Some(self.certificates.drain(..).collect()));
-        }
-        Ok(None)
-    }
-}
-
-/// Aggregates timeouts for a particular round into an action or trigger.
+/// Aggregates timeout votes for a particular round into an accept trigger.
 pub struct TimeoutAggregator {
     weight: Stake,
-    timeouts: Vec<(PublicKey, Signature)>,
     used: HashSet<PublicKey>,
 }
 
@@ -186,30 +100,61 @@ impl TimeoutAggregator {
     pub fn new() -> Self {
         Self {
             weight: 0,
-            timeouts: Vec::new(),
+            used: HashSet::new(),
+        }
+    }
+
+    pub fn append(&mut self, timeout: Timeout, committee: &Committee) -> DagResult<Option<()>> {
+        let author = timeout.author;
+
+        // Ensure it is the first time this authority sends a timeout.
+        ensure!(self.used.insert(author), DagError::AuthorityReuse(author));
+
+        self.weight += committee.stake(&author);
+        if self.weight >= committee.quorum_threshold() {
+            return Ok(Some(()));
+        }
+        Ok(None)
+    }
+}
+
+/// Aggregates timeout accepts for a particular round into a timeout certificate.
+pub struct TimeoutAcceptAggregator {
+    weight: Stake,
+    accepts: Vec<PublicKey>,
+    used: HashSet<PublicKey>,
+}
+
+impl TimeoutAcceptAggregator {
+    pub fn new() -> Self {
+        Self {
+            weight: 0,
+            accepts: Vec::new(),
             used: HashSet::new(),
         }
     }
 
     pub fn append(
         &mut self,
-        timeout: Timeout,
+        accept: TimeoutAccept,
         committee: &Committee,
-    ) -> DagResult<Option<TimeoutCert>> {
-        let author = timeout.author;
+    ) -> DagResult<(Stake, Option<TimeoutCert>)> {
+        let author = accept.author;
 
-        // Ensure it is the first time this authority sends a timeout.
+        // Ensure it is the first time this authority sends a timeout accept.
         ensure!(self.used.insert(author), DagError::AuthorityReuse(author));
 
-        self.timeouts.push((author, timeout.signature));
+        self.accepts.push(author);
         self.weight += committee.stake(&author);
         if self.weight >= committee.quorum_threshold() {
-            // Once quorum is reached, move the accumulated timeouts out (avoids cloning the vec).
-            return Ok(Some(TimeoutCert {
-                round: timeout.round,
-                timeouts: mem::take(&mut self.timeouts),
-            }));
+            return Ok((
+                self.weight,
+                Some(TimeoutCert {
+                    round: accept.round,
+                    timeouts: mem::take(&mut self.accepts),
+                }),
+            ));
         }
-        Ok(None)
+        Ok((self.weight, None))
     }
 }
