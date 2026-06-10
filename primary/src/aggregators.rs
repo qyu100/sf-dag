@@ -1,27 +1,31 @@
 // Copyright(C) Facebook, Inc. and its affiliates.
 use crate::error::{DagError, DagResult};
 use crate::merkle::Proof;
-use crate::messages::{Certificate, Decide, Ready, Timeout, TimeoutAccept, TimeoutCert};
+use crate::messages::{Certificate, Decide, Timeout, TimeoutAccept, TimeoutCert};
 use config::{Committee, Stake};
 use crypto::{Digest, PublicKey};
 use std::collections::{HashMap, HashSet};
 
+pub struct EchoAggregationResult {
+    pub optimistic: Option<(Digest, Vec<Option<Box<[u8]>>>)>,
+}
+
 pub struct EchoAggregator {
-    weight: Stake,
     used: HashSet<PublicKey>,
     // Map from root_hash -> map(author -> proof)
     echos: HashMap<Digest, HashMap<PublicKey, Proof>>,
     // Accumulated stake per root hash
     weights: HashMap<Digest, Stake>,
+    optimistic_emitted: HashSet<Digest>,
 }
 
 impl EchoAggregator {
     pub fn new() -> Self {
         Self {
-            weight: 0,
             used: HashSet::new(),
             echos: HashMap::new(),
             weights: HashMap::new(),
+            optimistic_emitted: HashSet::new(),
         }
     }
 
@@ -30,7 +34,7 @@ impl EchoAggregator {
         author: PublicKey,
         proof: Proof,
         committee: &Committee,
-    ) -> DagResult<Option<(Digest, Vec<Option<Box<[u8]>>>)>> {
+    ) -> DagResult<EchoAggregationResult> {
         // Ensure it is the first time this authority votes.
         ensure!(self.used.insert(author), DagError::AuthorityReuse(author));
 
@@ -42,55 +46,24 @@ impl EchoAggregator {
 
         let w = self.weights.entry(root.clone()).or_insert(0);
         *w += committee.stake(&author);
-        // If this particular root reached quorum, build the ordered leaf vector
-        if *w >= committee.optimistic_threshold() {
-            self.weights.remove(&root);
-            let author_map = self.echos.remove(&root).expect("author_map exists");
-            let mut owned_map = author_map;
-            let leaf_values: Vec<Option<Box<[u8]>>> = committee
-                .sorted_keys
-                .iter()
-                .map(|pk| owned_map.remove(pk).map(|p| p.into_value()))
-                .collect();
-            return Ok(Some((root.clone(), leaf_values)));
-        }
-        Ok(None)
-    }
-}
 
-pub struct ReadyAggregator {
-    used: HashSet<PublicKey>,
-    // Map from root_hash -> map(author -> Ready)
-    readies: HashMap<Digest, HashMap<PublicKey, Ready>>,
-    // Accumulated stake per root hash
-    weights: HashMap<Digest, Stake>,
-}
+        let optimistic =
+            if !self.optimistic_emitted.contains(&root) && *w >= committee.optimistic_threshold() {
+                self.optimistic_emitted.insert(root.clone());
+                self.weights.remove(&root);
+                let author_map = self.echos.remove(&root).expect("author_map exists");
+                let mut owned_map = author_map;
+                let leaf_values = committee
+                    .sorted_keys
+                    .iter()
+                    .map(|pk| owned_map.remove(pk).map(|p| p.into_value()))
+                    .collect();
+                Some((root, leaf_values))
+            } else {
+                None
+            };
 
-impl ReadyAggregator {
-    pub fn new() -> Self {
-        Self {
-            used: HashSet::new(),
-            readies: HashMap::new(),
-            weights: HashMap::new(),
-        }
-    }
-
-    // Return the root hash when 2f+1 Ready messages are collected for it.
-    pub fn append(&mut self, ready: &Ready, committee: &Committee) -> DagResult<Option<Digest>> {
-        let author = ready.author;
-        // Ensure it is the first time this authority votes.
-        ensure!(self.used.insert(author), DagError::AuthorityReuse(author));
-        let root = ready.root_hash;
-        let author_map = self.readies.entry(root).or_insert_with(HashMap::new);
-        author_map.insert(author, ready.clone());
-        let w = self.weights.entry(root).or_insert(0);
-        *w += committee.stake(&author);
-        if *w >= committee.quorum_threshold() {
-            // self.weights.remove(&root);
-            let _author_map = self.readies.remove(&root).expect("author_map exists");
-            return Ok(Some(root));
-        }
-        Ok(None)
+        Ok(EchoAggregationResult { optimistic })
     }
 }
 

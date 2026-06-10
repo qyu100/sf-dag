@@ -254,7 +254,8 @@ impl Committee {
     }
 
     pub fn optimistic_threshold(&self) -> Stake {
-        let x = (self.total_stake() + 2 * self.f_num - 2) as f64 / 2.0;
+        let total_votes: Stake = self.authorities.values().map(|x| x.stake).sum();
+        let x = (total_votes + 2 * self.f_num - 2) as f64 / 2.0;
         let ceil_result = x.ceil() as u32;
         ceil_result
     }

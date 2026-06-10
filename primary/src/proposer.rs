@@ -24,9 +24,23 @@ enum AdvanceReason {
     Timeout(Round),
 }
 
+#[derive(Clone, Copy, Debug)]
+pub enum ProposalSource {
+    Speculative,
+    Normal,
+}
+
+impl ProposalSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Speculative => "speculative",
+            Self::Normal => "normal",
+        }
+    }
+}
+
 pub enum ProposerCommand {
-    NormalCertificate(Certificate),
-    SpeculativeParent(ProposerParent),
+    Parent(ProposerParent, ProposalSource),
 }
 
 /// The proposer creates new headers and send them to the core for broadcasting and further processing.
@@ -59,8 +73,8 @@ pub struct Proposer {
     round: Round,
     /// Holds the certificates' ids waiting to be included in the next header.
     last_parent: Vec<Certificate>,
-    /// Holds speculative parent hints waiting for enough payload.
-    pending_speculative_parents: HashMap<Round, ProposerParent>,
+    /// Holds parent hints waiting for enough payload.
+    pending_parents: HashMap<Round, (ProposerParent, ProposalSource)>,
     /// Rounds for which this proposer already emitted a header.
     proposed_rounds: HashSet<Round>,
     /// Holds the txns waiting to be included in the next header.
@@ -111,7 +125,7 @@ impl Proposer {
                 rx_timeout_cert,
                 round: 0,
                 last_parent: genesis,
-                pending_speculative_parents: HashMap::new(),
+                pending_parents: HashMap::new(),
                 proposed_rounds: HashSet::new(),
                 txns: Vec::new(),
                 payload_size: 0,
@@ -250,7 +264,7 @@ impl Proposer {
         process::exit(0);
     }
 
-    async fn try_speculative_propose(&mut self, parent: ProposerParent) {
+    async fn try_parent_propose(&mut self, parent: ProposerParent, source: ProposalSource) {
         let propose_round = parent.round + 1;
         if self.committee.leader(propose_round as usize) != self.name {
             return;
@@ -259,25 +273,25 @@ impl Proposer {
             return;
         }
         if !self.has_payload() {
-            self.pending_speculative_parents
+            self.pending_parents
                 .entry(propose_round)
-                .or_insert(parent);
+                .or_insert((parent, source));
             return;
         }
 
-        self.make_header_for_round(propose_round, parent.header_id, "speculative")
+        self.make_header_for_round(propose_round, parent.header_id, source.as_str())
             .await;
         self.proposed_rounds.insert(propose_round);
         self.payload_size = 0;
     }
 
-    async fn try_pending_speculative_propose(&mut self) {
+    async fn try_pending_parent_propose(&mut self) {
         if !self.has_payload() {
             return;
         }
 
         let Some(round) = self
-            .pending_speculative_parents
+            .pending_parents
             .keys()
             .filter(|&&round| round >= self.round && !self.proposed_rounds.contains(&round))
             .min()
@@ -286,12 +300,42 @@ impl Proposer {
             return;
         };
 
-        if let Some(parent) = self.pending_speculative_parents.remove(&round) {
-            self.make_header_for_round(round, parent.header_id, "speculative")
+        if let Some((parent, source)) = self.pending_parents.remove(&round) {
+            self.make_header_for_round(round, parent.header_id, source.as_str())
                 .await;
             self.proposed_rounds.insert(round);
             self.payload_size = 0;
         }
+    }
+
+    fn accept_normal_parent(
+        &mut self,
+        parent: ProposerParent,
+        pending_timeout_cert: &mut Option<TimeoutCert>,
+        advance: &mut Option<AdvanceReason>,
+    ) {
+        let certificate = Certificate {
+            header_id: parent.header_id,
+            round: parent.round,
+            origin: parent.origin,
+        };
+        let certificate_round = certificate.round();
+
+        if certificate_round + 1 < self.round {
+            return;
+        }
+
+        debug!(
+            "Received normal parent certificate for round {} while at round {}",
+            certificate_round, self.round
+        );
+
+        self.last_parent = vec![certificate];
+        if certificate_round >= self.round {
+            self.round = certificate_round;
+            *advance = Some(AdvanceReason::Certificate(certificate_round));
+        }
+        self.arm_pending_timeout(pending_timeout_cert, advance);
     }
 
     async fn make_timeout_msg(&mut self) {
@@ -318,13 +362,13 @@ impl Proposer {
         tokio::pin!(timer);
 
         loop {
-            let failure_fallback_enabled = self.crash_on_proposal > 0;
+            let timeout_enabled = self.crash_on_proposal > 0;
             let timer_expired = timer.is_elapsed();
-            if failure_fallback_enabled && timer_expired && !timeout_sent {
+            if timeout_enabled && timer_expired && !timeout_sent {
                 self.make_timeout_msg().await;
                 timeout_sent = true;
             }
-            self.try_pending_speculative_propose().await;
+            self.try_pending_parent_propose().await;
 
             // Check if we can propose a new header. A timeout certificate for round r
             // is only actionable after we have the parent certificate from round r - 1.
@@ -357,51 +401,27 @@ impl Proposer {
             tokio::select! {
                 Some(command) = self.rx_core.recv() => {
                     match command {
-                        ProposerCommand::NormalCertificate(certificate) => {
-                            if self.crash_on_proposal == 0 {
-                                debug!(
-                                    "Ignoring normal certificate for round {} because failure fallback is disabled",
-                                    certificate.round()
-                                );
-                                continue;
-                            }
-                            let certificate_round = certificate.round();
-                            debug!(
-                                "Received certificate {:?} for round {}",
-                                certificate_round, self.round
-                            );
-                            // Compare the certificate round with our current round.
-                            match certificate_round.cmp(&self.round) {
-                                Ordering::Greater => {
-                                    // Accept a higher-round certificate to jump ahead if we were late.
-                                    self.round = certificate_round;
-                                    self.last_parent = vec![certificate];
-                                    advance = Some(AdvanceReason::Certificate(certificate_round));
-                                },
-                                Ordering::Less => {
-                                    // Ignore certificates from older rounds.
-                                },
-                                Ordering::Equal => {
-                                    self.last_parent = vec![certificate];
-                                    advance = Some(AdvanceReason::Certificate(certificate_round));
+                        ProposerCommand::Parent(parent, source) => {
+                            let propose_round = parent.round() + 1;
+                            match source {
+                                ProposalSource::Speculative => {
+                                    debug!(
+                                        "Received speculative parent for round {} while at round {}",
+                                        parent.round(),
+                                        self.round
+                                    );
+                                    self.try_parent_propose(parent, source).await;
+                                    if propose_round > self.round {
+                                        self.round = propose_round;
+                                        let deadline = Instant::now() + Duration::from_millis(self.max_header_delay);
+                                        timer.as_mut().reset(deadline);
+                                        timeout_sent = false;
+                                    }
+                                }
+                                ProposalSource::Normal => {
+                                    self.accept_normal_parent(parent, &mut pending_timeout_cert, &mut advance);
                                 }
                             }
-                            self.arm_pending_timeout(&mut pending_timeout_cert, &mut advance);
-                        }
-                        ProposerCommand::SpeculativeParent(parent) => {
-                            let propose_round = parent.round() + 1;
-                            debug!(
-                                "Received speculative parent for round {} while at round {}",
-                                parent.round(),
-                                self.round
-                            );
-                            self.try_speculative_propose(parent).await;
-                            if propose_round > self.round {
-                                self.round = propose_round;
-                            }
-                            let deadline = Instant::now() + Duration::from_millis(self.max_header_delay);
-                            timer.as_mut().reset(deadline);
-                            timeout_sent = false;
                         }
                     }
                 }
@@ -410,7 +430,7 @@ impl Proposer {
                     self.txns.extend(txns);
                 }
                 Some((timeout_cert, round)) = self.rx_timeout_cert.recv() => {
-                    if !failure_fallback_enabled {
+                    if !timeout_enabled {
                         debug!(
                             "Ignoring timeout certificate for round {} because failure fallback is disabled",
                             timeout_cert.round
@@ -460,7 +480,7 @@ impl Proposer {
                         }
                     }
                 }
-                () = &mut timer, if failure_fallback_enabled && !timeout_sent => {
+                () = &mut timer, if timeout_enabled && !timeout_sent => {
                     self.make_timeout_msg().await;
                     timeout_sent = true;
                 }

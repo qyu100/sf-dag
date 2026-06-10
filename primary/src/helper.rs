@@ -9,9 +9,9 @@ use store::Store;
 use tokio::sync::mpsc::Receiver;
 
 /// bincode variant index for `PrimaryMessage::HeaderInfoWithProof`.
-/// PrimaryMessage variants: Timeout=0, Echo=1, Ready=2, CertificatesRequest=3,
-/// HeaderInfoWithProof=4, Decide=5, TimeoutAccept=6.
-const HIWP_VARIANT_INDEX: u32 = 4;
+/// PrimaryMessage variants: Timeout=0, Echo=1, CertificatesRequest=2,
+/// HeaderInfoWithProof=3, Decide=4, TimeoutAccept=5.
+const HIWP_VARIANT_INDEX: u32 = 3;
 
 /// A task dedicated to help other authorities by replying to their certificates requests.
 pub struct Helper {
@@ -63,7 +63,7 @@ impl Helper {
                         // The store contains bincode-serialized HeaderInfoWithProof.
                         // The network expects bincode-serialized PrimaryMessage::HeaderInfoWithProof(...).
                         // bincode encodes enums as u32 variant index (little-endian) + variant data.
-                        // PrimaryMessage::HeaderInfoWithProof is variant index 4 (0-based).
+                        // PrimaryMessage::HeaderInfoWithProof is variant index 3 (0-based).
                         // By prepending the 4-byte variant tag we skip a full deserialize-serialize
                         // roundtrip of the ~2.9MB payload.
                         let mut bytes = Vec::with_capacity(4 + data.len());

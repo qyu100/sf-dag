@@ -1,6 +1,6 @@
 // Copyright(C) Facebook, Inc. and its affiliates.
 use crate::aggregators::{
-    DecideAggregator, EchoAggregator, ReadyAggregator, TimeoutAcceptAggregator, TimeoutAggregator,
+    DecideAggregator, EchoAggregator, TimeoutAcceptAggregator, TimeoutAggregator,
 };
 use crate::coding::Coding;
 use crate::error::{DagError, DagResult};
@@ -10,7 +10,7 @@ use crate::messages::{
     TimeoutCert,
 };
 use crate::primary::{PrimaryMessage, PrimaryMessageRef, Round};
-use crate::proposer::ProposerCommand;
+use crate::proposer::{ProposalSource, ProposerCommand};
 use crate::synchronizer::Synchronizer;
 use crate::{ConsensusMessage, HeaderInfo};
 use async_recursion::async_recursion;
@@ -41,10 +41,10 @@ struct OwnHeaderComputeResult {
     build_total_ms: u128,
 }
 
-/// Result from background echo reconstruction.
 struct ReconstructionResult {
     id: Digest,
-    root: Digest,
+    round: Round,
+    origin: PublicKey,
     success: bool,
 }
 
@@ -93,22 +93,32 @@ pub struct Core {
     processing_header_proofs: HashMap<Digest, HeaderInfoWithProof>,
     /// For storing info of echo aggregators in processing
     processing_echo_aggregators: HashMap<Digest, EchoAggregator>,
-    /// For storing info of ready aggregators in processing
-    processing_ready_aggregators: HashMap<Digest, ReadyAggregator>,
     /// For storing info of decide aggregators in processing
     processing_decide_aggregators: HashMap<Digest, DecideAggregator>,
     /// For storing info of processed certificates
     processed_certs: HashMap<Round, HashSet<PublicKey>>,
     /// Rounds pending commit because certificate was missing at commit time
     pending_commit_rounds: HashSet<Round>,
-    /// Speculative parent hints waiting for the required r-2 certificate.
-    pending_speculative_parents: HashMap<Round, HashMap<ProposerParent, Instant>>,
+    /// Speculative parent hints waiting for opt cert(r-2).
+    pending_proposer_parents: HashMap<Round, (ProposerParent, Instant)>,
+    /// Rounds for which a speculative parent hint has already been sent to the proposer.
+    proposer_hints_sent: HashSet<Round>,
+    /// Rounds for which a normal certificate parent hint has already been sent to the proposer.
+    normal_hints_sent: HashSet<Round>,
     /// Rounds for which speculative proposing already requested local cert reprocessing.
     syncing_speculative_certificates: HashSet<Round>,
+    /// Rounds whose certificate reached the optimistic RBC threshold.
+    optimistic_certificates: HashSet<Round>,
+    /// Header digests currently being reconstructed for RBC delivery.
+    delivery_reconstructions: HashSet<Digest>,
     /// Certificates waiting for the previous round certificate before being processed.
     pending_certificates: HashMap<Round, Vec<Certificate>>,
+    /// Headers waiting for local safe-parent evidence (certificate or timeout cert).
+    pending_headers: HashMap<Round, Vec<HeaderInfoWithProof>>,
     /// A network sender to send the batches to the other workers.
     network: ReliableSender,
+    /// Separate control-plane sender for timeout and timeout-accept messages.
+    timeout_network: ReliableSender,
     /// Keeps the cancel handlers of the messages we sent.
     cancel_handlers: HashMap<Round, Vec<CancelHandler>>,
     /// Aggregates timeout votes to use for sending timeout accepts.
@@ -196,10 +206,10 @@ impl Core {
                 processing_header_infos: HashMap::new(),
                 processing_header_proofs: HashMap::new(),
                 processing_echo_aggregators: HashMap::new(),
-                processing_ready_aggregators: HashMap::new(),
                 processing_decide_aggregators: HashMap::new(),
                 processed_certs: HashMap::with_capacity(2 * gc_depth as usize),
                 network: ReliableSender::new(),
+                timeout_network: ReliableSender::new(),
                 cancel_handlers: HashMap::with_capacity(2 * gc_depth as usize),
                 timeouts_aggregators: HashMap::with_capacity(2 * gc_depth as usize),
                 timeout_accept_aggregators: HashMap::with_capacity(2 * gc_depth as usize),
@@ -218,9 +228,14 @@ impl Core {
                 echo_shards: HashMap::new(),
                 pending_reconstructions: HashMap::new(),
                 pending_commit_rounds: HashSet::new(),
-                pending_speculative_parents: HashMap::new(),
+                pending_proposer_parents: HashMap::new(),
+                proposer_hints_sent: HashSet::new(),
+                normal_hints_sent: HashSet::new(),
                 syncing_speculative_certificates: HashSet::new(),
+                optimistic_certificates: HashSet::new(),
+                delivery_reconstructions: HashSet::new(),
                 pending_certificates: HashMap::new(),
+                pending_headers: HashMap::new(),
                 certificates: HashMap::new(),
                 last_committed_round: 0,
                 parent_info: HashMap::new(),
@@ -289,10 +304,10 @@ impl Core {
             processing_header_infos: HashMap::new(),
             processing_header_proofs: HashMap::new(),
             processing_echo_aggregators: HashMap::new(),
-            processing_ready_aggregators: HashMap::new(),
             processing_decide_aggregators: HashMap::new(),
             processed_certs: HashMap::with_capacity(2 * gc_depth as usize),
             network: ReliableSender::new(),
+            timeout_network: ReliableSender::new(),
             cancel_handlers: HashMap::with_capacity(2 * gc_depth as usize),
             timeouts_aggregators: HashMap::with_capacity(2 * gc_depth as usize),
             timeout_accept_aggregators: HashMap::with_capacity(2 * gc_depth as usize),
@@ -311,9 +326,14 @@ impl Core {
             echo_shards: HashMap::new(),
             pending_reconstructions: HashMap::new(),
             pending_commit_rounds: HashSet::new(),
-            pending_speculative_parents: HashMap::new(),
+            pending_proposer_parents: HashMap::new(),
+            proposer_hints_sent: HashSet::new(),
+            normal_hints_sent: HashSet::new(),
             syncing_speculative_certificates: HashSet::new(),
+            optimistic_certificates: HashSet::new(),
+            delivery_reconstructions: HashSet::new(),
             pending_certificates: HashMap::new(),
+            pending_headers: HashMap::new(),
             certificates: HashMap::new(),
             last_committed_round: 0,
             parent_info: HashMap::new(),
@@ -336,8 +356,10 @@ impl Core {
             .iter()
             .map(|(_, info)| info.primary_to_primary)
             .collect();
-        let handlers = self.network.broadcast(addresses, Bytes::from(bytes)).await;
-
+        let handlers = self
+            .timeout_network
+            .broadcast(addresses, Bytes::from(bytes))
+            .await;
         self.cancel_handlers
             .entry(timeout.round)
             .or_insert_with(Vec::new)
@@ -359,7 +381,6 @@ impl Core {
 
         if let Some(aggregator) = self.timeouts_aggregators.get_mut(&round) {
             if aggregator.append(timeout, &self.committee)?.is_some() {
-                debug!("Timeout votes reached quorum for round {}", round);
                 if let Some((weight, timeout_cert)) = self.send_timeout_accept(round).await? {
                     self.handle_timeout_accept_action(round, weight, timeout_cert)
                         .await?;
@@ -379,14 +400,20 @@ impl Core {
             .iter()
             .map(|(_, info)| info.primary_to_primary)
             .collect();
-        let handlers = self.network.broadcast(addresses, Bytes::from(bytes)).await;
-
+        let handlers = self
+            .timeout_network
+            .broadcast(addresses, Bytes::from(bytes))
+            .await;
         self.cancel_handlers
             .entry(accept.round)
             .or_insert_with(Vec::new)
             .extend(handlers);
 
-        debug!("Broadcasted timeout accept for round {}", accept.round);
+        #[cfg(feature = "benchmark")]
+        info!(
+            "BENCH event=timeout_accept_sent round={} node={:?}",
+            accept.round, accept.author
+        );
         Ok(())
     }
 
@@ -399,8 +426,9 @@ impl Core {
         }
 
         let accept = TimeoutAccept::new(round, self.name);
+        let result = self.record_timeout_accept(accept.clone()).map(Some)?;
         self.broadcast_timeout_accept(&accept).await?;
-        self.record_timeout_accept(accept).map(Some)
+        Ok(result)
     }
 
     fn record_timeout_accept(
@@ -444,9 +472,8 @@ impl Core {
 
         if let Some(timeout_cert) = timeout_cert {
             if self.certified_timed_out.insert(round) {
-                debug!("Created timeout certificate for round {}", round);
                 #[cfg(feature = "benchmark")]
-                debug!(
+                info!(
                     "BENCH event=timeout_cert round={} node={:?}",
                     round, self.name
                 );
@@ -454,6 +481,8 @@ impl Core {
                     .send((timeout_cert, round))
                     .await
                     .expect("Failed to send timeout certificate to proposer");
+                self.release_deferred_certificates(round).await?;
+                self.release_deferred_headers(round).await?;
             }
         }
         Ok(())
@@ -646,7 +675,14 @@ impl Core {
             }
         }
 
-        self.maybe_notify_speculative_proposer(header_info_with_proof)
+        if self
+            .defer_header_until_safe_parent(header_info_with_proof)
+            .await?
+        {
+            return Ok(());
+        }
+
+        self.register_proposer_parent(header_info_with_proof)
             .await?;
 
         self.echo_header(header_info_with_proof).await?;
@@ -688,7 +724,109 @@ impl Core {
         Ok(())
     }
 
-    async fn maybe_notify_speculative_proposer(
+    fn is_genesis_parent(&self, digest: Digest) -> bool {
+        Header::genesis(&self.committee)
+            .iter()
+            .any(|header| header.id == digest)
+    }
+
+    async fn parent_round_for_digest(&mut self, digest: Digest) -> DagResult<Option<Round>> {
+        if self.is_genesis_parent(digest) {
+            return Ok(Some(0));
+        }
+
+        if let Some((round, _)) = self.parent_info.get(&digest) {
+            return Ok(Some(*round));
+        }
+
+        let Some(bytes) = self.store.read(digest.to_vec()).await? else {
+            return Ok(None);
+        };
+
+        let header_info_with_proof: HeaderInfoWithProof = bincode::deserialize(&bytes)?;
+        self.parent_info
+            .entry(digest)
+            .or_insert((header_info_with_proof.round, header_info_with_proof.parent));
+        Ok(Some(header_info_with_proof.round))
+    }
+
+    fn defer_header_until_round(
+        &mut self,
+        header_info_with_proof: &HeaderInfoWithProof,
+        wait_round: Round,
+        reason: &'static str,
+    ) {
+        let pending = self
+            .pending_headers
+            .entry(wait_round)
+            .or_insert_with(Vec::new);
+
+        if !pending.iter().any(|x| {
+            x.round == header_info_with_proof.round
+                && x.id == header_info_with_proof.id
+                && x.author == header_info_with_proof.author
+        }) {
+            debug!(
+                "Deferring header {:?} round {} until {} for round {}",
+                header_info_with_proof.id, header_info_with_proof.round, reason, wait_round
+            );
+            pending.push(header_info_with_proof.clone());
+        }
+    }
+
+    async fn defer_header_until_safe_parent(
+        &mut self,
+        header_info_with_proof: &HeaderInfoWithProof,
+    ) -> DagResult<bool> {
+        let round = header_info_with_proof.round;
+        if round <= 1 {
+            return Ok(false);
+        }
+
+        let Some(parent_round) = self
+            .parent_round_for_digest(header_info_with_proof.parent)
+            .await?
+        else {
+            return Ok(false);
+        };
+
+        if parent_round >= round {
+            warn!(
+                "Ignoring header {:?} for round {} with invalid parent round {}",
+                header_info_with_proof.id, round, parent_round
+            );
+            return Ok(true);
+        }
+
+        for timeout_round in parent_round + 1..round {
+            if !self.certified_timed_out.contains(&timeout_round) {
+                self.defer_header_until_round(
+                    header_info_with_proof,
+                    timeout_round,
+                    "timeout certificate",
+                );
+                return Ok(true);
+            }
+        }
+
+        if parent_round + 1 < round && parent_round > 0 {
+            match self.certificates.get(&parent_round) {
+                Some(certificate) if certificate.header_id == header_info_with_proof.parent => {}
+                _ => {
+                    self.defer_header_until_round(
+                        header_info_with_proof,
+                        parent_round,
+                        "parent certificate",
+                    );
+                    return Ok(true);
+                }
+            }
+        }
+
+        Ok(false)
+    }
+
+    async fn register_proposer_parent(
         &mut self,
         header_info_with_proof: &HeaderInfoWithProof,
     ) -> DagResult<()> {
@@ -700,9 +838,6 @@ impl Core {
         }
 
         let propose_round = parent_round + 1;
-        if self.committee.leader(propose_round as usize) != self.name {
-            return Ok(());
-        }
 
         let parent = ProposerParent {
             header_id: header_info_with_proof.id,
@@ -710,38 +845,27 @@ impl Core {
             origin: header_info_with_proof.author,
         };
 
-        if parent_round <= 1 {
-            self.notify_speculative_proposer(parent).await?;
+        self.pending_proposer_parents
+            .entry(propose_round)
+            .or_insert((parent, Instant::now()));
+        self.try_release_proposer_parent(propose_round).await?;
+
+        if self.proposer_hints_sent.contains(&propose_round) {
             return Ok(());
         }
 
-        let required_cert_round = parent_round - 1;
-        if self.certificates.contains_key(&required_cert_round) {
-            self.notify_speculative_proposer(parent).await?;
-            return Ok(());
-        }
-
-        self.sync_missing_speculative_certificate(
-            required_cert_round,
-            header_info_with_proof.parent,
-        )
-        .await?;
-
-        let pending = self
-            .pending_speculative_parents
-            .entry(required_cert_round)
-            .or_insert_with(HashMap::new);
-        if !pending.contains_key(&parent) {
-            #[cfg(feature = "benchmark")]
-            debug!(
-                "BENCH event=speculative_propose_deferred node={:?} propose_round={} parent_round={} parent_digest={:?} wait_cert_round={}",
-                self.name,
-                propose_round,
-                parent_round,
-                parent.header_id,
-                required_cert_round
-            );
-            pending.insert(parent, Instant::now());
+        if parent_round > 1 {
+            let opt_cert_round = parent_round - 1;
+            if self.certified_timed_out.contains(&opt_cert_round) {
+                return Ok(());
+            }
+            if !self.optimistic_certificates.contains(&opt_cert_round) {
+                self.sync_missing_speculative_certificate(
+                    opt_cert_round,
+                    header_info_with_proof.parent,
+                )
+                .await?;
+            }
         }
 
         Ok(())
@@ -824,53 +948,119 @@ impl Core {
         Ok(())
     }
 
-    async fn notify_speculative_proposer(&mut self, parent: ProposerParent) -> DagResult<()> {
+    async fn notify_proposer(
+        &mut self,
+        parent: ProposerParent,
+        source: ProposalSource,
+        wait_cert_round: Round,
+        wait_ms: u128,
+    ) -> DagResult<()> {
         #[cfg(feature = "benchmark")]
         debug!(
-            "BENCH event=speculative_parent_ready node={:?} propose_round={} parent_round={} parent_digest={:?}",
+            "BENCH event=parent_ready node={:?} source={} propose_round={} parent_round={} parent_digest={:?} wait_cert_round={} wait_ms={}",
             self.name,
+            match source {
+                ProposalSource::Speculative => "speculative",
+                ProposalSource::Normal => "normal",
+            },
             parent.round + 1,
             parent.round,
-            parent.header_id
+            parent.header_id,
+            wait_cert_round,
+            wait_ms
         );
         self.tx_proposer
-            .send(ProposerCommand::SpeculativeParent(parent))
+            .send(ProposerCommand::Parent(parent, source))
             .await
-            .expect("Failed to send speculative parent to proposer");
+            .expect("Failed to send parent to proposer");
         Ok(())
     }
 
-    async fn release_pending_speculative_parents(
-        &mut self,
-        certified_round: Round,
-    ) -> DagResult<()> {
-        let Some(parents) = self.pending_speculative_parents.remove(&certified_round) else {
+    async fn try_release_proposer_parent(&mut self, propose_round: Round) -> DagResult<()> {
+        if self.proposer_hints_sent.contains(&propose_round) {
             return Ok(());
         };
 
-        for (parent, started_at) in parents {
-            #[cfg(feature = "benchmark")]
-            debug!(
-                "BENCH event=speculative_parent_released node={:?} propose_round={} parent_round={} parent_digest={:?} wait_cert_round={} wait_ms={}",
-                self.name,
-                parent.round + 1,
-                parent.round,
-                parent.header_id,
-                certified_round,
-                started_at.elapsed().as_millis()
-            );
-            self.notify_speculative_proposer(parent).await?;
+        let Some((parent, started_at)) = self.pending_proposer_parents.get(&propose_round).cloned()
+        else {
+            return Ok(());
+        };
+
+        let parent_round = parent.round;
+        let ready = if parent_round <= 1 {
+            Some((ProposalSource::Speculative, 0))
+        } else if self.optimistic_certificates.contains(&(parent_round - 1)) {
+            Some((ProposalSource::Speculative, parent_round - 1))
+        } else {
+            None
+        };
+
+        let Some((source, wait_cert_round)) = ready else {
+            return Ok(());
+        };
+
+        self.pending_proposer_parents.remove(&propose_round);
+        self.proposer_hints_sent.insert(propose_round);
+        self.notify_proposer(
+            parent,
+            source,
+            wait_cert_round,
+            started_at.elapsed().as_millis(),
+        )
+        .await?;
+
+        Ok(())
+    }
+
+    async fn release_proposer_parents_for_certificate(
+        &mut self,
+        certified_round: Round,
+    ) -> DagResult<()> {
+        self.notify_normal_proposer_for_certificate(certified_round)
+            .await?;
+        self.try_release_proposer_parent(certified_round + 2).await
+    }
+
+    async fn notify_normal_proposer_for_certificate(
+        &mut self,
+        certified_round: Round,
+    ) -> DagResult<()> {
+        let Some(certificate) = self.certificates.get(&certified_round).cloned() else {
+            return Ok(());
+        };
+
+        let propose_round = certified_round + 1;
+        if certified_round == 0 || !self.normal_hints_sent.insert(propose_round) {
+            return Ok(());
         }
+
+        let parent = ProposerParent {
+            header_id: certificate.header_id,
+            round: certificate.round,
+            origin: certificate.origin,
+        };
+
+        self.proposer_hints_sent.insert(propose_round);
+        self.notify_proposer(parent, ProposalSource::Normal, certified_round, 0)
+            .await?;
 
         Ok(())
     }
 
     fn defer_certificate_until_previous(&mut self, certificate: Certificate) -> bool {
-        if certificate.round <= 1 || self.certificates.contains_key(&(certificate.round - 1)) {
+        if certificate.round <= 1
+            || self.certificates.contains_key(&(certificate.round - 1))
+            || self.certified_timed_out.contains(&(certificate.round - 1))
+        {
             return false;
         }
 
         let wait_round = certificate.round - 1;
+        self.defer_certificate_until_round(certificate, wait_round);
+        true
+    }
+
+    fn defer_certificate_until_round(&mut self, certificate: Certificate, wait_round: Round) {
         let pending = self
             .pending_certificates
             .entry(wait_round)
@@ -883,8 +1073,6 @@ impl Core {
         }) {
             pending.push(certificate);
         }
-
-        true
     }
 
     async fn release_deferred_certificates(&mut self, certified_round: Round) -> DagResult<()> {
@@ -897,6 +1085,60 @@ impl Core {
         }
 
         Ok(())
+    }
+
+    async fn release_deferred_headers(&mut self, wait_round: Round) -> DagResult<()> {
+        let Some(headers) = self.pending_headers.remove(&wait_round) else {
+            return Ok(());
+        };
+
+        for header_info_with_proof in headers {
+            self.process_header_proof_optimized(&header_info_with_proof)
+                .await?;
+        }
+
+        Ok(())
+    }
+
+    async fn defer_certificate_until_safe_parent(
+        &mut self,
+        certificate: Certificate,
+    ) -> DagResult<bool> {
+        let Some((round, parent_digest)) = self.parent_info.get(&certificate.header_id).cloned()
+        else {
+            return Ok(false);
+        };
+
+        let Some(parent_round) = self.parent_round_for_digest(parent_digest).await? else {
+            return Ok(false);
+        };
+
+        if parent_round >= round {
+            warn!(
+                "Ignoring certificate {:?} for round {} with invalid parent round {}",
+                certificate.header_id, round, parent_round
+            );
+            return Ok(true);
+        }
+
+        for timeout_round in parent_round + 1..round {
+            if !self.certified_timed_out.contains(&timeout_round) {
+                self.defer_certificate_until_round(certificate, timeout_round);
+                return Ok(true);
+            }
+        }
+
+        if parent_round + 1 < round && parent_round > 0 {
+            match self.certificates.get(&parent_round) {
+                Some(parent_certificate) if parent_certificate.header_id == parent_digest => {}
+                _ => {
+                    self.defer_certificate_until_round(certificate, parent_round);
+                    return Ok(true);
+                }
+            }
+        }
+
+        Ok(false)
     }
 
     async fn echo_header(&mut self, header_info_with_proof: &HeaderInfoWithProof) -> DagResult<()> {
@@ -933,15 +1175,14 @@ impl Core {
     }
 
     async fn process_echo_optimized(&mut self, echo: Echo) -> DagResult<()> {
-        let t_total = Instant::now();
         let proof = echo.proof;
         let author = echo.author;
         let id = echo.id;
+        let round = echo.round;
+        let origin = echo.origin;
 
-        let t_validate = Instant::now();
         let valid = self.committee.index_of(&author) == Some(proof.index())
             && proof.validate(self.committee.total_stake() as usize);
-        let d_validate = t_validate.elapsed();
 
         if valid {
             if !self.processing_echo_aggregators.contains_key(&id) {
@@ -950,76 +1191,71 @@ impl Core {
                     .or_insert(EchoAggregator::new());
             }
             if let Some(echo_aggregator) = self.processing_echo_aggregators.get_mut(&id) {
-                let t_agg = Instant::now();
                 let agg_result = echo_aggregator.append(author, proof, &self.committee)?;
-                let d_agg = t_agg.elapsed();
 
-                if let Some((root, mut leaf_values)) = agg_result {
-                    // Dispatch reconstruction to background so the event loop stays responsive.
-                    let coding = Arc::clone(&self.coding);
-                    let rs_block_size = self.rs_block_size;
-                    let rs_block_threads = self.rs_block_threads;
-                    let tx = self.tx_reconstruction_result.clone();
-                    let recon_id = id;
-
-                    tokio::task::spawn_blocking(move || {
-                        let t_total = Instant::now();
-
-                        let t_reconstruct = Instant::now();
-                        if let Err(e) = coding.reconstruct_shards(
-                            &mut leaf_values[..],
-                            rs_block_size,
-                            rs_block_threads,
-                        ) {
-                            warn!("Reconstruction failed: {:?}", e);
-                            let _ = tx.blocking_send(ReconstructionResult {
-                                id: recon_id,
-                                root,
-                                success: false,
-                            });
-                            return;
-                        }
-                        let d_reconstruct = t_reconstruct.elapsed();
-
-                        let t_hash = Instant::now();
-                        let hashes: Vec<Digest> = leaf_values
-                            .par_iter()
-                            .map(|opt| {
-                                let shard = opt
-                                    .as_ref()
-                                    .expect("reconstruct_shards produced all shards");
-                                MerkleTree::digest(&**shard)
-                            })
-                            .collect();
-                        let d_hash = t_hash.elapsed();
-
-                        let t_tree = Instant::now();
-                        let mtree = MerkleTree::from_hashes(hashes);
-                        let d_tree = t_tree.elapsed();
-
-                        let success = *mtree.root_hash() == root;
-
-                        debug!("reconstruction bg reconstruct={:?} hash={:?} tree={:?} success={} total={:?}",
-                            d_reconstruct, d_hash, d_tree, success, t_total.elapsed());
-
-                        let _ = tx.blocking_send(ReconstructionResult {
-                            id: recon_id,
-                            root,
-                            success,
-                        });
-                    });
-
-                    debug!("echo_optimized: dispatched reconstruction for {:?}", id);
-                } else {
-                    debug!(
-                        "echo_optimized: validate={:?} agg={:?} total={:?}",
-                        d_validate,
-                        d_agg,
-                        t_total.elapsed()
-                    );
+                if let Some((root, leaf_values)) = agg_result.optimistic {
+                    self.spawn_reconstruction(id, round, origin, root, leaf_values)
+                        .await?;
                 }
             }
         }
+        Ok(())
+    }
+
+    async fn spawn_reconstruction(
+        &mut self,
+        header_id: Digest,
+        round: Round,
+        origin: PublicKey,
+        root: Digest,
+        mut leaf_values: Vec<Option<Box<[u8]>>>,
+    ) -> DagResult<()> {
+        if self.certificates.contains_key(&round)
+            || !self.delivery_reconstructions.insert(header_id)
+        {
+            return Ok(());
+        }
+
+        let coding = Arc::clone(&self.coding);
+        let rs_block_size = self.rs_block_size;
+        let rs_block_threads = self.rs_block_threads;
+        let tx = self.tx_reconstruction_result.clone();
+
+        tokio::task::spawn_blocking(move || {
+            if let Err(e) =
+                coding.reconstruct_shards(&mut leaf_values[..], rs_block_size, rs_block_threads)
+            {
+                warn!("Reconstruction failed: {:?}", e);
+                let _ = tx.blocking_send(ReconstructionResult {
+                    id: header_id,
+                    round,
+                    origin,
+                    success: false,
+                });
+                return;
+            }
+
+            let hashes: Vec<Digest> = leaf_values
+                .par_iter()
+                .map(|opt| {
+                    let shard = opt
+                        .as_ref()
+                        .expect("reconstruct_shards produced all shards");
+                    MerkleTree::digest(&**shard)
+                })
+                .collect();
+
+            let mtree = MerkleTree::from_hashes(hashes);
+            let success = *mtree.root_hash() == root;
+
+            let _ = tx.blocking_send(ReconstructionResult {
+                id: header_id,
+                round,
+                origin,
+                success,
+            });
+        });
+
         Ok(())
     }
 
@@ -1053,25 +1289,15 @@ impl Core {
         &mut self,
         result: ReconstructionResult,
     ) -> DagResult<()> {
+        self.delivery_reconstructions.remove(&result.id);
+
         if !result.success {
             warn!("Reconstruction verification failed for {:?}", result.id);
             return Err(DagError::ProofConstructionFailed);
         }
 
-        let (header_id, round, origin) = match self.processing_header_proofs.get(&result.id) {
-            Some(h) => (h.id, h.round, h.author),
-            None => {
-                debug!(
-                    "Missing HeaderInfoWithProof for reconstruction result {:?}, storing pending",
-                    result.id
-                );
-                self.pending_reconstructions.insert(result.id, result.root);
-                return Ok(());
-            }
-        };
-
         let t_finalize = Instant::now();
-        self.finalize_reconstruction_optimized(header_id, round, origin)
+        self.finalize_reconstruction_optimized(result.id, result.round, result.origin)
             .await?;
         debug!(
             "handle_reconstruction_result finalize={:?}",
@@ -1102,6 +1328,18 @@ impl Core {
             return Ok(());
         }
 
+        if self
+            .defer_certificate_until_safe_parent(certificate.clone())
+            .await?
+        {
+            return Ok(());
+        }
+
+        if matches!(self.certificates.get(&certificate.round), Some(existing) if existing.header_id == certificate.header_id)
+        {
+            return Ok(());
+        }
+
         if self.pending_commit_rounds.contains(&certificate.round) {
             self.commit(certificate.round).await?;
         }
@@ -1111,16 +1349,18 @@ impl Core {
         let round = certificate.round;
         let origin = certificate.origin;
 
-        let proposer_certificate = certificate.clone();
-
         // Store in local map — move certificate in (no extra clone).
         self.certificates.entry(round).or_insert(certificate);
         self.syncing_speculative_certificates.remove(&round);
-        self.tx_proposer
-            .send(ProposerCommand::NormalCertificate(proposer_certificate))
-            .await
-            .expect("Failed to send certificate to proposer");
-        self.release_pending_speculative_parents(round).await?;
+        if self.optimistic_certificates.insert(round) {
+            #[cfg(feature = "benchmark")]
+            debug!(
+                "BENCH event=optimistic_cert round={} node={:?} digest={:?}",
+                round, self.name, header_id
+            );
+        }
+        self.release_deferred_headers(round).await?;
+        self.release_proposer_parents_for_certificate(round).await?;
 
         // 4a: Build decide from the extracted small fields.
         let decide = Decide::new(header_id, round, &origin, &self.name).await;
@@ -1197,7 +1437,10 @@ impl Core {
                 Some(info) => info,
                 None => break, // To do.
             };
-            let (_parent_round, _) = parent_info;
+            let (parent_round, _) = parent_info;
+            if parent_round <= self.last_committed_round {
+                break;
+            }
 
             to_commit.push_front(parent_digest.clone());
 
@@ -1331,16 +1574,30 @@ impl Core {
             let round = self.consensus_round.load(Ordering::Relaxed);
             if round > self.gc_depth {
                 let gc_round = round - self.gc_depth;
+                let header_rounds: HashMap<Digest, Round> = self
+                    .processing_header_proofs
+                    .iter()
+                    .map(|(id, header)| (*id, header.round))
+                    .collect();
+                let keep_header_state = |id: &Digest| {
+                    header_rounds
+                        .get(id)
+                        .map_or(true, |round| *round >= gc_round)
+                };
                 self.last_voted.retain(|k, _| k >= &gc_round);
                 self.processing_header_infos
                     .retain(|_, h| &h.round >= &gc_round);
                 self.processing_header_proofs
                     .retain(|_, h| &h.round >= &gc_round);
-                self.pending_speculative_parents
-                    .retain(|k, _| k >= &gc_round);
+                self.pending_proposer_parents.retain(|k, _| k >= &gc_round);
+                self.proposer_hints_sent.retain(|r| r >= &gc_round);
+                self.normal_hints_sent.retain(|r| r >= &gc_round);
                 self.syncing_speculative_certificates
                     .retain(|r| r >= &gc_round);
+                self.optimistic_certificates.retain(|r| r >= &gc_round);
+                self.delivery_reconstructions.retain(keep_header_state);
                 self.pending_certificates.retain(|k, _| k >= &gc_round);
+                self.pending_headers.retain(|k, _| k >= &gc_round);
                 self.cancel_handlers.retain(|k, _| k >= &gc_round);
                 self.timeouts_aggregators.retain(|k, _| k >= &gc_round);
                 self.timeout_accept_aggregators
@@ -1472,7 +1729,7 @@ mod core_bench {
     // -----------------------------------------------------------------------
     // Wire-format verification: helper.rs zero-copy variant tag prepend
     // -----------------------------------------------------------------------
-    /// Verify that prepending the HIWP variant tag (4u32 LE) to a serialized
+    /// Verify that prepending the HIWP variant tag (3u32 LE) to a serialized
     /// HeaderInfoWithProof produces the same bytes as serializing
     /// PrimaryMessage::HeaderInfoWithProof(hiwp).
     #[tokio::test]
@@ -1530,7 +1787,7 @@ mod core_bench {
 
         // Zero-copy: serialize just the HIWP and prepend the variant tag.
         let hiwp_bytes = bincode::serialize(&hiwp).expect("hiwp serialize failed");
-        let variant_index: u32 = 4; // HeaderInfoWithProof is variant 4
+        let variant_index: u32 = 3; // HeaderInfoWithProof is variant 3
         let mut zero_copy = Vec::with_capacity(4 + hiwp_bytes.len());
         zero_copy.extend_from_slice(&variant_index.to_le_bytes());
         zero_copy.extend_from_slice(&hiwp_bytes);

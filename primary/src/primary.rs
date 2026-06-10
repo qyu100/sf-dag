@@ -7,7 +7,7 @@ use crate::header_waiter::HeaderWaiter;
 use crate::helper::Helper;
 use crate::messages::{
     Certificate, Decide, Echo, Header, HeaderInfo, HeaderInfoWithCertificate, HeaderInfoWithProof,
-    HeaderWithCertificate, Ready, Timeout, TimeoutAccept,
+    HeaderWithCertificate, Timeout, TimeoutAccept,
 };
 use crate::proposer::Proposer;
 use crate::synchronizer::Synchronizer;
@@ -37,7 +37,6 @@ pub enum PrimaryMessage {
     // HeaderMsg(HeaderMessage),
     Timeout(Timeout),
     Echo(Echo),
-    Ready(Ready),
     CertificatesRequest(Vec<Digest>, /* requestor */ PublicKey),
     HeaderInfoWithProof(HeaderInfoWithProof),
     Decide(Decide),
@@ -51,7 +50,6 @@ pub enum PrimaryMessage {
 pub(crate) enum PrimaryMessageRef<'a> {
     Timeout(&'a Timeout),
     Echo(&'a Echo),
-    Ready(&'a Ready),
     CertificatesRequest(&'a Vec<Digest>, &'a PublicKey),
     HeaderInfoWithProof(&'a HeaderInfoWithProof),
     Decide(&'a Decide),

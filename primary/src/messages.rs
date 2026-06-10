@@ -428,52 +428,6 @@ impl fmt::Debug for Echo {
 //     }
 // }
 
-#[derive(Clone, Serialize, Deserialize)]
-pub struct Ready {
-    pub id: Digest,
-    pub round: Round,
-    pub origin: PublicKey,
-    pub author: PublicKey,
-    pub root_hash: Digest,
-}
-
-impl Ready {
-    pub async fn new(
-        header_id: Digest,
-        round: Round,
-        origin: &PublicKey,
-        author: &PublicKey,
-        root_hash: Digest,
-    ) -> Self {
-        Self {
-            id: header_id,
-            round,
-            origin: *origin,
-            author: *author,
-            root_hash,
-        }
-    }
-
-    pub fn verify(&self, committee: &Committee) -> DagResult<()> {
-        // Ensure the authority has voting rights.
-        ensure!(
-            committee.stake(&self.author) > 0,
-            DagError::UnknownAuthority(self.author)
-        );
-        Ok(())
-    }
-}
-
-impl fmt::Debug for Ready {
-    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
-        write!(
-            f,
-            "{}: R{}({}, {})",
-            self.id, self.round, self.author, self.id
-        )
-    }
-}
-
 // Commit message in the protocol
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Decide {
