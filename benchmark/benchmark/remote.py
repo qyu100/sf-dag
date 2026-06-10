@@ -381,14 +381,17 @@ class Bench:
             addresses = OrderedDict(
                 (x, y) for x, y in zip(names, hosts)
             )
-        committee = Committee.from_address_list(addresses, self.settings.base_port, bench_parameters.faults, bls_pubkeys_g2)
+        runtime_crash = node_parameters.has_runtime_crash()
+        committee_faults = 0 if runtime_crash else bench_parameters.faults
+        committee = Committee.from_address_list(addresses, self.settings.base_port, committee_faults, bls_pubkeys_g2)
         committee.print(PathMaker.committee_file())
         node_parameters.print(PathMaker.parameters_file())
         return (committee, names)
 
-    async def _run_clients(self, rate, burst, committee, bench_parameters, connections):
+    async def _run_clients(self, rate, burst, committee, bench_parameters, connections, faults=None):
         Print.info('Booting clients...')
-        workers_addresses = committee.workers_addresses(bench_parameters.faults)
+        faults = bench_parameters.faults if faults is None else faults
+        workers_addresses = committee.workers_addresses(faults)
         rate_share = ceil(rate / len(workers_addresses))
         tasks = []
         
@@ -519,17 +522,19 @@ class Bench:
         bench_parameters, 
         hosts_to_connections, 
         debug=False, 
-        consensus_only=False
+        consensus_only=False,
+        faults=None,
     ):
+        faults = bench_parameters.faults if faults is None else faults
         # Kill any potentially unfinished run and delete logs.
         # hosts = committee.ips()
-        await self._stop_bandwidth_monitors(committee, hosts_to_connections, bench_parameters.faults)
+        await self._stop_bandwidth_monitors(committee, hosts_to_connections, faults)
         await self._kill(hosts_to_connections=hosts_to_connections, delete_logs=True)
-        await self._start_bandwidth_monitors(committee, hosts_to_connections, bench_parameters.faults)
+        await self._start_bandwidth_monitors(committee, hosts_to_connections, faults)
 
         try:
             # Run the primaries (except the faulty ones).
-            primaries = self._run_primaries(committee, hosts_to_connections, bench_parameters.faults, debug)
+            primaries = self._run_primaries(committee, hosts_to_connections, faults, debug)
             await primaries
 
             if not consensus_only:
@@ -537,7 +542,7 @@ class Bench:
                 # Filter all faulty nodes from the client addresses (or they will wait
                 # for the faulty nodes to be online).
                 workers_addresses = await self._run_clients(
-                    rate, burst, committee, bench_parameters, hosts_to_connections)
+                    rate, burst, committee, bench_parameters, hosts_to_connections, faults)
                 # Run the workers (except the faulty ones).
                 # await self._run_workers(workers_addresses, hosts_to_connections, debug)
 
@@ -546,7 +551,7 @@ class Bench:
             for _ in progress_bar(range(20), prefix=f'Running benchmark ({duration} sec):'):
                 sleep(ceil(duration / 20))
         finally:
-            await self._stop_bandwidth_monitors(committee, hosts_to_connections, bench_parameters.faults)
+            await self._stop_bandwidth_monitors(committee, hosts_to_connections, faults)
             await self._kill(hosts_to_connections=hosts_to_connections)
 
     def download_logs(self, consensus_only, committee=None):
@@ -702,7 +707,9 @@ class Bench:
             traceback.print_exc()
             raise BenchError('Failed to configure nodes', e)
         
-        names = names[:len(names) - bench_parameters.faults]
+        runtime_crash = node_parameters.has_runtime_crash()
+        committee_faults = 0 if runtime_crash else bench_parameters.faults
+        names = names[:len(names) - committee_faults]
         msg = f'Uploading configuration files'
         if update:
             msg += f' and changing repository {self.settings.repo_name} to branch {self.settings.branch}'
@@ -737,14 +744,27 @@ class Bench:
                     logs_downloaded = False
                     try:
                         await self._run_single(
-                            rate, burst, committee_copy, bench_parameters, self.hosts_to_connections, debug, consensus_only
+                            rate,
+                            burst,
+                            committee_copy,
+                            bench_parameters,
+                            self.hosts_to_connections,
+                            debug,
+                            consensus_only,
+                            committee_faults,
                         )
 
                         faults = bench_parameters.faults
                         await self._download_logs(consensus_only, committee=committee)
                         logs_downloaded = True
                         Print.info('Parsing logs and computing performance...')
-                        logger = LogParser.process(PathMaker.logs_path(), burst, consensus_only=consensus_only)
+                        logger = LogParser.process(
+                            PathMaker.logs_path(),
+                            burst,
+                            faults=committee_faults,
+                            consensus_only=consensus_only,
+                            display_faults=bench_parameters.faults,
+                        )
                         logger.print(PathMaker.result_file(
                             faults,
                             n,

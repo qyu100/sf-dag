@@ -107,10 +107,14 @@ def install(ctx):
 
 
 @task
-def remote(ctx, burst = 50, debug=False, consensus_only=True, header_size=10_000_000):
+def remote(ctx, burst=50, debug=False, consensus_only=True, header_size=10_000_000, faults=1, f_num=3, crash_node_id=0, crash_on_proposal=6):
     ''' Run benchmarks on GCP '''
+    faults = int(faults)
+    f_num = int(f_num)
+    crash_node_id = int(crash_node_id)
+    crash_on_proposal = int(crash_on_proposal) if faults > 0 else 0
     bench_params = {
-        'faults': 0,
+        'faults': faults,
         'nodes': 10,
         'workers': 1,
         'collocate': True,
@@ -136,9 +140,11 @@ def remote(ctx, burst = 50, debug=False, consensus_only=True, header_size=10_000
         'tx_size': bench_params['tx_size'],  # bytes
         'max_batch_delay': 200,  # ms
         'leaders_per_round': 67,
-        'f_num': 3,
+        'f_num': f_num,
         'rs_block_size': 16 * 1024,  # bytes
-        'rs_block_threads': 8
+        'rs_block_threads': 8,
+        'crash_node_id': crash_node_id,
+        'crash_on_proposal': crash_on_proposal,
     }
     try:
         Bench(ctx).run(bench_params, node_params, debug, consensus_only)
