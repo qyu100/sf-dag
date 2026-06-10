@@ -45,6 +45,8 @@ struct ReconstructionResult {
     id: Digest,
     round: Round,
     origin: PublicKey,
+    root: Digest,
+    elapsed_ms: u128,
     success: bool,
 }
 
@@ -693,10 +695,18 @@ impl Core {
         self.store.write(hid.to_vec(), bytes).await;
 
         // If a reconstruction was waiting for this header's info, resume it now.
-        if let Some(_root) = self
+        if let Some(root) = self
             .pending_reconstructions
             .remove(&header_info_with_proof.id)
         {
+            info!(
+                "BENCH event=header_unblocks_reconstruction node={:?} round={} digest={:?} origin={:?} root={:?}",
+                self.name,
+                header_info_with_proof.round,
+                header_info_with_proof.id,
+                header_info_with_proof.author,
+                root
+            );
             // 3b: pass only the small fields needed by finalize_reconstruction_optimized.
             if let Err(e) = self
                 .finalize_reconstruction_optimized(
@@ -956,7 +966,7 @@ impl Core {
         wait_ms: u128,
     ) -> DagResult<()> {
         #[cfg(feature = "benchmark")]
-        debug!(
+        info!(
             "BENCH event=parent_ready node={:?} source={} propose_round={} parent_round={} parent_digest={:?} wait_cert_round={} wait_ms={}",
             self.name,
             match source {
@@ -1061,6 +1071,14 @@ impl Core {
     }
 
     fn defer_certificate_until_round(&mut self, certificate: Certificate, wait_round: Round) {
+        info!(
+            "BENCH event=certificate_deferred node={:?} round={} digest={:?} origin={:?} wait_round={}",
+            self.name,
+            certificate.round,
+            certificate.header_id,
+            certificate.origin,
+            wait_round
+        );
         let pending = self
             .pending_certificates
             .entry(wait_round)
@@ -1193,7 +1211,22 @@ impl Core {
             if let Some(echo_aggregator) = self.processing_echo_aggregators.get_mut(&id) {
                 let agg_result = echo_aggregator.append(author, proof, &self.committee)?;
 
-                if let Some((root, leaf_values)) = agg_result.optimistic {
+                if let Some((root, leaf_values, collected_weight, collected_count)) =
+                    agg_result.optimistic
+                {
+                    let header_seen = self.processing_header_proofs.contains_key(&id);
+                    info!(
+                        "BENCH event=echo_quorum node={:?} round={} digest={:?} origin={:?} root={:?} collected={} weight={} threshold={} header_seen={}",
+                        self.name,
+                        round,
+                        id,
+                        origin,
+                        root,
+                        collected_count,
+                        collected_weight,
+                        self.committee.optimistic_threshold(),
+                        header_seen
+                    );
                     self.spawn_reconstruction(id, round, origin, root, leaf_values)
                         .await?;
                 }
@@ -1220,8 +1253,20 @@ impl Core {
         let rs_block_size = self.rs_block_size;
         let rs_block_threads = self.rs_block_threads;
         let tx = self.tx_reconstruction_result.clone();
+        let shard_count = leaf_values.iter().filter(|x| x.is_some()).count();
+        info!(
+            "BENCH event=reconstruction_start node={:?} round={} digest={:?} origin={:?} root={:?} shards={} threshold={}",
+            self.name,
+            round,
+            header_id,
+            origin,
+            root,
+            shard_count,
+            self.committee.optimistic_threshold()
+        );
 
         tokio::task::spawn_blocking(move || {
+            let started_at = Instant::now();
             if let Err(e) =
                 coding.reconstruct_shards(&mut leaf_values[..], rs_block_size, rs_block_threads)
             {
@@ -1230,6 +1275,8 @@ impl Core {
                     id: header_id,
                     round,
                     origin,
+                    root,
+                    elapsed_ms: started_at.elapsed().as_millis(),
                     success: false,
                 });
                 return;
@@ -1252,10 +1299,45 @@ impl Core {
                 id: header_id,
                 round,
                 origin,
+                root,
+                elapsed_ms: started_at.elapsed().as_millis(),
                 success,
             });
         });
 
+        Ok(())
+    }
+
+    async fn request_header_from_author(
+        &mut self,
+        header_id: Digest,
+        round: Round,
+        origin: PublicKey,
+    ) -> DagResult<()> {
+        if origin == self.name {
+            warn!(
+                "BENCH event=header_sync_missing_local node={:?} round={} digest={:?} origin={:?} source=reconstruction_pending_header",
+                self.name, round, header_id, origin
+            );
+            return Ok(());
+        }
+
+        let address = self
+            .committee
+            .primary(&origin)
+            .expect("Author of valid header not in the committee")
+            .primary_to_primary;
+        let message = PrimaryMessage::CertificatesRequest(vec![header_id], self.name);
+        let bytes = bincode::serialize(&message).expect("Failed to serialize header sync request");
+        let handler = self.network.send(address, Bytes::from(bytes)).await;
+        self.cancel_handlers
+            .entry(round)
+            .or_insert_with(Vec::new)
+            .push(handler);
+        info!(
+            "BENCH event=header_sync_request node={:?} round={} digest={:?} origin={:?} target={:?} source=reconstruction_pending_header",
+            self.name, round, header_id, origin, origin
+        );
         Ok(())
     }
 
@@ -1290,14 +1372,40 @@ impl Core {
         result: ReconstructionResult,
     ) -> DagResult<()> {
         self.delivery_reconstructions.remove(&result.id);
+        let header_seen = self.processing_header_proofs.contains_key(&result.id);
+        info!(
+            "BENCH event=reconstruction_result node={:?} round={} digest={:?} origin={:?} root={:?} success={} elapsed_ms={} header_seen={}",
+            self.name,
+            result.round,
+            result.id,
+            result.origin,
+            result.root,
+            result.success,
+            result.elapsed_ms,
+            header_seen
+        );
 
         if !result.success {
             warn!("Reconstruction verification failed for {:?}", result.id);
             return Err(DagError::ProofConstructionFailed);
         }
 
+        let (header_id, round, origin) = match self.processing_header_proofs.get(&result.id) {
+            Some(header) => (header.id, header.round, header.author),
+            None => {
+                info!(
+                    "BENCH event=reconstruction_pending_header node={:?} round={} digest={:?} origin={:?} root={:?}",
+                    self.name, result.round, result.id, result.origin, result.root
+                );
+                self.request_header_from_author(result.id, result.round, result.origin)
+                    .await?;
+                self.pending_reconstructions.insert(result.id, result.root);
+                return Ok(());
+            }
+        };
+
         let t_finalize = Instant::now();
-        self.finalize_reconstruction_optimized(result.id, result.round, result.origin)
+        self.finalize_reconstruction_optimized(header_id, round, origin)
             .await?;
         debug!(
             "handle_reconstruction_result finalize={:?}",
@@ -1320,7 +1428,10 @@ impl Core {
             .deliver_certificate_optimized(&certificate, parent)
             .await?
         {
-            debug!("Processing of {:?} suspended: missing parent", certificate);
+            info!(
+                "BENCH event=certificate_wait_dependency node={:?} round={} digest={:?} origin={:?}",
+                self.name, certificate.round, certificate.header_id, certificate.origin
+            );
             return Ok(());
         }
 
@@ -1353,10 +1464,9 @@ impl Core {
         self.certificates.entry(round).or_insert(certificate);
         self.syncing_speculative_certificates.remove(&round);
         if self.optimistic_certificates.insert(round) {
-            #[cfg(feature = "benchmark")]
-            debug!(
-                "BENCH event=optimistic_cert round={} node={:?} digest={:?}",
-                round, self.name, header_id
+            info!(
+                "BENCH event=certificate_ready node={:?} round={} digest={:?} origin={:?} source=optimistic",
+                self.name, round, header_id, origin
             );
         }
         self.release_deferred_headers(round).await?;
@@ -1364,6 +1474,7 @@ impl Core {
 
         // 4a: Build decide from the extracted small fields.
         let decide = Decide::new(header_id, round, &origin, &self.name).await;
+        self.process_decide(&decide).await?;
 
         let addresses = self
             .committee
@@ -1379,8 +1490,6 @@ impl Core {
             .entry(round)
             .or_insert_with(Vec::new)
             .extend(handlers);
-
-        self.process_decide(&decide).await?;
 
         self.release_deferred_certificates(round).await?;
 

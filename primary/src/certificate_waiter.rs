@@ -1,6 +1,6 @@
 // Copyright(C) Facebook, Inc. and its affiliates.
 use crate::error::{DagError, DagResult};
-use crate::messages::{Certificate, HeaderInfoWithProof};
+use crate::messages::{Certificate, Header, HeaderInfoWithProof};
 use crate::primary::{PrimaryMessage, Round};
 use bytes::Bytes;
 use config::Committee;
@@ -8,7 +8,7 @@ use crypto::{Digest, PublicKey};
 use futures::future::try_join_all;
 use futures::stream::futures_unordered::FuturesUnordered;
 use futures::stream::StreamExt as _;
-use log::{debug, error, warn};
+use log::{error, warn};
 use network::SimpleSender;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -45,6 +45,7 @@ pub struct CertificateWaiter {
     network: SimpleSender,
     /// Digests requested through sync, with the round and last request timestamp.
     requests: HashMap<Digest, (Round, u128, PublicKey)>,
+    genesis: Vec<Digest>,
 }
 
 impl CertificateWaiter {
@@ -61,6 +62,10 @@ impl CertificateWaiter {
         tx_core: Sender<Certificate>,
     ) {
         tokio::spawn(async move {
+            let genesis = Header::genesis(&committee)
+                .into_iter()
+                .map(|x| x.id)
+                .collect();
             Self {
                 name,
                 committee,
@@ -72,6 +77,7 @@ impl CertificateWaiter {
                 tx_core,
                 network: SimpleSender::new(),
                 requests: HashMap::new(),
+                genesis,
             }
             .run()
             .await
@@ -132,9 +138,9 @@ impl CertificateWaiter {
         let message = PrimaryMessage::CertificatesRequest(vec![digest], self.name);
         let bytes = bincode::serialize(&message).expect("Failed to serialize cert request");
         self.network.send(address, Bytes::from(bytes)).await;
-        debug!(
-            "Requesting sync for certificate dependency {:?} round {} ({})",
-            digest, round, reason
+        log::info!(
+            "BENCH event=certificate_waiter_sync_request node={:?} round={} digest={:?} target={:?} reason={}",
+            self.name, round, digest, target, reason
         );
     }
 
@@ -163,13 +169,30 @@ impl CertificateWaiter {
                         };
 
                         let parent = header_info_with_proof.parent;
+                        if self.genesis.contains(&parent)
+                            || self.store.read(parent.to_vec()).await.unwrap().is_some()
+                        {
+                            log::info!(
+                                "BENCH event=certificate_waiter_local_ready node={:?} round={} digest={:?} parent={:?}",
+                                self.name,
+                                certificate.round,
+                                certificate.header_id,
+                                parent
+                            );
+                            self.tx_core
+                                .send(certificate)
+                                .await
+                                .expect("Failed to send certificate");
+                            continue;
+                        }
+
                         self.request_missing(
                             parent,
                             certificate.round,
                             header_info_with_proof.author,
                             "missing parent",
-                        ).await;
-
+                        )
+                        .await;
                         let wait_for = vec![(parent.to_vec(), self.store.clone())];
 
                         let fut = Self::waiter(wait_for, parent, certificate);

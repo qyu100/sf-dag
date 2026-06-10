@@ -7,7 +7,7 @@ use crypto::{Digest, PublicKey};
 use std::collections::{HashMap, HashSet};
 
 pub struct EchoAggregationResult {
-    pub optimistic: Option<(Digest, Vec<Option<Box<[u8]>>>)>,
+    pub optimistic: Option<(Digest, Vec<Option<Box<[u8]>>>, Stake, usize)>,
 }
 
 pub struct EchoAggregator {
@@ -49,16 +49,18 @@ impl EchoAggregator {
 
         let optimistic =
             if !self.optimistic_emitted.contains(&root) && *w >= committee.optimistic_threshold() {
+                let collected_weight = *w;
                 self.optimistic_emitted.insert(root.clone());
                 self.weights.remove(&root);
                 let author_map = self.echos.remove(&root).expect("author_map exists");
+                let collected_count = author_map.len();
                 let mut owned_map = author_map;
                 let leaf_values = committee
                     .sorted_keys
                     .iter()
                     .map(|pk| owned_map.remove(pk).map(|p| p.into_value()))
                     .collect();
-                Some((root, leaf_values))
+                Some((root, leaf_values, collected_weight, collected_count))
             } else {
                 None
             };
