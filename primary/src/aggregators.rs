@@ -122,7 +122,7 @@ impl CutVoteAggregator {
         ensure!(self.used.insert(author), DagError::AuthorityReuse(author));
         self.voters.push(author);
         self.weight += committee.stake(&author);
-        if self.weight >= committee.optimistic_threshold() {
+        if self.weight >= committee.quorum_threshold() {
             self.weight = 0;
             return Ok(Some(CutCertificate {
                 round: vote.round,
