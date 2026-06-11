@@ -39,25 +39,25 @@ class CommandMaker:
 
 
     @staticmethod
-    def run_primary(edkeys,blskeys, committee, store, parameters, debug=False):
+    def run_primary(edkeys, blskeys, committee, store, parameters, debug=False):
         assert isinstance(edkeys, str)
         assert isinstance(blskeys, str)
         assert isinstance(committee, str)
         assert isinstance(parameters, str)
         assert isinstance(debug, bool)
         v = '-vvv' if debug else '-vv'
-        return (f'./node {v} run --edkeys {edkeys} --blskeys {blskeys} --committee {committee} '
+        return (f'./node {v} run --edkeys {edkeys} --committee {committee} '
                 f'--store {store} --parameters {parameters} primary')
 
     @staticmethod
-    def run_worker(edkeys, blskeys,committee, store, parameters, id, debug=False):
+    def run_worker(edkeys, blskeys, committee, store, parameters, id, debug=False):
         assert isinstance(edkeys, str)
         assert isinstance(blskeys, str)
         assert isinstance(committee, str)
         assert isinstance(parameters, str)
         assert isinstance(debug, bool)
         v = '-vvv' if debug else '-vv'
-        return (f'./node {v} run --edkeys {edkeys} --blskeys {blskeys} --committee {committee} '
+        return (f'./node {v} run --edkeys {edkeys} --committee {committee} '
                 f'--store {store} --parameters {parameters} worker --id {id}')
 
     @staticmethod

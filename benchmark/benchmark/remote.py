@@ -821,7 +821,7 @@ class Bench:
                         ))
                 
                     except (subprocess.SubprocessError, ParseError) as e:
-                        self._kill(hosts_to_connections=self.hosts_to_connections)
+                        await self._kill(hosts_to_connections=self.hosts_to_connections)
                         Print.error(BenchError('Benchmark failed', e))
                         continue
                     finally:
