@@ -35,7 +35,7 @@ impl VoteAggregator {
         let threshold = if use_block_threshold {
             committee.block_threshold()
         } else {
-            committee.optimistic_threshold()
+            committee.quorum_threshold()
         };
 
         if self.weight >= threshold {
