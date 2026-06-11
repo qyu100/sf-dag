@@ -235,7 +235,7 @@ impl Core {
             .extend(handlers);
 
         #[cfg(feature = "benchmark")]
-        info!(
+        debug!(
             "BENCH event=timeout_sent round={} node={:?}",
             timeout.round, timeout.author
         );
@@ -282,7 +282,7 @@ impl Core {
             .extend(handlers);
 
         #[cfg(feature = "benchmark")]
-        info!(
+        debug!(
             "BENCH event=timeout_accept_sent round={} node={:?}",
             accept.round, accept.author
         );
@@ -350,7 +350,7 @@ impl Core {
                 .is_none()
             {
                 #[cfg(feature = "benchmark")]
-                info!(
+                debug!(
                     "BENCH event=timeout_cert round={} node={:?}",
                     round, self.name
                 );
@@ -402,7 +402,7 @@ impl Core {
 
         self.timeout_proposer_hints_sent.insert(timeout_round);
         #[cfg(feature = "benchmark")]
-        info!(
+        debug!(
             "BENCH event=timeout_parent_hint node={:?} timeout_round={} propose_round={} parent_hint_round={} parent_digest={:?} parent_origin={:?}",
             self.name,
             timeout_round,
@@ -530,7 +530,7 @@ impl Core {
         let start = Instant::now();
         let recipient_count = self.committee.sorted_keys.len().saturating_sub(1);
 
-        info!(
+        debug!(
             "BENCH event=own_header_ready node={:?} round={} digest={:?} build_total_ms={} recipients={}",
             self.name,
             result.round,
@@ -567,7 +567,7 @@ impl Core {
                 _ => unreachable!(),
             }
         }
-        info!(
+        debug!(
             "BENCH event=own_header_sent node={:?} round={} digest={:?} build_total_ms={} send_ms={} recipients={}",
             self.name,
             result.round,
@@ -594,7 +594,7 @@ impl Core {
         if first_seen {
             self.processing_header_proofs
                 .insert(header_info_with_proof.id, header_info_with_proof.clone());
-            info!(
+            debug!(
                 "BENCH event=header_first_seen node={:?} round={} digest={:?} origin={:?} parent={:?} source={} proof_index={} payload_bytes={}",
                 self.name,
                 header_info_with_proof.round,
@@ -630,7 +630,7 @@ impl Core {
             .pending_reconstructions
             .remove(&header_info_with_proof.id)
         {
-            info!(
+            debug!(
                 "BENCH event=header_unblocks_reconstruction node={:?} round={} digest={:?} origin={:?} root={:?}",
                 self.name,
                 header_info_with_proof.round,
@@ -833,7 +833,7 @@ impl Core {
             origin,
         };
         #[cfg(feature = "benchmark")]
-        info!(
+        debug!(
             "BENCH event=fallback_parent_hint node={:?} propose_round={} parent_round={} parent_digest={:?} parent_origin={:?} timeout_round={}",
             self.name,
             propose_round,
@@ -872,7 +872,7 @@ impl Core {
             .entry(round)
             .or_insert_with(Vec::new)
             .push(handler);
-        info!(
+        debug!(
             "BENCH event=header_sync_request node={:?} round={} digest={:?} origin={:?} target={:?} source=reconstruction_pending_header",
             self.name,
             round,
@@ -908,7 +908,7 @@ impl Core {
                 .entry(round)
                 .or_insert_with(Vec::new)
                 .extend(handlers);
-            info!(
+            debug!(
                 "BENCH event=echo_sent node={:?} round={} digest={:?} origin={:?} proof_index={} recipients={}",
                 self.name,
                 round,
@@ -1056,7 +1056,7 @@ impl Core {
                 if let Some((root, mut leaf_values, collected_weight, collected_count)) = agg_result
                 {
                     let header_seen = self.processing_header_proofs.contains_key(&id);
-                    info!(
+                    debug!(
                         "BENCH event=echo_quorum node={:?} round={} digest={:?} origin={:?} root={:?} collected={} weight={} threshold={} header_seen={}",
                         self.name,
                         round,
@@ -1161,7 +1161,7 @@ impl Core {
         let (header_id, round, origin) = match self.processing_header_proofs.get(&result.id) {
             Some(h) => (h.id, h.round, h.author),
             None => {
-                info!(
+                debug!(
                     "BENCH event=reconstruction_pending_header node={:?} round={} digest={:?} origin={:?} root={:?}",
                     self.name,
                     result.round,
