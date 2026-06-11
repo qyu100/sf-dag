@@ -41,6 +41,20 @@ pub enum PrimaryMessage {
     TimeoutAccept(TimeoutAccept),
 }
 
+/// Borrowing variant of `PrimaryMessage` for zero-copy serialization.
+/// Variant order must match `PrimaryMessage` exactly so bincode produces the
+/// same wire format.
+#[derive(Serialize)]
+#[allow(dead_code)]
+pub(crate) enum PrimaryMessageRef<'a> {
+    Timeout(&'a Timeout),
+    Echo(&'a Echo),
+    CertificatesRequest(&'a Vec<Digest>, &'a PublicKey),
+    HeaderInfoWithProof(&'a HeaderInfoWithProof),
+    Decide(&'a Decide),
+    TimeoutAccept(&'a TimeoutAccept),
+}
+
 pub enum ConsensusMessage {
     HeaderInfo(HeaderInfo),
     Certificate(Certificate),

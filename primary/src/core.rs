@@ -9,7 +9,7 @@ use crate::messages::{
     Certificate, Decide, Echo, Header, HeaderInfoWithProof, ProposerParent, Timeout, TimeoutAccept,
     TimeoutCert,
 };
-use crate::primary::{PrimaryMessage, Round};
+use crate::primary::{PrimaryMessage, PrimaryMessageRef, Round};
 use crate::synchronizer::Synchronizer;
 use crate::{ConsensusMessage, HeaderInfo};
 use async_recursion::async_recursion;
@@ -901,14 +901,9 @@ impl Core {
                 .collect::<Vec<_>>();
             let recipient_count = addresses.len();
 
-            let echo_bytes = bincode::serialize(&echo).expect("Failed to serialize our own echo");
-            let mut message = Vec::with_capacity(4 + echo_bytes.len());
-            message.extend_from_slice(&1u32.to_le_bytes());
-            message.extend_from_slice(&echo_bytes);
-            let handlers = self
-                .network
-                .broadcast(addresses, Bytes::from(message))
-                .await;
+            let bytes = bincode::serialize(&PrimaryMessageRef::Echo(&echo))
+                .expect("Failed to serialize our own echo");
+            let handlers = self.network.broadcast(addresses, Bytes::from(bytes)).await;
             self.cancel_handlers
                 .entry(round)
                 .or_insert_with(Vec::new)
@@ -972,6 +967,14 @@ impl Core {
         let round = certificate.round;
         if round <= 1 {
             return false;
+        }
+
+        if self.certified_timed_out.is_empty() {
+            if self.certificates.contains_key(&(round - 1)) {
+                return false;
+            }
+            self.defer_certificate_until_round(certificate, round - 1);
+            return true;
         }
 
         let Some((_, parent_digest)) = self.parent_info.get(&certificate.header_id).cloned() else {
