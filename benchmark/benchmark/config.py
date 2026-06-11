@@ -273,6 +273,10 @@ class BenchParameters:
             self.runs = int(json['runs']) if 'runs' in json else 1
 
             self.burst = json['burst']
+
+            self.crash_node_id = int(json.get('crash_node_id', 0))
+            self.crash_on_proposal = int(json.get('crash_on_proposal', 0))
+            self.crash_zone = str(json.get('crash_zone', ''))
             
         except KeyError as e:
             raise ConfigError(f'Malformed bench parameters: missing key {e}')

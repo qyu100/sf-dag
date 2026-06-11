@@ -12,6 +12,7 @@ from shutil import move
 from time import sleep
 from math import ceil
 from copy import deepcopy
+from itertools import zip_longest
 import subprocess
 from subprocess import SubprocessError
 import traceback
@@ -258,18 +259,48 @@ class Bench:
         await self._gather_and_parse(tasks, 'Kill')
 
     def _select_hosts(self, bench_parameters):
+        def ordered_hosts_by_zone(hosts):
+            zones = [zone for zone in self.settings.zones if zone in hosts]
+            zones += sorted(zone for zone in hosts.keys() if zone not in zones)
+            return OrderedDict((zone, sorted(hosts[zone])) for zone in zones)
+
+        def pin_crash_zone(selected, hosts_by_zone):
+            if int(getattr(bench_parameters, 'crash_on_proposal', 0)) <= 0:
+                return selected
+            crash_zone = getattr(bench_parameters, 'crash_zone', '')
+            if not crash_zone:
+                return selected
+            if crash_zone not in hosts_by_zone or not hosts_by_zone[crash_zone]:
+                Print.warn(f'Crash zone {crash_zone} has no available host')
+                return []
+
+            crash_node_id = int(getattr(bench_parameters, 'crash_node_id', 0))
+            if crash_node_id >= max(bench_parameters.nodes):
+                Print.warn(f'Crash node id {crash_node_id} is outside the selected node set')
+                return []
+
+            crash_host = hosts_by_zone[crash_zone][0]
+            selected = [host for host in selected if host != crash_host]
+            selected.insert(crash_node_id, crash_host)
+            Print.info(
+                f'Runtime crash node {crash_node_id} pinned to zone {crash_zone}: {crash_host}'
+            )
+            pinned = selected
+            return pinned
+
         # Collocate the primary and its workers on the same machine.
         if bench_parameters.collocate:
             nodes = max(bench_parameters.nodes)
 
             # Ensure there are enough hosts.
-            hosts = self.manager.hosts()
+            hosts = ordered_hosts_by_zone(self.manager.hosts())
             if sum(len(x) for x in hosts.values()) < nodes:
                 return []
 
             # Select the hosts in different data centers.
-            ordered = zip(*hosts.values())
-            ordered = [x for y in ordered for x in y]
+            ordered = zip_longest(*hosts.values())
+            ordered = [x for y in ordered for x in y if x is not None]
+            ordered = pin_crash_zone(ordered, hosts)
             return ordered[:nodes]
 
         # Spawn the primary and each worker on a different machine. Each
@@ -278,7 +309,7 @@ class Bench:
             primaries = max(bench_parameters.nodes)
 
             # Ensure there are enough hosts.
-            hosts = self.manager.hosts()
+            hosts = ordered_hosts_by_zone(self.manager.hosts())
             if len(hosts.keys()) < primaries:
                 return []
             for ips in hosts.values():
@@ -287,7 +318,22 @@ class Bench:
 
             # Ensure the primary and its workers are in the same region.
             selected = []
-            for region in list(hosts.keys())[:primaries]:
+            zones = list(hosts.keys())
+            crash_zone = getattr(bench_parameters, 'crash_zone', '')
+            if crash_zone and int(getattr(bench_parameters, 'crash_on_proposal', 0)) > 0:
+                if crash_zone not in hosts:
+                    Print.warn(f'Crash zone {crash_zone} has no available host')
+                    return []
+                crash_node_id = int(getattr(bench_parameters, 'crash_node_id', 0))
+                if crash_node_id >= primaries:
+                    Print.warn(f'Crash node id {crash_node_id} is outside the selected node set')
+                    return []
+                zones = [zone for zone in zones if zone != crash_zone]
+                zones.insert(crash_node_id, crash_zone)
+                Print.info(
+                    f'Runtime crash node {crash_node_id} pinned to zone {crash_zone}: {hosts[crash_zone][0]}'
+                )
+            for region in zones[:primaries]:
                 ips = list(hosts[region])[:bench_parameters.workers + 1]
                 selected.append(ips)
             return selected
