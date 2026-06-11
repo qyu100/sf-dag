@@ -10,7 +10,7 @@ from benchmark.instance import InstanceManager
 from benchmark.remote import Bench, BenchError
 
 
-DEFAULT_RECOVERY_WINDOW = 4
+DEFAULT_RECOVERY_WINDOW = 1
 
 
 @task
@@ -121,7 +121,7 @@ def install(ctx):
 
 
 @task
-def remote(ctx, burst = 50, consensus_only=True, debug=False, header_size=4_000_000, crash_on_proposal=4):
+def remote(ctx, burst = 50, consensus_only=True, debug=False, header_size=128_000, crash_on_proposal=10):
     ''' Run benchmarks on AWS '''
     bench_params = {
         'faults': 1,
@@ -130,7 +130,7 @@ def remote(ctx, burst = 50, consensus_only=True, debug=False, header_size=4_000_
         'co-locate': True,
         'rate': [240_000],
         'tx_size': 512,
-        'duration': 30,
+        'duration': 60,
         'runs': 1,
         # Unused
         'simulate_partition': True,
@@ -189,7 +189,7 @@ def plot(ctx):
 
 
 @task
-def recovery(ctx, directory='logs', committee='.committee.json', window=DEFAULT_RECOVERY_WINDOW, step=0.2, before=10.0, after=20.0, full=True, output='cut-recovery-tps', label='Lionfish-Cut'):
+def recovery(ctx, directory='logs', committee='.committee.json', window=DEFAULT_RECOVERY_WINDOW, step=0.2, before=10.0, after=20.0, full=True, output='cut-recovery-tps', label='Opt-Mempool-Simple-IT'):
     ''' Plot sliding-window TPS over the full experiment by default. '''
     try:
         result = RecoveryPlotter(
@@ -204,8 +204,8 @@ def recovery(ctx, directory='logs', committee='.committee.json', window=DEFAULT_
             label=label,
         ).run()
         Print.info(
-            f"Recovery plot anchored at crash round {result['anchor_round']} "
-            f"for crashed node {result['faulty_author']}"
+            f"Recovery plot anchored at fault round {result['anchor_round']} "
+            f"for fault-injected node {result['faulty_author']}"
         )
         Print.info(f"CSV: {result['csv']}")
         Print.info(f"Plots: {', '.join(result['plots'])}")

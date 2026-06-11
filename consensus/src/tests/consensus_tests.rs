@@ -23,6 +23,7 @@ pub fn mock_committee() -> Committee {
                 (
                     *id,
                     Authority {
+                        node_id: None,
                         stake: 1,
                         consensus: ConsensusAddresses {
                             consensus_to_consensus: "0.0.0.0:0".parse().unwrap(),

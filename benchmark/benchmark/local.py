@@ -80,7 +80,7 @@ class LocalBench:
 
             names = [x.name for x in keys]
             self.node_parameters.set_crash_author(names)
-            committee_faults = 0 if self.node_parameters.has_runtime_crash() else self.bench_parameters.faults
+            committee_faults = 0 if self.node_parameters.has_runtime_failure() else self.bench_parameters.faults
             committee = LocalCommittee(names, self.BASE_PORT, self.workers, committee_faults, [])
             committee.print(PathMaker.committee_file())
 
@@ -126,7 +126,7 @@ class LocalBench:
                 return LogParser.process(
                     PathMaker.logs_path(),
                     burst,
-                    faults=committee_faults,
+                    faults=self.bench_parameters.faults,
                     consensus_only=consensus_only,
                 )
             except ParseError as e:

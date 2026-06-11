@@ -28,7 +28,6 @@ use network::{CancelHandler, ReliableSender};
 //use tokio::time::error::Elapsed;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::pin::Pin;
-use std::process;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -477,7 +476,7 @@ impl Core {
                         .expect("Failed to serialize cut certificate");
                 let handlers = self.network.broadcast(addresses, Bytes::from(bytes)).await;
                 self.consensus_cancel_handlers
-                    .entry(vote.round)
+                    .entry(certificate.round)
                     .or_default()
                     .extend(handlers);
                 self.process_cut_certificate(certificate).await?;
@@ -551,6 +550,38 @@ impl Core {
 
             self.try_commit_round(round).await;
         }
+        Ok(())
+    }
+
+    async fn retry_pending_cut_proposals(&mut self) -> DagResult<()> {
+        if self.pending_cut_children.is_empty() {
+            return Ok(());
+        }
+
+        let pending = std::mem::take(&mut self.pending_cut_children);
+        let mut still_pending = HashMap::with_capacity(pending.len());
+        let mut ready = Vec::new();
+
+        for (parent_cut, proposals) in pending {
+            let mut deferred = Vec::new();
+            for proposal in proposals {
+                if self.safe_cut_parent(proposal.round, &proposal.parent_cut) {
+                    ready.push(proposal);
+                } else {
+                    deferred.push(proposal);
+                }
+            }
+            if !deferred.is_empty() {
+                still_pending.insert(parent_cut, deferred);
+            }
+        }
+
+        self.pending_cut_children = still_pending;
+
+        for proposal in ready {
+            self.process_cut_proposal(proposal).await?;
+        }
+
         Ok(())
     }
 
@@ -666,7 +697,7 @@ impl Core {
                 .entry(round)
                 .or_default()
                 .extend(handlers);
-            let _ = self.process_decide(decide);
+            self.process_decide(decide).await?;
         }
 
         self.try_propose_cut_for_current_round().await?;
@@ -760,7 +791,9 @@ impl Core {
             return Ok(());
         }
         self.cut_proposal_count += 1;
-        self.maybe_permanent_crash(round, "cut");
+        if self.maybe_skip_cut_proposal(round, "cut") {
+            return Ok(());
+        }
 
         debug!("Proposing cut for round {}", round);
         let proposal = self.make_cut_proposal(round, self.highest_certified_cut.clone());
@@ -783,22 +816,22 @@ impl Core {
         Ok(())
     }
 
-    fn maybe_permanent_crash(&mut self, round: u64, source: &'static str) {
+    fn maybe_skip_cut_proposal(&mut self, round: u64, source: &'static str) -> bool {
         if self.crash_triggered
             || self.crash_on_proposal == 0
             || self.crash_author != Some(self.name)
             || self.cut_proposal_count != self.crash_on_proposal
         {
-            return;
+            return false;
         }
 
         self.crash_triggered = true;
         info!(
-            "BENCH event=crash_start node={:?} round={} proposal_index={} duration_ms={} source={} permanent=true",
+            "BENCH event=proposal_skip node={:?} round={} proposal_index={} duration_ms={} source={} one_shot=true",
             self.name, round, self.cut_proposal_count, self.crash_duration, source
         );
         log::logger().flush();
-        process::exit(0);
+        true
     }
 
     fn schedule_cut_timer(&mut self, round: u64) {
@@ -968,10 +1001,11 @@ impl Core {
             timeout_cert.verify(&self.committee)?;
             if self.certified_timed_out.insert(round) {
                 debug!("Certified timeout for cut round {}", round);
-                debug!(
+                info!(
                     "BENCH event=timeout_cert round={} node={:?}",
                     round, self.name
                 );
+                self.retry_pending_cut_proposals().await?;
                 if self.advance_timed_out_cut_rounds() {
                     self.try_propose_cut_for_current_round().await?;
                     self.schedule_cut_timer(self.cut_round);

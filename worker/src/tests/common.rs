@@ -50,6 +50,7 @@ pub fn committee() -> Committee {
                 (
                     *id,
                     Authority {
+                        node_id: None,
                         stake: 1,
                         consensus,
                         primary,

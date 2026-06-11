@@ -252,14 +252,17 @@ class NodeParameters:
 
         self.json = json
 
-    def has_runtime_crash(self):
+    def has_runtime_failure(self):
         return int(self.json.get('crash_on_proposal', 0)) > 0
 
+    def has_runtime_crash(self):
+        return self.has_runtime_failure()
+
     def has_transient_crash(self):
-        return self.has_runtime_crash()
+        return self.has_runtime_failure()
 
     def set_crash_author(self, names):
-        if not self.has_runtime_crash() or self.json.get('crash_author'):
+        if not self.has_runtime_failure() or self.json.get('crash_author'):
             return
         crash_node_id = int(self.json.get('crash_node_id', 0))
         if crash_node_id < 0 or crash_node_id >= len(names):

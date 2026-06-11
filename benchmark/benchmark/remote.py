@@ -23,6 +23,7 @@ import asyncio, asyncssh
 
 STATUS_FAILURE=25
 STATUS_SUCCESS=0
+CRASH_ZONE = 'europe-west1-b'
 
 
 class ExecutionError(Exception):
@@ -250,20 +251,19 @@ class Bench:
             hosts = OrderedDict((region, list(ips)) for region, ips in hosts.items())
             faulty_hosts = []
             if faults:
-                fault_region, region_hosts = next(
-                    ((region, ips) for region, ips in hosts.items() if len(ips) >= faults),
-                    (None, None)
-                )
-                if fault_region is None:
-                    Print.warn(f'Cannot place {faults} faulty node(s) in one region')
+                region_hosts = hosts.get(CRASH_ZONE, [])
+                if len(region_hosts) < faults:
+                    Print.warn(
+                        f'Cannot place {faults} fault-injected node(s) in {CRASH_ZONE}'
+                    )
                     return []
                 faulty_hosts = region_hosts[:faults]
                 Print.info(
-                    f'Faulty node(s) pinned to region {fault_region}: {", ".join(faulty_hosts)}'
+                    f'Fault-injected node(s) pinned to region {CRASH_ZONE}: {", ".join(faulty_hosts)}'
                 )
 
-            # Select across data centers, but put faulty hosts first so node ids
-            # 0..faults-1 all belong to the same region and remain crashed.
+            # Select across data centers, but put fault-injected hosts first so
+            # node ids 0..faults-1 all belong to the configured crash zone.
             ordered = zip(*hosts.values())
             ordered = [x for y in ordered for x in y]
             selected = faulty_hosts + [x for x in ordered if x not in set(faulty_hosts)]
@@ -368,7 +368,7 @@ class Bench:
             addresses = OrderedDict(
                 (x, y) for x, y in zip(names, hosts)
             )
-        committee_faults = 0 if node_parameters.has_runtime_crash() else bench_parameters.faults
+        committee_faults = 0 if node_parameters.has_runtime_failure() else bench_parameters.faults
         committee = Committee.from_address_list(addresses, self.settings.base_port, committee_faults)
         committee.print(PathMaker.committee_file())
         node_parameters.print(PathMaker.parameters_file())
@@ -451,7 +451,7 @@ class Bench:
         # hosts = committee.ips()
         await self._kill(hosts_to_connections=hosts_to_connections, delete_logs=True)
 
-        # Run all primaries. Runtime-crash experiments start the faulty node and let it exit later.
+        # Run all primaries. Runtime fault-injection experiments start the target node too.
         primaries = self._run_primaries(committee, hosts_to_connections, committee.faults(), debug)
         await primaries
         
@@ -623,7 +623,7 @@ class Bench:
                             rate, burst, committee_copy, bench_parameters, self.hosts_to_connections, debug, consensus_only
                         )
 
-                        faults = committee.faults()
+                        faults = bench_parameters.faults
                         await self._download_logs(consensus_only, committee=committee)
                         Print.info('Parsing logs and computing performance...')
                         logger = LogParser.process(PathMaker.logs_path(), burst, faults=faults, consensus_only=consensus_only)

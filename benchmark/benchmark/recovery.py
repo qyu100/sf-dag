@@ -46,7 +46,7 @@ def finish_recovery_plot():
     plt.ylim(bottom=0)
     plt.grid(True, linestyle='--')
     plt.legend(
-        loc='lower right',
+        loc='upper left',
         prop={'weight': 'bold', 'size': 24},
         columnspacing=1.5,
         handletextpad=0.6,
@@ -179,7 +179,7 @@ class RecoveryPlotter:
             )
 
             tmp = findall(
-                r'\[([^\]\s]+Z) .* BENCH event=crash_start node=([^ ]+) round=(\d+) proposal_index=(\d+) duration_ms=(\d+) source=([^ \n]+)',
+                r'\[([^\]\s]+Z) .* BENCH event=(?:crash_start|proposal_skip) node=([^ ]+) round=(\d+) proposal_index=(\d+) duration_ms=(\d+) source=([^ \n]+)',
                 log,
             )
             crash_starts.extend(
@@ -320,7 +320,7 @@ class RecoveryPlotter:
             color='black',
             linestyle='--',
             linewidth=3,
-            label='Crashed leader',
+            label='Skipped leader',
         )
 
         finish_recovery_plot()
