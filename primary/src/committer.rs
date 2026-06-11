@@ -10,10 +10,9 @@ use crate::{Certificate, Header, Height};
 use config::Committee;
 use crypto::Hash as _;
 use crypto::{Digest, PublicKey};
-use log::{debug, info, warn};
+use log::info;
 use std::borrow::BorrowMut;
-use std::collections::{HashMap, HashSet};
-use std::time::Instant;
+use std::collections::HashMap;
 use store::Store;
 use tokio::sync::mpsc::{Receiver, Sender};
 
@@ -31,8 +30,6 @@ struct State {
     log: HashMap<Slot, ConsensusMessage>,
     // Commits deferred until the referenced certificates arrive.
     pending_commits: HashMap<Slot, ConsensusMessage>,
-    // Commit rounds for which we have already logged the first defer reason.
-    logged_deferred_commits: HashSet<Slot>,
 }
 
 impl State {
@@ -47,7 +44,6 @@ impl State {
             dag: [(0, genesis)].iter().cloned().collect(),
             log: HashMap::new(),
             pending_commits: HashMap::new(),
-            logged_deferred_commits: HashSet::new(),
         }
     }
 }
@@ -100,10 +96,6 @@ impl Committer {
         round: Slot,
         proposals: &HashMap<PublicKey, crate::messages::Proposal>,
     ) -> crate::error::DagResult<()> {
-        let started_at = Instant::now();
-        let mut emitted_headers = 0usize;
-        let mut max_author_gap = 0u64;
-
         for (pk, proposal) in proposals {
             let has_matching_certificate = state
                 .dag
@@ -113,32 +105,11 @@ impl Committer {
                 .unwrap_or(false);
 
             if !has_matching_certificate {
-                if state.logged_deferred_commits.insert(round) {
-                    info!(
-                        "BENCH event=cut_commit_deferred round={} missing_author={} missing_height={} missing_header={:?} tips={}",
-                        round,
-                        pk,
-                        proposal.height,
-                        proposal.header_digest,
-                        proposals.len()
-                    );
-                    warn!(
-                        "Commit blocked: missing/mismatched certificate for author {} at height {}",
-                        pk, proposal.height
-                    );
-                } else {
-                    debug!(
-                        "Commit round {} still blocked by missing/mismatched certificate for author {} at height {}",
-                        round, pk, proposal.height
-                    );
-                }
                 return Err(DagError::MalformedHeader(proposal.header_digest.clone()));
             }
 
             let stop_height = *state.last_executed_heights.get(pk).unwrap_or(&0);
-            max_author_gap = max_author_gap.max(proposal.height.saturating_sub(stop_height));
             if proposal.height <= stop_height {
-                debug!("skipping this proposal because it's too old");
                 continue;
             }
 
@@ -152,21 +123,10 @@ impl Committer {
             }
 
             for header in headers {
-                emitted_headers += 1;
                 info!("Committed {:?} ", header.id);
-                if let Err(e) = self.tx_output.send(header).await {
-                    debug!("Failed to send block through the output channel: {}", e);
-                }
+                let _ = self.tx_output.send(header).await;
             }
         }
-        info!(
-            "BENCH event=cut_commit_batch round={} tips={} emitted_headers={} max_author_gap={} elapsed_ms={}",
-            round,
-            proposals.len(),
-            emitted_headers,
-            max_author_gap,
-            started_at.elapsed().as_millis()
-        );
         Ok(())
     }
 
@@ -178,7 +138,6 @@ impl Committer {
         match commit_message {
             ConsensusMessage::Commit { round, proposals } => {
                 if state.log.contains_key(&round) {
-                    debug!("Already processed commit event {}", round);
                     return;
                 }
                 match self
@@ -194,8 +153,7 @@ impl Committer {
                             },
                         );
                     }
-                    Err(e) => {
-                        warn!("Commit round {} deferred: {}", round, e);
+                    Err(_) => {
                         state.pending_commits.insert(
                             round,
                             ConsensusMessage::Commit {

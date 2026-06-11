@@ -9,7 +9,6 @@ use crate::messages::{Certificate, ConsensusMessage, Header, HeaderInfo, Proposa
 use config::Committee;
 use crypto::Hash as _;
 use crypto::{Digest, PublicKey};
-use log::debug;
 use std::collections::{HashMap, HashSet};
 use store::Store;
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -68,13 +67,23 @@ impl Synchronizer {
     /// Returns the proposals of a consensus message if we have them all. If at least one parent is missing,
     /// we return an empty vector, synchronize with other nodes, and re-schedule processing
     /// of the header for when we will have all the parents.
-    pub async fn get_proposals(&mut self, consensus_message: &ConsensusMessage, delivered_header: &Header) -> DagResult<Vec<Header>> { 
+    pub async fn get_proposals(
+        &mut self,
+        consensus_message: &ConsensusMessage,
+        delivered_header: &Header,
+    ) -> DagResult<Vec<Header>> {
         let mut missing = Vec::new();
         let mut proposals_vector = Vec::new();
         //println!("getting proposals");
 
         match consensus_message {
-            ConsensusMessage::Prepare { slot: _, view: _, tc: _, qc_ticket: _, proposals } => {
+            ConsensusMessage::Prepare {
+                slot: _,
+                view: _,
+                tc: _,
+                qc_ticket: _,
+                proposals,
+            } => {
                 for (pk, proposal) in proposals {
                     //println!("proposal inside prepare");
 
@@ -93,27 +102,33 @@ impl Synchronizer {
                             //println!("in some case");
                             proposals_vector.push(bincode::deserialize(&header)?);
                             //println!("after adding to proposal vector");
-                        },
+                        }
                         None => missing.push(proposal.clone()),
                     }
                 }
-            },
-            ConsensusMessage::Confirm { slot: _, view: _, qc: _, proposals } => {
+            }
+            ConsensusMessage::Confirm {
+                slot: _,
+                view: _,
+                qc: _,
+                proposals,
+            } => {
                 for (pk, proposal) in proposals {
-
                     if proposal.header_digest == self.genesis_headers.get(&pk).unwrap().digest() {
                         proposals_vector.push(self.genesis_headers.get(&pk).unwrap().clone());
                         continue;
                     }
-
 
                     match self.store.read(proposal.header_digest.to_vec()).await? {
                         Some(header) => proposals_vector.push(bincode::deserialize(&header)?),
                         None => missing.push(proposal.clone()),
                     }
                 }
-            },
-            ConsensusMessage::Commit { round: _, proposals } => {
+            }
+            ConsensusMessage::Commit {
+                round: _,
+                proposals,
+            } => {
                 for (pk, proposal) in proposals {
                     if proposal.height == 0 {
                         continue;
@@ -128,18 +143,13 @@ impl Synchronizer {
                         None => missing.push(proposal.clone()),
                     }
                 }
-            },
+            }
         }
 
         if missing.is_empty() {
-            //println!("Have all proposals");
-            debug!("have all proposals and their ancestors");
             return Ok(proposals_vector);
         }
 
-        //println!("sending to header waiter");
-        debug!("Triggering sync for proposals");
-        debug!("missing proposals are {:?}", missing);
         self.tx_header_waiter
             .send(WaiterMessage::SyncProposals(
                 missing,
@@ -229,13 +239,8 @@ impl Synchronizer {
 
         // NOTE: Before calling, must check if proposal is ready, assumes that proposal is ready
         // before calling
-        debug!("proposal height is {:?}", proposal.height);
         let proposal_digest = proposal.header_digest.clone();
         let Some(mut header) = self.get_header(proposal_digest.clone()).await? else {
-            debug!(
-                "proposal header {} missing, trigger sync",
-                proposal_digest
-            );
             self.fetch_header(proposal_digest.clone()).await?;
             return Err(DagError::MalformedHeader(proposal_digest));
         };
@@ -243,14 +248,12 @@ impl Synchronizer {
         // Otherwise we have the header and all of its ancestors
         let mut current_height = proposal.height;
         while current_height > stop_height {
-            debug!("current height is {:?}, stop height is {:?}", current_height, stop_height);
             let parent_digest = header.parent.clone();
             if current_height == stop_height + 1 {
                 ancestors.push(header);
                 break;
             }
             let Some(parent_header) = self.get_parent_header(&header).await? else {
-                debug!("parent header {} missing, trigger sync", parent_digest);
                 self.fetch_header(parent_digest.clone()).await?;
                 return Err(DagError::MalformedHeader(parent_digest));
             };
@@ -281,10 +284,14 @@ impl Synchronizer {
         match self.store.read(parent_digest.to_vec()).await? {
             Some(bytes) => Ok(Some(parent_digest)),
             None => {
-                let bytes = bincode::serialize(header).expect("Failed to serialize suspended header");
+                let bytes =
+                    bincode::serialize(header).expect("Failed to serialize suspended header");
                 self.store.write(header.id.to_vec(), bytes).await;
                 self.tx_header_waiter
-                    .send(WaiterMessage::SyncParent(parent_digest, HeaderInfo::from_header(header)))
+                    .send(WaiterMessage::SyncParent(
+                        parent_digest,
+                        HeaderInfo::from_header(header),
+                    ))
                     .await
                     .expect("Failed to send sync parent request");
                 Ok(None)
@@ -296,18 +303,10 @@ impl Synchronizer {
         self.get_header(header.parent.clone()).await
     }
 
-
     pub async fn get_header(&mut self, header_digest: Digest) -> DagResult<Option<Header>> {
         match self.store.read(header_digest.to_vec()).await? {
-            Some(bytes) => {
-                debug!("get_header: in the store");
-                Ok(Some(bincode::deserialize(&bytes)?))
-            },
-            None => {
-                debug!("get_header not in the store");
-                Ok(None)
-            }
+            Some(bytes) => Ok(Some(bincode::deserialize(&bytes)?)),
+            None => Ok(None),
         }
     }
-
 }

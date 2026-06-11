@@ -22,7 +22,7 @@ use bytes::Bytes;
 use config::{Committee, Parameters, WorkerId};
 use crypto::{Digest, PublicKey, SignatureService};
 use futures::sink::SinkExt as _;
-use log::{debug, info};
+use log::info;
 use network::{MessageHandler, Receiver as NetworkReceiver, Writer};
 use serde::{Deserialize, Serialize};
 use std::error::Error;
@@ -142,10 +142,6 @@ impl Primary {
                 tx_header_requests,
             },
         );
-        debug!(
-            "Primary {} listening to primary messages on {}",
-            name, address
-        );
 
         // Spawn the network receiver listening to messages from our workers.
         let mut address = committee
@@ -160,10 +156,6 @@ impl Primary {
                 tx_our_digests,
                 tx_others_digests,
             },
-        );
-        debug!(
-            "Primary {} listening to workers messages on {}",
-            name, address
         );
 
         // The `Synchronizer` provides auxiliary methods helping to `Core` to sync.

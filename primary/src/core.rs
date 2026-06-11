@@ -19,11 +19,11 @@ use bytes::Bytes;
 use config::Committee;
 use core::panic;
 use crypto::Hash as _;
-use crypto::{Digest, PublicKey, SignatureService};
+use crypto::{Digest, PublicKey};
 use futures::stream::FuturesUnordered;
 use futures::Future;
 use futures::StreamExt;
-use log::{debug, error, info, warn};
+use log::{error, info, warn};
 use network::{CancelHandler, ReliableSender};
 //use tokio::time::error::Elapsed;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
@@ -323,9 +323,8 @@ impl Core {
         });
     }
 
-    async fn process_own_header(&mut self, mut header: Header) -> DagResult<()> {
+    async fn process_own_header(&mut self, header: Header) -> DagResult<()> {
         //println!("Received own header");
-        debug!("Processing own header {:?}", header);
 
         // Indicate that we haven't sent a cert yet for this header
         self.sent_cert_to_proposer = false;
@@ -361,17 +360,12 @@ impl Core {
 
     #[async_recursion]
     async fn process_header(&mut self, header: Header, sync: bool) -> DagResult<()> {
-        debug!("Processing Header:  {:?}", header);
-        debug!("Processing the header with height {:?}", header.height);
-
         if header.height != 1 {
             if self.synchronizer.get_parent(&header).await?.is_none() {
-                debug!("Processing of {} suspended: missing parent", header.id);
                 return Ok(());
             }
 
             let Some(parent) = self.synchronizer.get_parent_header(&header).await? else {
-                debug!("Processing of {} suspended: missing parent", header.id);
                 return Ok(());
             };
 
@@ -400,7 +394,6 @@ impl Core {
                     height: header.height(),
                 },
             );
-            debug!("updating tip");
         }
         if self
             .last_voted
@@ -431,8 +424,6 @@ impl Core {
     }
 
     async fn process_vote(&mut self, vote: Vote) -> DagResult<()> {
-        debug!("Processing vote: {:?}", vote);
-
         if !self.processing_vote_aggregators.contains_key(&vote.id) {
             self.processing_vote_aggregators
                 .entry(vote.id.clone())
@@ -487,7 +478,6 @@ impl Core {
     }
 
     async fn process_cut_proposal(&mut self, proposal: CutProposal) -> DagResult<()> {
-        debug!("Processing cut proposal: {:?}", proposal);
         let mut queue = VecDeque::from([proposal]);
         while let Some(proposal) = queue.pop_front() {
             proposal.verify(&self.committee)?;
@@ -590,7 +580,6 @@ impl Core {
         // Ensure we have all the ancestor of this certificate yet. If we don't, the synchronizer will gather it and trigger re-processing of this certificate.
         // let t_deliver = Instant::now();
         // Keep the latest certified tip per lane. Lionfish cut proposals are built from this map.
-        debug!("Processing certificate: {:?}", certificate);
         self.current_certified_tips.insert(
             certificate.origin(),
             Proposal {
@@ -600,16 +589,11 @@ impl Core {
         );
 
         // Feed committer with certificates so commit decisions are backed by certified headers.
-        if let Err(e) = self.tx_committer_cert.send(certificate.clone()).await {
-            debug!("Failed to send certificate to committer cache: {}", e);
-        }
+        let _ = self.tx_committer_cert.send(certificate.clone()).await;
 
         // Store the certificate.
-        // let t_store = Instant::now();
         // let bytes = bincode::serialize(&certificate).expect("Failed to serialize certificate");
         // self.store.write(certificate.digest().to_vec(), bytes).await;
-        // debug!("certificate length: {}", bytes.len());
-        // debug!("store certificate time: {:?}", t_store.elapsed());
 
         // Send it to the `Proposer`.
         if certificate.origin() == self.name {
@@ -660,9 +644,6 @@ impl Core {
     //         if self.committed_cuts.insert(cut_id.clone()) {
     //             if let Some(round) = self.cut_round_by_id.get(&cut_id).cloned() {
     //                 self.last_committed_cut_round = self.last_committed_cut_round.max(round);
-    //                 debug!("Committed cut {} at round {}", cut_id, round);
-    //             } else {
-    //                 debug!("Committed cut {}", cut_id);
     //             }
     //         }
     //     }
@@ -751,7 +732,6 @@ impl Core {
         }
 
         let Some(cut) = self.cut_proposals.get(cut_id) else {
-            debug!("No cut proposal found for round {} cut {}", round, cut_id);
             return;
         };
 
@@ -763,11 +743,7 @@ impl Core {
 
         let commit_msg = ConsensusMessage::Commit { round, proposals };
 
-        if let Err(e) = self.tx_committer.send(commit_msg).await {
-            debug!(
-                "Failed to send commit to committer for round {}: {}",
-                round, e
-            );
+        if self.tx_committer.send(commit_msg).await.is_err() {
             return;
         }
 
@@ -781,10 +757,6 @@ impl Core {
             return Ok(());
         }
         if !self.safe_cut_parent(round, &self.highest_certified_cut) {
-            debug!(
-                "Deferring cut proposal for round {} until the parent cut chain is safe",
-                round
-            );
             return Ok(());
         }
         if !self.proposed_cut_rounds.insert(round) {
@@ -795,7 +767,6 @@ impl Core {
             return Ok(());
         }
 
-        debug!("Proposing cut for round {}", round);
         let proposal = self.make_cut_proposal(round, self.highest_certified_cut.clone());
 
         let addresses = self
@@ -1000,11 +971,6 @@ impl Core {
         if let Some(timeout_cert) = timeout_cert {
             timeout_cert.verify(&self.committee)?;
             if self.certified_timed_out.insert(round) {
-                debug!("Certified timeout for cut round {}", round);
-                info!(
-                    "BENCH event=timeout_cert round={} node={:?}",
-                    round, self.name
-                );
                 self.retry_pending_cut_proposals().await?;
                 if self.advance_timed_out_cut_rounds() {
                     self.try_propose_cut_for_current_round().await?;
@@ -1108,7 +1074,6 @@ impl Core {
         // Initialize current proposals with the genesis tips
         self.current_proposal_tips = Header::genesis_proposals(&self.committee);
         self.current_certified_tips = Header::genesis_proposals(&self.committee);
-        debug!("genesis tips are {:?}", self.current_proposal_tips);
 
         // Initiate the proposer with a genesis parent
         let genesis_cert = Certificate::genesis_certs(&self.committee)
@@ -1172,8 +1137,7 @@ impl Core {
                         // External Consensus implementation: Receive Consensus Requests (Prep/Confirm/Commit) or Votes (Prep-Vote/Confirm-Ack)
                         PrimaryMessage::ConsensusRequest(consensus_req) => self.process_consensus_request(consensus_req).await,
                         PrimaryMessage::ConsensusVote(consensus_vote) => self.process_consensus_vote(consensus_vote, false).await,
-                        _ => { debug!("Received unexpected message: {:?}", message);
-                            panic!("Unexpected core message")}
+                        _ => panic!("Unexpected core message")
                     }
                 },
 
@@ -1188,7 +1152,6 @@ impl Core {
                 // We receive here loopback headers from the `HeaderWaiter`. Those are headers for which we interrupted
                 // execution (we were missing some of their dependencies) and we are now ready to resume processing.
                 Some(header) = self.rx_header_waiter.recv() => {
-                    debug!("normal loopback for header");
                     self.process_header_loopback(header).await
                 },
 
@@ -1209,9 +1172,9 @@ impl Core {
                     error!("{}", e);
                     panic!("Storage failure: killing node.");
                 }
-                Err(e @ DagError::HeaderTooOld(..)) => debug!("{}", e),
-                Err(e @ DagError::VoteTooOld(..)) => debug!("{}", e),
-                Err(e @ DagError::CertificateTooOld(..)) => debug!("{}", e),
+                Err(DagError::HeaderTooOld(..)) => (),
+                Err(DagError::VoteTooOld(..)) => (),
+                Err(DagError::CertificateTooOld(..)) => (),
                 Err(e) => warn!("{}", e),
             }
 
@@ -1236,7 +1199,6 @@ impl Core {
                 self.certified_timed_out.retain(|r| r >= &gc_round);
                 self.scheduled_cut_timers.retain(|r| r >= &gc_round);
                 self.gc_round = gc_round;
-                debug!("GC round moved to {}", self.gc_round);
             }
         }
     }

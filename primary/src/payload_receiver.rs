@@ -1,7 +1,6 @@
 // Copyright(C) Facebook, Inc. and its affiliates.
 use config::WorkerId;
 use crypto::Digest;
-use log::debug;
 use store::Store;
 use tokio::sync::mpsc::Receiver;
 
@@ -23,10 +22,8 @@ impl PayloadReceiver {
 
     async fn run(&mut self) {
         while let Some((digest, worker_id)) = self.rx_workers.recv().await {
-            debug!("Receive Digest: {}", digest);
             let key = [digest.as_ref(), &worker_id.to_le_bytes()].concat();
             self.store.write(key.to_vec(), Vec::default()).await;
-            debug!("Wrote Digest: {}", digest);
         }
     }
 }

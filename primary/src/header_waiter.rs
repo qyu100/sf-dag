@@ -3,7 +3,7 @@
 #![allow(unused_imports)]
 // Copyright(C) Facebook, Inc. and its affiliates.
 use crate::error::{DagError, DagResult};
-use crate::messages::{ConsensusMessage, Header, HeaderInfo, Proposal, proposal_digest};
+use crate::messages::{proposal_digest, ConsensusMessage, Header, HeaderInfo, Proposal};
 use crate::primary::{Height, PrimaryMessage, PrimaryWorkerMessage};
 use bytes::Bytes;
 use config::{Committee, WorkerId};
@@ -11,7 +11,7 @@ use crypto::{Digest, Hash, PublicKey};
 use futures::future::try_join_all;
 use futures::stream::futures_unordered::FuturesUnordered;
 use futures::stream::StreamExt as _;
-use log::{debug, error};
+use log::error;
 use network::SimpleSender;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -132,7 +132,6 @@ impl HeaderWaiter {
         }
     }
 
-
     async fn proposal_waiter(
         mut missing: Vec<(Vec<u8>, Store)>,
         deliver: (ConsensusMessage, HeaderInfo),
@@ -163,7 +162,6 @@ impl HeaderWaiter {
                 Some(message) = self.rx_synchronizer.recv() => {
                     match message {
                         WaiterMessage::SyncBatches(missing, header, force_sync) => {
-                            debug!("Synching the payload of {}", header);
                             let header_id = header.id.clone();
                             let round = header.height;
                             let author = header.author;
@@ -201,7 +199,6 @@ impl HeaderWaiter {
                                         .worker(&self.name, &worker_id)
                                         .expect("Author of valid header is not in the committee")
                                         .primary_to_worker;
-                                    debug!("Sent syncbatches message for height {}", round);
                                     let message = PrimaryWorkerMessage::Synchronize(digests, author);
                                     let bytes = bincode::serialize(&message)
                                         .expect("Failed to serialize batch sync request");
@@ -211,8 +208,6 @@ impl HeaderWaiter {
                         }
 
                         WaiterMessage::SyncHeader(missing) => {
-                            debug!("Syncing on header with digest {}", missing);
-
                             let now = SystemTime::now()
                             .duration_since(UNIX_EPOCH)
                             .expect("Failed to measure time")
@@ -238,7 +233,6 @@ impl HeaderWaiter {
                         }
 
                         WaiterMessage::SyncParent(missing, header) => {
-                            debug!("Synching the parents of {}", header);
                             let header_id = header.id.clone();
                             let height = header.height;
                             let author = header.author;
@@ -335,7 +329,6 @@ impl HeaderWaiter {
 
                 Some(result) = waiting.next() => match result {
                     Ok(Some(header)) => {
-                        debug!("Finished synching {:?}", header);
                         let _ = self.pending.remove(&header.id);
                         // for x in header.payload.keys() {
                         //     let _ = self.batch_requests.remove(x);
@@ -371,7 +364,7 @@ impl HeaderWaiter {
                         for (_, prop) in possibly_missing.iter() {
                             let _ = self.parent_requests.remove(&prop.header_digest);
                         }
-                     
+
                         self.tx_consensus_loopback.send(deliver).await.expect("Failed to send header");
                     },
                     Ok(None) => {
@@ -395,7 +388,6 @@ impl HeaderWaiter {
                     let mut retry = Vec::new();
                     for (digest, (_, timestamp)) in &self.parent_requests {
                         if timestamp + (self.sync_retry_delay as u128) < now {
-                            debug!("Requesting sync for certificate {} (retry)", digest);
                             retry.push(digest.clone());
                         }
                     }
