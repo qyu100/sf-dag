@@ -2,6 +2,9 @@ node
 benchmark_client
 results
 plots
+.committee.json
+.parameters.json
+.node-*.json
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

@@ -54,7 +54,12 @@ class LocalBench:
 
             # Recompile the latest code.
             cmd = CommandMaker.compile().split()
-            subprocess.run(cmd, check=True, cwd=PathMaker.node_crate_path())
+            subprocess.run(
+                cmd,
+                check=True,
+                cwd=PathMaker.node_crate_path(),
+                env=CommandMaker.compile_env()
+            )
 
             # Create alias for the client and nodes binary.
             cmd = CommandMaker.alias_binaries(PathMaker.binary_path())

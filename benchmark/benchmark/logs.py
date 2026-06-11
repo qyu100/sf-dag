@@ -54,9 +54,18 @@ class LogParser:
         
         proposals, commits, self.configs, primary_ips, leader_commits, non_leader_commits, self.received_samples, sizes = zip(*results)
         self.proposals = self._merge_results([x.items() for x in proposals])
-        self.commits = self._merge_results([x.items() for x in commits])
-        self.leader_commits = self._merge_results([x.items() for x in leader_commits])
-        self.non_leader_commits = self._merge_results([x.items() for x in non_leader_commits])
+        first_commits = self._merge_results([x.items() for x in commits])
+        first_leader_commits = self._merge_results([x.items() for x in leader_commits])
+        first_non_leader_commits = self._merge_results([x.items() for x in non_leader_commits])
+        self.commits = self._half_results_by_digest([x.items() for x in commits]) or first_commits
+        self.leader_commits = (
+            self._half_results_by_digest([x.items() for x in leader_commits])
+            or first_leader_commits
+        )
+        self.non_leader_commits = (
+            self._half_results_by_digest([x.items() for x in non_leader_commits])
+            or first_non_leader_commits
+        )
 
         self.sizes = {
             k: v for x in sizes for k, v in x.items() if k in self.commits
@@ -88,6 +97,30 @@ class LogParser:
                 if not k in merged or merged[k] > v:
                     merged[k] = v
         return merged
+
+    def _half_results_by_digest(self, input):
+        # Keep the timestamp at which at least half of the committee committed each block.
+        merged = {}
+        filtered = {}
+
+        for node_results in input:
+            for digest, timestamp in node_results:
+                merged.setdefault(digest, []).append(timestamp)
+
+        try:
+            half_commit_index = max(0, (int(self.committee_size) + 1) // 2 - 1)
+        except (TypeError, ValueError):
+            half_commit_index = None
+
+        for digest, timestamps in merged.items():
+            sorted_timestamps = sorted(timestamps)
+            index = half_commit_index
+            if index is None:
+                index = max(0, (len(sorted_timestamps) + 1) // 2 - 1)
+            if len(sorted_timestamps) > index:
+                filtered[digest] = sorted_timestamps[index]
+
+        return filtered
 
     def _parse_clients(self, log):
         if search(r'Error', log) is not None:
@@ -216,17 +249,17 @@ class LogParser:
         return txns/d
 
     def _consensus_latency(self):
-        latency = [c - self.proposals[d] for d, c in self.commits.items()]
+        latency = [c - self.proposals[d] for d, c in self.commits.items() if d in self.proposals]
         return mean(latency) if latency else 0
 
     def _consensus_leader_latency(self):
         latency = [c - self.proposals[d]
-                   for d, c in self.leader_commits.items()]
+                   for d, c in self.leader_commits.items() if d in self.proposals]
         return mean(latency) if latency else 0
 
     def _consensus_non_leader_latency(self):
         latency = [c - self.proposals[d]
-                   for d, c in self.non_leader_commits.items()]
+                   for d, c in self.non_leader_commits.items() if d in self.proposals]
         return mean(latency) if latency else 0
 
     def _end_to_end_throughput(self):
@@ -314,6 +347,7 @@ class LogParser:
                 f' Consensus BLPS: {round(blps_first):,} Block/s\n'
                 f' Consensus TPS: {round(consensus_tps):,} tx/s\n'
                 f' Consensus latency: {round(consensus_latency):,} ms\n'
+                f' Consensus commit threshold: 50% committee\n'
                 f' Consensus leader latency: {round(leader_consensus_latency):,} ms\n'
                 f' Consensus non leader latency: {round(non_leader_consensus_latency):,} ms\n'
                 '-----------------------------------------\n'
@@ -345,6 +379,7 @@ class LogParser:
                 f' Consensus TPS: {round(consensus_tps):,} tx/s\n'
                 f' Consensus BPS: {round(consensus_bps):,} B/s\n'
                 f' Consensus latency: {round(consensus_latency):,} ms\n'
+                f' Consensus commit threshold: 50% committee\n'
                 f' Consensus leader latency: {round(leader_consensus_latency):,} ms\n'
                 f' Consensus non leader latency: {round(non_leader_consensus_latency):,} ms\n'
                 '\n'
