@@ -8,7 +8,6 @@ use log::info;
 use log::{debug, warn};
 use std::cmp::Ordering;
 use std::convert::TryInto;
-use std::process;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::time::{sleep, Duration, Instant};
 
@@ -112,7 +111,20 @@ impl Proposer {
             .expect("Failed to send timeout");
     }
 
-    async fn make_header(&mut self) {
+    async fn make_header(&mut self) -> bool {
+        self.proposal_count += 1;
+        if self.crash_on_proposal > 0
+            && self.proposal_count == self.crash_on_proposal
+            && self.committee.node_id(&self.name) == Some(self.crash_node_id)
+        {
+            #[cfg(feature = "benchmark")]
+            info!(
+                "BENCH event=proposal_skipped node={:?} node_id={} round={} proposal_count={}",
+                self.name, self.crash_node_id, self.round, self.proposal_count
+            );
+            return false;
+        }
+
         // Make a new header.
         let limit = if self.txns.len() * self.tx_size <= self.header_size {
             self.txns.len()
@@ -128,19 +140,6 @@ impl Proposer {
         }
 
         let parent = self.last_parent.pop().expect("no parent available");
-
-        self.proposal_count += 1;
-        if self.crash_on_proposal > 0
-            && self.proposal_count == self.crash_on_proposal
-            && self.committee.node_id(&self.name) == Some(self.crash_node_id)
-        {
-            #[cfg(feature = "benchmark")]
-            info!(
-                "BENCH event=crash_time node={:?} node_id={} round={} proposal_count={}",
-                self.name, self.crash_node_id, self.round, self.proposal_count
-            );
-            process::exit(0);
-        }
 
         let header = Header::new(self.name, self.round, payload, parent.header_id).await;
 
@@ -174,6 +173,7 @@ impl Proposer {
             .send(header)
             .await
             .expect("Failed to send header");
+        true
     }
 
     /// Main loop listening to incoming messages.
@@ -208,8 +208,9 @@ impl Proposer {
 
                 // Make a new header.
                 if is_next_leader {
-                    self.make_header().await;
-                    self.payload_size = 0;
+                    if self.make_header().await {
+                        self.payload_size = 0;
+                    }
                 }
                 // Require a fresh parent notification before advancing again.
                 advance = false;

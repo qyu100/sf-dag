@@ -107,7 +107,7 @@ def install(ctx):
 
 
 @task
-def remote(ctx, burst=50, debug=False, consensus_only=True, header_size=10_000_000, faults=1, f_num=3, crash_node_id=0, crash_on_proposal=6):
+def remote(ctx, burst=50, debug=False, consensus_only=True, header_size=10_000_000, faults=1, f_num=3, crash_node_id=0, crash_on_proposal=6, crash_zone='europe-west1-b'):
     ''' Run benchmarks on GCP '''
     faults = int(faults)
     f_num = int(f_num)
@@ -123,6 +123,9 @@ def remote(ctx, burst=50, debug=False, consensus_only=True, header_size=10_000_0
         'duration': 60,
         'runs': 1,
         'burst' : [burst],
+        'crash_node_id': crash_node_id,
+        'crash_on_proposal': crash_on_proposal,
+        'crash_zone': crash_zone,
     }
 
     nodes = bench_params['nodes']

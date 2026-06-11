@@ -46,7 +46,7 @@ class RecoveryPlotter:
         proposals = self._parse_proposals(logs)
         commits_by_digest = self._parse_commits(logs)
         sizes = self._parse_sizes(logs)
-        crash_time = self._parse_crash_time(logs)
+        crash_time = self._parse_fault_time(logs)
 
         if not commits_by_digest:
             raise RecoveryError('No committed blocks found in logs')
@@ -66,7 +66,7 @@ class RecoveryPlotter:
         return (
             f'Recovery plot written to {pdf_file} and {png_file}\n'
             f'Recovery data written to {csv_file}\n'
-            f'Crash time: {"n/a" if crash_offset is None else f"{crash_offset:.3f} s"}\n'
+            f'Fault time: {"n/a" if crash_offset is None else f"{crash_offset:.3f} s"}\n'
             f'Window: {self.window:.3f} s, step: {self.step:.3f} s'
         )
 
@@ -115,12 +115,14 @@ class RecoveryPlotter:
                 sizes[digest] = int(size)
         return sizes
 
-    def _parse_crash_time(self, logs):
-        crashes = []
+    def _parse_fault_time(self, logs):
+        faults = []
         for log in logs:
-            for timestamp in findall(r'\[(.*Z) .* BENCH event=(?:crash|crash_time) ', log):
-                crashes.append(self._to_posix(timestamp))
-        return min(crashes) if crashes else None
+            for timestamp in findall(
+                r'\[(.*Z) .* BENCH event=(?:crash|crash_time|proposal_skipped) ', log
+            ):
+                faults.append(self._to_posix(timestamp))
+        return min(faults) if faults else None
 
     def _half_commit_events(self, commits_by_digest, sizes, tx_size, primary_count):
         half_index = max(0, (primary_count + 1) // 2 - 1)
@@ -187,7 +189,7 @@ class RecoveryPlotter:
                 color='black',
                 linestyle='--',
                 linewidth=3,
-                label='Crashed Leader',
+                label='Skipped Proposal',
             )
 
         plt.xlabel('Time (s)', fontsize=26, fontweight='bold')

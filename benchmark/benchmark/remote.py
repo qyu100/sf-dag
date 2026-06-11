@@ -283,7 +283,7 @@ class Bench:
             selected = [host for host in selected if host != crash_host]
             selected.insert(crash_node_id, crash_host)
             Print.info(
-                f'Runtime crash node {crash_node_id} pinned to zone {crash_zone}: {crash_host}'
+                f'Runtime proposal-skip node {crash_node_id} pinned to zone {crash_zone}: {crash_host}'
             )
             pinned = selected
             return pinned
@@ -331,7 +331,7 @@ class Bench:
                 zones = [zone for zone in zones if zone != crash_zone]
                 zones.insert(crash_node_id, crash_zone)
                 Print.info(
-                    f'Runtime crash node {crash_node_id} pinned to zone {crash_zone}: {hosts[crash_zone][0]}'
+                    f'Runtime proposal-skip node {crash_node_id} pinned to zone {crash_zone}: {hosts[crash_zone][0]}'
                 )
             for region in zones[:primaries]:
                 ips = list(hosts[region])[:bench_parameters.workers + 1]
